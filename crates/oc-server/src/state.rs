@@ -2,9 +2,11 @@
 //!
 //! store / providers / tools / scheduler 等随里程碑加入。
 
+use std::sync::Arc;
+
 use dashmap::DashMap;
-use oc_proto::{Event, IdemKey, MethodOk};
-use tokio::sync::broadcast;
+use oc_proto::{ApprovalId, Event, IdemKey, MethodOk};
+use tokio::sync::{broadcast, oneshot};
 
 use crate::session::SessionHandle;
 
@@ -14,6 +16,9 @@ pub struct CachedRes {
     pub ok: MethodOk,
 }
 
+/// 待处理审批注册表（可与审批处理器共享）。
+pub type ApprovalRegistry = Arc<DashMap<ApprovalId, oneshot::Sender<bool>>>;
+
 pub struct ServerState {
     /// 事件广播源。每个连接 `subscribe()` 得到独立接收端。
     event_tx: broadcast::Sender<Event>,
@@ -21,14 +26,28 @@ pub struct ServerState {
     idem: DashMap<IdemKey, CachedRes>,
     /// 主会话车道句柄。
     session: SessionHandle,
+    /// 待处理审批注册表（与审批处理器共享）。
+    approvals: ApprovalRegistry,
 }
 
 impl ServerState {
-    pub fn new(event_tx: broadcast::Sender<Event>, session: SessionHandle) -> Self {
+    pub fn new(
+        event_tx: broadcast::Sender<Event>,
+        session: SessionHandle,
+        approvals: ApprovalRegistry,
+    ) -> Self {
         Self {
             event_tx,
             idem: DashMap::new(),
             session,
+            approvals,
+        }
+    }
+
+    /// 收到审批回执，唤醒等待方。
+    pub fn resolve_approval(&self, id: &ApprovalId, allow: bool) {
+        if let Some((_, tx)) = self.approvals.remove(id) {
+            let _ = tx.send(allow);
         }
     }
 

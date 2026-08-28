@@ -47,6 +47,10 @@ string_id!(ToolCallId);
 string_id!(CronId);
 string_id!(TaskId);
 string_id!(MemoryId);
+string_id!(
+    /// 一次审批请求的 id，用于配对审批回执。
+    ApprovalId
+);
 
 impl SessionId {
     /// 主会话固定 id。

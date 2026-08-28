@@ -10,20 +10,71 @@ use std::sync::Arc;
 
 use oc_llm::ToolSpec as LlmToolSpec;
 use oc_proto::{Event, RunId, ToolCallId, ToolPhase, ToolStatus};
-use oc_tools::types::ToolCtx;
+use oc_tools::types::{ApprovalGate, ApprovalReply, ToolCtx};
 use oc_tools::{ToolError, ToolRegistry};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+
+/// 审批处理器：run driver 注入，把工具的审批请求转成 client 交互。
+#[async_trait::async_trait]
+pub trait ApprovalHandler: Send + Sync {
+    /// 请求用户审批一个命令。返回是否批准。
+    async fn request(&self, run_id: &RunId, summary: &str, command: &str) -> bool;
+}
+
+/// 基于事件流的审批处理器：发 `Approval` 事件给 client，等 `approval.reply` 回执。
+pub struct EventApprovalHandler {
+    events: broadcast::Sender<Event>,
+    registry: crate::state::ApprovalRegistry,
+}
+
+impl EventApprovalHandler {
+    pub fn new(events: broadcast::Sender<Event>, registry: crate::state::ApprovalRegistry) -> Self {
+        Self { events, registry }
+    }
+}
+
+#[async_trait::async_trait]
+impl ApprovalHandler for EventApprovalHandler {
+    async fn request(&self, run_id: &RunId, summary: &str, command: &str) -> bool {
+        let approval_id = oc_proto::ApprovalId::new(uuid::Uuid::now_v7().to_string());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.registry.insert(approval_id.clone(), tx);
+
+        let _ = self.events.send(Event::Approval {
+            approval_id: approval_id.clone(),
+            run_id: run_id.clone(),
+            summary: summary.to_string(),
+            command: command.to_string(),
+        });
+
+        // 等回执；通道断开（client 掉线）视为拒绝（保守）。
+        match rx.await {
+            Ok(allow) => allow,
+            Err(_) => {
+                self.registry.remove(&approval_id);
+                false
+            }
+        }
+    }
+}
 
 /// run driver 用的工具执行器。
 #[derive(Clone)]
 pub struct ToolExecutor {
     registry: Arc<ToolRegistry>,
+    approval: Option<Arc<dyn ApprovalHandler>>,
 }
 
 impl ToolExecutor {
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
-        Self { registry }
+        Self { registry, approval: None }
+    }
+
+    /// 注入审批处理器（交互式审批）。
+    pub fn with_approval(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
+        self.approval = Some(handler);
+        self
     }
 
     /// 供 prompt/请求用的工具规格（转成 oc-llm 的 ToolSpec）。
@@ -74,16 +125,39 @@ impl ToolExecutor {
         });
 
         let policy = tool.policy();
+
+        // 审批门：若注入了 handler，建 ApprovalGate 并起后台任务把请求转给 handler。
+        let (approval_gate, approval_pump) = if let Some(handler) = &self.approval {
+            let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel();
+            let handler = Arc::clone(handler);
+            let rid = run_id.clone();
+            let pump = tokio::spawn(async move {
+                while let Some(r) = req_rx.recv().await {
+                    let oc_tools::types::ApprovalRequest { summary, command, reply } = r;
+                    let allow = handler.request(&rid, &summary, &command).await;
+                    let _ = reply.send(if allow {
+                        ApprovalReply::Allow
+                    } else {
+                        ApprovalReply::Deny
+                    });
+                }
+            });
+            (Some(ApprovalGate { request: req_tx }), Some(pump))
+        } else {
+            (None, None)
+        };
+
         let cx = ToolCtx {
             cancel: cancel.clone(),
             emit: emit_tx,
-            // M4 首版：审批门在 exec 工具内部用 ApprovalMode 处理（config 派生）。
-            // 交互式审批（弹给 client）在后续补丁接入。
-            approval: None,
+            approval: approval_gate,
         };
 
         let result = tokio::time::timeout(policy.timeout, tool.invoke(args_val, cx)).await;
         pump.abort();
+        if let Some(p) = approval_pump {
+            p.abort();
+        }
 
         match result {
             Ok(Ok(output)) => {

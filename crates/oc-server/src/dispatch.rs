@@ -25,6 +25,10 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
         Method::Connect(p) => handle_connect(p),
         Method::ChatSend(p) => handle_chat_send(p, state).await,
         Method::ChatAbort(p) => handle_chat_abort(p, state).await,
+        Method::ApprovalReply(p) => {
+            state.resolve_approval(&p.approval_id, p.allow);
+            Ok(MethodOk::Empty)
+        }
         Method::SessionReset => Ok(MethodOk::Empty),
         Method::Status => Ok(MethodOk::Status(snapshot())),
         Method::Health => Ok(MethodOk::Health(oc_proto::HealthOk {

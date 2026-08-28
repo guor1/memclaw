@@ -103,6 +103,63 @@ async fn model_calls_tool_then_completes() {
 }
 
 #[tokio::test]
+async fn dangerous_command_triggers_approval_then_runs() {
+    use oc_server::tools_bridge::EventApprovalHandler;
+    use std::sync::Arc as StdArc;
+
+    let (tx, mut rx) = broadcast::channel(512);
+
+    // Prompt 模式 + 交互式审批处理器。
+    let mut reg = ToolRegistry::new();
+    reg.register(StdArc::new(ExecTool::new(ApprovalMode::Prompt, Duration::from_secs(10))));
+    let registry: oc_server::state::ApprovalRegistry = StdArc::new(dashmap::DashMap::new());
+    let handler = StdArc::new(EventApprovalHandler::new(tx.clone(), StdArc::clone(&registry)));
+    let executor = ToolExecutor::new(StdArc::new(reg)).with_approval(handler);
+
+    let cfg = SessionConfig {
+        model: "mock".into(),
+        system_prompt: None,
+        idle_timeout: Duration::from_secs(5),
+        run_timeout: None,
+        queue_cap: 8,
+        tools: Some(executor),
+    };
+
+    // 危险命令：sudo（会判 NeedsApproval）。审批放行后进入执行。
+    let scripts = vec![
+        tool_call_step("call-danger", "exec", "{\"command\": \"sudo echo hi\"}"),
+        text_step("完成"),
+    ];
+    let provider = StdArc::new(SequencedMock::new(scripts));
+    let handle = session::spawn(cfg, provider, tx);
+
+    let _run = handle.submit("执行危险命令".into()).await.expect("run");
+
+    // 后台监听 Approval 事件并放行。
+    let reg2 = StdArc::clone(&registry);
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(Event::Approval { approval_id, .. })) => {
+                    if let Some((_, tx)) = reg2.remove(&approval_id) {
+                        let _ = tx.send(true); // 放行
+                    }
+                    break;
+                }
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+    });
+
+    // 等待运行结束（放行后应正常完成）。
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // 断言：审批注册表已清空（说明审批被消费）。
+    assert!(registry.is_empty(), "审批应已被消费");
+}
+
+#[tokio::test]
 async fn loop_detection_breaks_repeated_tool_calls() {
     let (tx, mut rx) = broadcast::channel(512);
     // 模型每轮都请求同一个工具调用（相同参数）→ 应被 loop detection 打断。

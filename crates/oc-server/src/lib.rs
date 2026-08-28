@@ -39,8 +39,22 @@ pub async fn serve_with(
     heartbeat_interval: Duration,
 ) -> ServerResult<()> {
     let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAP);
+
+    // 审批注册表：EventApprovalHandler 与 ServerState 共享。
+    let approvals: state::ApprovalRegistry = Arc::new(dashmap::DashMap::new());
+
+    // 若配置了工具，注入交互式审批处理器。
+    let mut session_cfg = session_cfg;
+    if let Some(tools) = session_cfg.tools.take() {
+        let handler = Arc::new(tools_bridge::EventApprovalHandler::new(
+            event_tx.clone(),
+            Arc::clone(&approvals),
+        ));
+        session_cfg.tools = Some(tools.with_approval(handler));
+    }
+
     let session = session::spawn(session_cfg, provider, event_tx.clone());
-    let state = Arc::new(ServerState::new(event_tx, session));
+    let state = Arc::new(ServerState::new(event_tx, session, approvals));
 
     // 心跳 tick 底座（M3：占位回调；M4/M5 挂扫描/dreaming）。
     let shutdown = CancellationToken::new();

@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{RunId, TaskId, ToolCallId};
+use crate::ids::{ApprovalId, RunId, TaskId, ToolCallId};
 use crate::method::TaskState;
 
 /// 服务端主动推送的事件。`tag = "event"`。
@@ -28,6 +28,14 @@ pub enum Event {
     },
     /// 后台任务进展/完成。
     Task { task_id: TaskId, update: TaskUpdate },
+    /// ★审批请求：server 请求用户批准一个动作（如危险命令）。
+    /// client 收到后应向用户展示，并用 `approval.reply` 方法回执。
+    Approval {
+        approval_id: ApprovalId,
+        run_id: RunId,
+        summary: String,
+        command: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

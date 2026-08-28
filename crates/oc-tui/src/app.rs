@@ -36,6 +36,8 @@ pub struct App {
     connected: bool,
     next_req: u64,
     should_quit: bool,
+    /// 待处理审批 id（非 None 时输入区进入 y/n 审批模式）。
+    pending_approval: Option<oc_proto::ApprovalId>,
 }
 
 impl App {
@@ -60,6 +62,7 @@ impl App {
             connected: false,
             next_req: 1,
             should_quit: false,
+            pending_approval: None,
         };
         // 等 hello。
         if let Some(Frame::Res(res)) = app.client.recv().await? {
@@ -118,6 +121,22 @@ impl App {
     }
 
     async fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Result<()> {
+        // 审批模式：y/n 优先处理（Ctrl-C 仍可退出）。
+        if self.pending_approval.is_some()
+            && !(matches!(code, KeyCode::Char('c')) && mods.contains(KeyModifiers::CONTROL))
+        {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.reply_approval(true).await?;
+                    return Ok(());
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.reply_approval(false).await?;
+                    return Ok(());
+                }
+                _ => return Ok(()), // 审批期间忽略其它输入
+            }
+        }
         match code {
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
@@ -138,6 +157,29 @@ impl App {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    async fn reply_approval(&mut self, allow: bool) -> Result<()> {
+        let Some(id) = self.pending_approval.take() else {
+            return Ok(());
+        };
+        let req_id = format!("appr-{}", self.next_req);
+        self.next_req += 1;
+        let req = Req {
+            id: ReqId::new(req_id),
+            method: Method::ApprovalReply(oc_proto::ApprovalReplyParams {
+                approval_id: id,
+                allow,
+            }),
+            idempotency_key: None,
+        };
+        self.client.send(&Frame::Req(req)).await?;
+        self.msgs.push(Msg {
+            who: "系统",
+            text: if allow { "已批准".into() } else { "已拒绝".into() },
+        });
+        self.status = "已连接".to_string();
         Ok(())
     }
 
@@ -185,7 +227,33 @@ impl App {
                     self.msgs.push(Msg { who: "主动提醒", text });
                 }
             }
-            Event::Tool { .. } | Event::Task { .. } => {}
+            Event::Tool { phase, .. } => match phase {
+                oc_proto::ToolPhase::Start { name, args_preview } => {
+                    self.msgs.push(Msg {
+                        who: "工具",
+                        text: format!("{name}: {args_preview}"),
+                    });
+                }
+                oc_proto::ToolPhase::Update { chunk } => {
+                    if let Some(last) = self.msgs.last_mut() {
+                        if last.who == "工具" {
+                            last.text.push_str(&chunk);
+                            return;
+                        }
+                    }
+                    self.msgs.push(Msg { who: "工具", text: chunk });
+                }
+                oc_proto::ToolPhase::End { .. } => {}
+            },
+            Event::Approval { approval_id, summary, command, .. } => {
+                self.msgs.push(Msg {
+                    who: "审批",
+                    text: format!("{summary}\n  命令: {command}\n  批准执行？(y/n)"),
+                });
+                self.pending_approval = Some(approval_id);
+                self.status = "等待审批：按 y 批准 / n 拒绝".to_string();
+            }
+            Event::Task { .. } => {}
         }
     }
 
@@ -208,6 +276,8 @@ impl App {
                     "你" => Color::Cyan,
                     "助手" => Color::Green,
                     "主动提醒" => Color::Yellow,
+                    "审批" => Color::Red,
+                    "工具" => Color::Magenta,
                     _ => Color::DarkGray,
                 };
                 Line::from(vec![

@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{CronId, MemoryId, RunId, SessionId, TaskId};
+use crate::ids::{ApprovalId, CronId, MemoryId, RunId, SessionId, TaskId};
 
 /// 请求方法。`tag = "method", content = "params"`。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -27,6 +27,8 @@ pub enum Method {
     TasksCancel(TaskCancelParams),
     /// 记忆检索（调试/自省）。
     MemorySearch(MemSearchParams),
+    /// 审批回执：对 `Approval` 事件的应答。
+    ApprovalReply(ApprovalReplyParams),
     Status,
     Health,
 }
@@ -101,6 +103,13 @@ pub struct MemSearchParams {
     pub query: String,
     #[serde(default)]
     pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalReplyParams {
+    pub approval_id: ApprovalId,
+    /// true = 批准，false = 拒绝。
+    pub allow: bool,
 }
 
 // ── 返回体 ──────────────────────────────────────────────────────
