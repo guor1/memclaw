@@ -4,6 +4,8 @@ members = [
     "crates/oc-proto",
     "crates/oc-core",
     "crates/oc-store",
+    "crates/oc-server",
+    "crates/oc-tui",
     "crates/oc-cli",
 ]
 
@@ -15,9 +17,10 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 # 内部 crate
-oc-proto = { path = "crates/oc-proto" }
-oc-core  = { path = "crates/oc-core" }
-oc-store = { path = "crates/oc-store" }
+oc-proto  = { path = "crates/oc-proto" }
+oc-core   = { path = "crates/oc-core" }
+oc-store  = { path = "crates/oc-store" }
+oc-server = { path = "crates/oc-server" }
 
 # 外部（版本由各 crate 通过 cargo add 解析后回填到此处）
 
