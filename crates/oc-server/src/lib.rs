@@ -38,6 +38,7 @@ pub async fn serve_with(
     provider: Arc<dyn Provider>,
     session_cfg: SessionConfig,
     heartbeat_interval: Duration,
+    store: oc_store::Store,
 ) -> ServerResult<()> {
     let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAP);
 
@@ -66,8 +67,8 @@ pub async fn serve_with(
         session_cfg.tools = Some(tools.with_approval(handler));
     }
 
-    let session = session::spawn(session_cfg, provider, event_tx.clone());
-    let state = Arc::new(ServerState::new(event_tx, session, approvals, ledger));
+    let session = session::spawn(session_cfg, provider, event_tx.clone(), store.clone());
+    let state = Arc::new(ServerState::new(event_tx, session, approvals, ledger, store));
 
     // 心跳 tick：M4 挂卡死诊断扫描（M5 再挂 dreaming）。
     let shutdown = CancellationToken::new();

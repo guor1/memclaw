@@ -41,6 +41,10 @@ pub struct RunCtx {
     pub run_timeout: Option<Duration>,
     /// 工具执行器（None = 无工具，纯对话）。
     pub tools: Option<ToolExecutor>,
+    /// 持久化句柄（落库 assistant/tool 消息）。
+    pub store: oc_store::Store,
+    /// 预加载的对话历史（含本轮已落库的用户消息），作为初始 messages。
+    pub history: Vec<Message>,
 }
 
 /// 驱动一个 run 到终态。
@@ -62,11 +66,16 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
     let mut state = RunState::Idle;
     let mut acc = String::new();
     // 对话历史（含用户输入、模型回复、工具结果），供多轮工具调用。
-    let mut messages: Vec<Message> = vec![Message {
-        role: MsgRole::User,
-        content: ctx.user_text.clone(),
-        tool_call_id: None,
-    }];
+    // history 已含本轮落库的用户消息；为空时回退到 user_text。
+    let mut messages: Vec<Message> = if ctx.history.is_empty() {
+        vec![Message {
+            role: MsgRole::User,
+            content: ctx.user_text.clone(),
+            tool_call_id: None,
+        }]
+    } else {
+        ctx.history.clone()
+    };
     // loop detection：工具调用指纹历史。
     let mut fingerprints: Vec<ToolFingerprint> = Vec::new();
     let mut tool_rounds = 0usize;
@@ -84,7 +93,11 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
         let turn = run_model_turn(ctx, &mut state, &mut acc, &messages).await;
 
         match turn {
-            TurnResult::Completed => return outcome_of(&state),
+            TurnResult::Completed => {
+                // 落库最终 assistant 回复（重启不失忆）。
+                persist(ctx, oc_store::Role::Assistant, &acc).await;
+                return outcome_of(&state);
+            }
             TurnResult::Terminal(outcome) => return outcome,
             TurnResult::ToolCall { call_id, name, args } => {
                 // 记录本轮 assistant（可能含文本 + 工具调用）到历史。
@@ -94,6 +107,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                         content: acc.clone(),
                         tool_call_id: None,
                     });
+                    persist(ctx, oc_store::Role::Assistant, &acc).await;
                 }
 
                 // loop detection。
@@ -116,6 +130,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                 let output = exec_tool(ctx, &call_id, &name, &args).await;
 
                 // 结果回喂历史 → 状态机回 AwaitingModel。
+                persist(ctx, oc_store::Role::Tool, &output).await;
                 messages.push(Message {
                     role: MsgRole::Tool,
                     content: output,
@@ -326,6 +341,27 @@ async fn execute_effects(ctx: &RunCtx, effects: &[Effect], acc: &mut String) -> 
         }
     }
     keep_going
+}
+
+/// 落库一条消息（空文本跳过）。失败仅告警，不阻断 run。
+async fn persist(ctx: &RunCtx, role: oc_store::Role, content: &str) {
+    if content.is_empty() {
+        return;
+    }
+    let est = (content.chars().count() as i64 / 4).max(1);
+    if let Err(e) = ctx
+        .store
+        .writer()
+        .append_entry(oc_store::NewEntry {
+            session_id: "main".into(),
+            role,
+            content: content.to_string(),
+            tokens_est: est,
+        })
+        .await
+    {
+        warn!(run_id = %ctx.run_id, error = %e, "落库消息失败");
+    }
 }
 
 fn emit_error(ctx: &RunCtx, kind: RunErrorKind, msg: &str) {

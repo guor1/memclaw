@@ -50,6 +50,8 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         tools: Some(tools),
         warn_secs: idle, // 警告阈值取空闲看门狗阈值
         abort_min_secs: cfg.watchdog.abort_min_secs,
+        max_history_entries: 200,
+        history_token_budget: 8000,
     };
 
     // 解引用 api_key。

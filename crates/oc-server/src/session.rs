@@ -31,6 +31,10 @@ pub struct SessionConfig {
     pub warn_secs: u64,
     /// 卡死 abort 下限（秒）。达到 abort 条件才释放车道（设计 §10.1）。
     pub abort_min_secs: u64,
+    /// 加载历史的最大条数（一次拉取上限）。
+    pub max_history_entries: i64,
+    /// 历史 token 预算（超出则丢弃更早的消息）。
+    pub history_token_budget: i64,
 }
 
 /// 发给 session actor 的命令。
@@ -76,10 +80,11 @@ pub fn spawn(
     cfg: SessionConfig,
     provider: Arc<dyn Provider>,
     events: broadcast::Sender<Event>,
+    store: oc_store::Store,
 ) -> SessionHandle {
     let (tx, rx) = mpsc::channel(64);
     let handle = SessionHandle { tx: tx.clone() };
-    tokio::spawn(actor_loop(cfg, provider, events, tx, rx));
+    tokio::spawn(actor_loop(cfg, provider, events, tx, rx, store));
     handle
 }
 
@@ -96,22 +101,49 @@ async fn actor_loop(
     events: broadcast::Sender<Event>,
     self_tx: mpsc::Sender<SessionCmd>,
     mut rx: mpsc::Receiver<SessionCmd>,
+    store: oc_store::Store,
 ) {
     let mut queue = RunQueue::new(cfg.queue_cap);
     let mut active: Option<ActiveRun> = None;
+
+    // 确保主会话存在。
+    if let Err(e) = store
+        .writer()
+        .ensure_session("main".into(), "main".into())
+        .await
+    {
+        warn!(error = %e, "创建主会话失败");
+    }
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
             SessionCmd::Submit { text, reply } => {
                 let run_id = RunId::new(uuid_v7());
                 let _ = reply.send(run_id.clone());
+
+                // 落库用户消息（重启不失忆）。
+                let est = estimate_tokens(&text);
+                if let Err(e) = store
+                    .writer()
+                    .append_entry(oc_store::NewEntry {
+                        session_id: "main".into(),
+                        role: oc_store::Role::User,
+                        content: text.clone(),
+                        tokens_est: est,
+                    })
+                    .await
+                {
+                    warn!(error = %e, "落库用户消息失败");
+                }
+
                 let turn = QueuedTurn {
                     run_id: run_id.to_string(),
                     text,
                 };
                 match queue.submit(turn) {
                     SubmitResult::Started(t) => {
-                        active = Some(start_run(&cfg, &provider, &events, &self_tx, t));
+                        let history = load_history(&store, &cfg).await;
+                        active = Some(start_run(&cfg, &provider, &events, &self_tx, &store, t, history));
                     }
                     SubmitResult::Queued => { /* 等活跃结束再起 */ }
                     SubmitResult::Rejected => {
@@ -140,7 +172,8 @@ async fn actor_loop(
                     active = None;
                     // 取下一个排队轮。
                     if let Some(next) = queue.complete_active() {
-                        active = Some(start_run(&cfg, &provider, &events, &self_tx, next));
+                        let history = load_history(&store, &cfg).await;
+                        active = Some(start_run(&cfg, &provider, &events, &self_tx, &store, next, history));
                     }
                 }
             }
@@ -173,7 +206,9 @@ fn start_run(
     provider: &Arc<dyn Provider>,
     events: &broadcast::Sender<Event>,
     self_tx: &mpsc::Sender<SessionCmd>,
+    store: &oc_store::Store,
     turn: QueuedTurn,
+    history: Vec<oc_llm::Message>,
 ) -> ActiveRun {
     let cancel = CancellationToken::new();
     let run_id = RunId::new(turn.run_id.clone());
@@ -188,6 +223,8 @@ fn start_run(
         idle_timeout: cfg.idle_timeout,
         run_timeout: cfg.run_timeout,
         tools: cfg.tools.clone(),
+        store: store.clone(),
+        history,
     };
 
     let self_tx = self_tx.clone();
@@ -217,4 +254,50 @@ fn start_run(
 /// 简易 UUIDv7（避免为此引入额外依赖；server 已有 uuid）。
 fn uuid_v7() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+/// 近似 token 估算（字符/4，设计 §7 tokenizer 近似）。
+fn estimate_tokens(s: &str) -> i64 {
+    (s.chars().count() as i64 / 4).max(1)
+}
+
+/// 从库加载主会话历史（reset 之后），转成 oc-llm 消息，用于喂给模型。
+///
+/// 带 token 预算：从最近往前累计，超预算则截断（保留最近的）。
+async fn load_history(store: &oc_store::Store, cfg: &SessionConfig) -> Vec<oc_llm::Message> {
+    let entries = match store
+        .writer()
+        .load_transcript("main".into(), cfg.max_history_entries)
+        .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(error = %e, "加载历史失败，按空历史处理");
+            return Vec::new();
+        }
+    };
+
+    // token 预算裁剪：从后往前累加，超预算丢弃更早的。
+    let mut budget = cfg.history_token_budget;
+    let mut kept: Vec<oc_llm::Message> = Vec::new();
+    for e in entries.iter().rev() {
+        let cost = e.tokens_est.max(1);
+        if budget - cost < 0 && !kept.is_empty() {
+            break;
+        }
+        budget -= cost;
+        let role = match e.role {
+            oc_store::Role::Assistant => oc_llm::MsgRole::Assistant,
+            oc_store::Role::Tool => oc_llm::MsgRole::Tool,
+            oc_store::Role::System => oc_llm::MsgRole::System,
+            oc_store::Role::User => oc_llm::MsgRole::User,
+        };
+        kept.push(oc_llm::Message {
+            role,
+            content: e.content.clone(),
+            tool_call_id: None,
+        });
+    }
+    kept.reverse(); // 变回正序
+    kept
 }

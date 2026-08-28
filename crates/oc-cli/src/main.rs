@@ -66,11 +66,17 @@ fn run_serve() -> anyhow::Result<()> {
     let cfg = config_loader::load()?;
     let (provider, session_cfg, heartbeat) = provider_setup::build(&cfg)?;
 
+    let db = paths::db_path()?;
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async move {
-        oc_server::serve_with(kind, provider, session_cfg, heartbeat).await
+        let store = oc_store::Store::open_path(db)
+            .map_err(|e| anyhow::anyhow!("打开数据库失败: {e}"))?;
+        oc_server::serve_with(kind, provider, session_cfg, heartbeat, store)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
     })?;
     Ok(())
 }

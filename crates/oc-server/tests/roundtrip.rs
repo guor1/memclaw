@@ -75,8 +75,10 @@ async fn connect_and_echo_roundtrip() {
             tools: None,
             warn_secs: 60,
             abort_min_secs: 300,
+            max_history_entries: 200,
+            history_token_budget: 8000,
         };
-        let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60)).await;
+        let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
     });
 
     // 等 listener 就绪。

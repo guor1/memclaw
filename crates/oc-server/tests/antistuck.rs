@@ -21,6 +21,8 @@ fn cfg(idle_ms: u64) -> SessionConfig {
         tools: None,
         warn_secs: 60,
         abort_min_secs: 300,
+        max_history_entries: 200,
+        history_token_budget: 8000,
     }
 }
 
@@ -54,7 +56,7 @@ async fn collect_until_terminal(
 async fn happy_multi_turn() {
     let (tx, mut rx) = broadcast::channel(256);
     let provider = Arc::new(MockProvider::echo_text("回复A"));
-    let handle = session::spawn(cfg(2000), provider, tx);
+    let handle = session::spawn(cfg(2000), provider, tx, oc_store::Store::open_memory().unwrap());
 
     // 第一轮
     let _run1 = handle.submit("你好".into()).await.expect("run1");
@@ -73,7 +75,7 @@ async fn idle_watchdog_aborts_stalled_model() {
     let (tx, mut rx) = broadcast::channel(256);
     // provider 在首个 Delta 前卡 5s，但 idle 超时设 200ms。
     let provider = Arc::new(MockProvider::stalls_for(Duration::from_secs(5)));
-    let handle = session::spawn(cfg(200), provider, tx);
+    let handle = session::spawn(cfg(200), provider, tx, oc_store::Store::open_memory().unwrap());
 
     let _run = handle.submit("会卡住".into()).await.expect("run");
     let start = std::time::Instant::now();
@@ -95,7 +97,7 @@ async fn abort_stops_active_run() {
         ScriptStep { delay: Duration::from_millis(300), delta: Delta::Done(FinishReason::Stop) },
     ];
     let provider = Arc::new(MockProvider::scripted(script));
-    let handle = session::spawn(cfg(2000), provider, tx);
+    let handle = session::spawn(cfg(2000), provider, tx, oc_store::Store::open_memory().unwrap());
 
     let run_id = handle.submit("长回复".into()).await.expect("run");
 
@@ -121,8 +123,10 @@ async fn health_scan_aborts_stuck_run() {
         tools: None,
         warn_secs: 1,      // 1s 警告
         abort_min_secs: 2, // 2s 达 abort 条件
+        max_history_entries: 200,
+        history_token_budget: 8000,
     };
-    let handle = session::spawn(cfg, provider, tx);
+    let handle = session::spawn(cfg, provider, tx, oc_store::Store::open_memory().unwrap());
 
     let _run = handle.submit("会卡死".into()).await.expect("run");
 

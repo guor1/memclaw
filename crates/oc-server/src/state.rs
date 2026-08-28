@@ -30,6 +30,8 @@ pub struct ServerState {
     approvals: ApprovalRegistry,
     /// 后台任务台账。
     ledger: crate::ledger::TaskLedger,
+    /// 持久化句柄（chat.history 查询用）。
+    store: oc_store::Store,
 }
 
 impl ServerState {
@@ -38,6 +40,7 @@ impl ServerState {
         session: SessionHandle,
         approvals: ApprovalRegistry,
         ledger: crate::ledger::TaskLedger,
+        store: oc_store::Store,
     ) -> Self {
         Self {
             event_tx,
@@ -45,12 +48,18 @@ impl ServerState {
             session,
             approvals,
             ledger,
+            store,
         }
     }
 
     /// 后台任务台账。
     pub fn ledger(&self) -> &crate::ledger::TaskLedger {
         &self.ledger
+    }
+
+    /// 持久化句柄。
+    pub fn store(&self) -> &oc_store::Store {
+        &self.store
     }
 
     /// 收到审批回执，唤醒等待方。

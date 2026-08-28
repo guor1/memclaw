@@ -35,7 +35,32 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
             ok: true,
             db_version: oc_store::migrate::TARGET_VERSION,
         })),
-        Method::ChatHistory(_) => Ok(MethodOk::History(vec![])),
+        Method::ChatHistory(p) => {
+            let limit = p.limit.unwrap_or(200) as i64;
+            match state.store().writer().load_transcript("main".into(), limit).await {
+                Ok(entries) => {
+                    let out = entries
+                        .into_iter()
+                        .map(|e| oc_proto::Entry {
+                            seq: e.seq,
+                            role: match e.role {
+                                oc_store::Role::Assistant => oc_proto::Role::Assistant,
+                                oc_store::Role::Tool => oc_proto::Role::Tool,
+                                oc_store::Role::System => oc_proto::Role::System,
+                                oc_store::Role::User => oc_proto::Role::User,
+                            },
+                            content: e.content,
+                            created_at: e.created_at,
+                        })
+                        .collect();
+                    Ok(MethodOk::History(out))
+                }
+                Err(e) => Err(ProtoError {
+                    kind: oc_proto::ErrorKind::Internal,
+                    message: format!("加载历史失败: {e}"),
+                }),
+            }
+        }
         Method::TasksList => Ok(MethodOk::Tasks(state.ledger().list())),
         Method::TasksCancel(p) => {
             state.ledger().cancel(&p.task_id);
