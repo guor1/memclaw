@@ -10,6 +10,7 @@ description = "oc 常驻进程：协议服务端 + 事件广播 + 编排"
 oc-proto = { workspace = true }
 oc-core  = { workspace = true }
 oc-store = { workspace = true }
+oc-llm   = { workspace = true }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }

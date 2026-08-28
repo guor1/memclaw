@@ -60,11 +60,20 @@ fn test_transport() -> TransportKind {
 async fn connect_and_echo_roundtrip() {
     let kind = test_transport();
 
-    // 起 server。
+    // 起 server（mock provider 回显含"你好"的文本，供断言）。
     let server_kind = kind.clone();
     let server = tokio::spawn(async move {
-        // serve 会一直跑；测试结束时随进程/任务结束回收。
-        let _ = oc_server::serve(server_kind).await;
+        use std::sync::Arc;
+        use std::time::Duration;
+        let provider = Arc::new(oc_llm::mock::MockProvider::echo_text("你好，我在。"));
+        let cfg = oc_server::SessionConfig {
+            model: "mock".into(),
+            system_prompt: None,
+            idle_timeout: Duration::from_secs(5),
+            run_timeout: None,
+            queue_cap: 8,
+        };
+        let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60)).await;
     });
 
     // 等 listener 就绪。

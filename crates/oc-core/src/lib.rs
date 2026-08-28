@@ -5,6 +5,10 @@
 //!
 //! M1 仅落地 `config`；其余模块（agent/queue/prompt/memory/proactive/...）随里程碑加入。
 
+pub mod agent;
 pub mod config;
+pub mod model;
+pub mod prompt;
+pub mod queue;
 
 pub use config::{Config, ReloadKind, SecretRef};

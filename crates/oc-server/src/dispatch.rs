@@ -6,10 +6,9 @@
 use std::sync::Arc;
 
 use oc_proto::{
-    ChatSendParams, ConnectParams, Event, Features, LifecyclePhase, Method, MethodOk, ProtoError,
-    Req, ResResult, RunId, SessionId, Snapshot, PROTO_VERSION,
+    ChatAbortParams, ChatSendParams, ConnectParams, Features, Method, MethodOk, ProtoError, Req,
+    ResResult, SessionId, Snapshot, PROTO_VERSION,
 };
-use uuid::Uuid;
 
 use crate::state::{CachedRes, ServerState};
 
@@ -25,6 +24,7 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
     let result = match &req.method {
         Method::Connect(p) => handle_connect(p),
         Method::ChatSend(p) => handle_chat_send(p, state).await,
+        Method::ChatAbort(p) => handle_chat_abort(p, state).await,
         Method::SessionReset => Ok(MethodOk::Empty),
         Method::Status => Ok(MethodOk::Status(snapshot())),
         Method::Health => Ok(MethodOk::Health(oc_proto::HealthOk {
@@ -33,8 +33,7 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
         })),
         Method::ChatHistory(_) => Ok(MethodOk::History(vec![])),
         // 以下方法在后续里程碑实现。
-        Method::ChatAbort(_)
-        | Method::CronAdd(_)
+        Method::CronAdd(_)
         | Method::CronList
         | Method::CronRm(_)
         | Method::TasksList
@@ -78,33 +77,27 @@ fn handle_connect(p: &ConnectParams) -> Result<MethodOk, ProtoError> {
     })
 }
 
-/// M2 echo：立即返回 run_id，并异步广播 start → assistant(echo) → end。
+/// M3：提交到主会话车道，返回分配的 run_id；实际处理经事件流推送。
 async fn handle_chat_send(
     p: &ChatSendParams,
     state: &Arc<ServerState>,
 ) -> Result<MethodOk, ProtoError> {
-    let run_id = RunId::new(Uuid::now_v7().to_string());
-    let text = p.text.clone();
-    let state = Arc::clone(state);
-    let rid = run_id.clone();
+    match state.session().submit(p.text.clone()).await {
+        Some(run_id) => Ok(MethodOk::ChatSend { run_id }),
+        None => Err(ProtoError {
+            kind: oc_proto::ErrorKind::Internal,
+            message: "会话车道不可用".to_string(),
+        }),
+    }
+}
 
-    tokio::spawn(async move {
-        state.emit(Event::Lifecycle {
-            run_id: rid.clone(),
-            phase: LifecyclePhase::Start,
-        });
-        // echo：把用户文本作为一个 assistant delta 回推（M3 换成真正的模型流）。
-        state.emit(Event::Assistant {
-            run_id: rid.clone(),
-            delta: format!("echo: {text}"),
-        });
-        state.emit(Event::Lifecycle {
-            run_id: rid,
-            phase: LifecyclePhase::End,
-        });
-    });
-
-    Ok(MethodOk::ChatSend { run_id })
+/// M3：中止活跃 run（hard 语义在 M4 完整）。
+async fn handle_chat_abort(
+    p: &ChatAbortParams,
+    state: &Arc<ServerState>,
+) -> Result<MethodOk, ProtoError> {
+    state.session().abort(p.run_id.clone(), p.hard).await;
+    Ok(MethodOk::Empty)
 }
 
 fn snapshot() -> Snapshot {

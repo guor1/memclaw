@@ -7,6 +7,7 @@
 mod doctor;
 mod lock;
 mod paths;
+mod provider_setup;
 mod tui_runner;
 
 use clap::{Parser, Subcommand};
@@ -61,9 +62,14 @@ fn run_serve() -> anyhow::Result<()> {
 
     let kind = oc_server::TransportKind::platform_default(&home);
 
+    let cfg = oc_core::Config::default_local();
+    let (provider, session_cfg, heartbeat) = provider_setup::build(&cfg)?;
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(async move { oc_server::serve(kind).await })?;
+    rt.block_on(async move {
+        oc_server::serve_with(kind, provider, session_cfg, heartbeat).await
+    })?;
     Ok(())
 }

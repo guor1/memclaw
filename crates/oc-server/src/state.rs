@@ -6,6 +6,8 @@ use dashmap::DashMap;
 use oc_proto::{Event, IdemKey, MethodOk};
 use tokio::sync::broadcast;
 
+use crate::session::SessionHandle;
+
 /// 幂等缓存条目（M2 仅缓存 chat.send 的 run_id 结果）。
 #[derive(Clone)]
 pub struct CachedRes {
@@ -17,14 +19,22 @@ pub struct ServerState {
     event_tx: broadcast::Sender<Event>,
     /// side-effecting 方法的幂等缓存（TTL 由清理策略决定，M2 先不过期）。
     idem: DashMap<IdemKey, CachedRes>,
+    /// 主会话车道句柄。
+    session: SessionHandle,
 }
 
 impl ServerState {
-    pub fn new(event_tx: broadcast::Sender<Event>) -> Self {
+    pub fn new(event_tx: broadcast::Sender<Event>, session: SessionHandle) -> Self {
         Self {
             event_tx,
             idem: DashMap::new(),
+            session,
         }
+    }
+
+    /// 主会话句柄。
+    pub fn session(&self) -> &SessionHandle {
+        &self.session
     }
 
     /// 订阅事件流。
