@@ -1027,6 +1027,7 @@ dependencies = [
  "oc-proto",
  "oc-server",
  "oc-store",
+ "oc-tools",
  "oc-tui",
  "ratatui",
  "serde_json",
@@ -1081,6 +1082,7 @@ dependencies = [
  "oc-llm",
  "oc-proto",
  "oc-store",
+ "oc-tools",
  "serde",
  "serde_json",
  "tempfile",
@@ -1100,6 +1102,21 @@ dependencies = [
  "rusqlite",
  "sqlite-vec",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "oc-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "oc-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

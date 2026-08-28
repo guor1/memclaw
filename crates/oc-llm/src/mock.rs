@@ -61,6 +61,76 @@ impl MockProvider {
             }],
         }
     }
+
+    /// 请求工具调用后结束（Done(ToolUse)）。用于测试工具循环。
+    pub fn calls_tool(call_id: &str, name: &str, args: &str) -> Self {
+        Self {
+            script: vec![
+                ScriptStep {
+                    delay: Duration::ZERO,
+                    delta: Delta::ToolCall(crate::types::ToolCallDelta {
+                        call_id: call_id.into(),
+                        name: Some(name.into()),
+                        args_chunk: args.into(),
+                    }),
+                },
+                ScriptStep {
+                    delay: Duration::ZERO,
+                    delta: Delta::Done(FinishReason::ToolUse),
+                },
+            ],
+        }
+    }
+}
+
+/// 多轮 mock：每次 `stream_chat` 调用返回序列中的下一个脚本。
+/// 用于测试"模型请求工具 → 执行 → 再次调用模型 → 完成"的多轮循环。
+pub struct SequencedMock {
+    scripts: std::sync::Mutex<std::collections::VecDeque<Vec<ScriptStep>>>,
+}
+
+impl SequencedMock {
+    pub fn new(scripts: Vec<Vec<ScriptStep>>) -> Self {
+        Self {
+            scripts: std::sync::Mutex::new(scripts.into_iter().collect()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for SequencedMock {
+    fn id(&self) -> &str {
+        "mock-seq"
+    }
+
+    async fn stream_chat(
+        &self,
+        _req: ModelRequest,
+        cancel: CancellationToken,
+    ) -> LlmResult<BoxStream<'static, LlmResult<Delta>>> {
+        // 取下一个脚本；用尽则返回一个直接结束的脚本。
+        let steps = self
+            .scripts
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| {
+                vec![ScriptStep {
+                    delay: Duration::ZERO,
+                    delta: Delta::Done(FinishReason::Stop),
+                }]
+            });
+        let s = stream::iter(steps).then(move |step| {
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(step.delay) => Ok(step.delta),
+                    _ = cancel.cancelled() => Err(crate::error::ProviderErr::Cancelled),
+                }
+            }
+        });
+        Ok(s.boxed())
+    }
 }
 
 #[async_trait::async_trait]

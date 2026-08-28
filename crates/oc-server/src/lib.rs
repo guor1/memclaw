@@ -11,6 +11,7 @@ pub mod run;
 pub mod scheduler;
 pub mod session;
 pub mod state;
+pub mod tools_bridge;
 pub mod transport;
 
 pub use error::{ServerError, ServerResult};

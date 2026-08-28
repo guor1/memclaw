@@ -25,6 +25,8 @@ pub struct SessionConfig {
     pub idle_timeout: Duration,
     pub run_timeout: Option<Duration>,
     pub queue_cap: usize,
+    /// 工具执行器（None = 纯对话，无工具）。
+    pub tools: Option<crate::tools_bridge::ToolExecutor>,
 }
 
 /// 发给 session actor 的命令。
@@ -154,6 +156,7 @@ fn start_run(
         cancel: cancel.clone(),
         idle_timeout: cfg.idle_timeout,
         run_timeout: cfg.run_timeout,
+        tools: cfg.tools.clone(),
     };
 
     let self_tx = self_tx.clone();

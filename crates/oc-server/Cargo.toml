@@ -11,6 +11,7 @@ oc-proto = { workspace = true }
 oc-core  = { workspace = true }
 oc-store = { workspace = true }
 oc-llm   = { workspace = true }
+oc-tools = { workspace = true }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }

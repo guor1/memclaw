@@ -1,0 +1,21 @@
+[package]
+name = "oc-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "oc 工具集：exec/process/file/web/... + 策略 + 审批门"
+
+[dependencies]
+oc-core = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["process", "io-util", "time", "sync", "rt", "macros", "fs"] }
+tokio-util = "0.7"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tempfile = "3"

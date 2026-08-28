@@ -7,10 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use oc_core::config::{Config, Hosting, Provider as ProviderKind, SecretRef};
+use oc_core::config::{ApprovalMode as CfgApprovalMode, Config, Hosting, Provider as ProviderKind, SecretRef};
+use oc_core::tool::ApprovalMode;
 use oc_llm::mock::MockProvider;
 use oc_llm::Provider;
+use oc_server::tools_bridge::ToolExecutor;
 use oc_server::SessionConfig;
+use oc_tools::exec::ExecTool;
+use oc_tools::file::FileTool;
+use oc_tools::ToolRegistry;
 
 /// 返回 (provider, 会话配置, 心跳间隔)。
 pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration)> {
@@ -25,9 +30,16 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         Hosting::SelfHosted => cfg.watchdog.idle_self_secs,
     };
 
+    // 组装工具注册表（exec + file）。
+    let tools = build_tools(cfg)?;
+
     let session_cfg = SessionConfig {
         model: model.model.clone(),
-        system_prompt: Some("你是 oc，一个长期陪伴用户的个人助手。".to_string()),
+        system_prompt: Some(
+            "你是 oc，一个长期陪伴用户的个人助手。你可以使用 exec 工具执行命令、\
+             file 工具读写文件来完成任务。危险命令会先请求用户审批。"
+                .to_string(),
+        ),
         idle_timeout: Duration::from_secs(idle),
         run_timeout: if cfg.watchdog.run_timeout_secs == 0 {
             None
@@ -35,6 +47,7 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
             Some(Duration::from_secs(cfg.watchdog.run_timeout_secs))
         },
         queue_cap: 16,
+        tools: Some(tools),
     };
 
     // 解引用 api_key。
@@ -51,6 +64,31 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
     };
 
     Ok((provider, session_cfg, Duration::from_secs(cfg.proactive.heartbeat_secs)))
+}
+
+/// 组装工具注册表：exec（审批门由 config 派生）+ file（限当前目录 + OC_HOME）。
+fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
+    let mode = match cfg.tools.approval.mode {
+        CfgApprovalMode::Prompt => ApprovalMode::Prompt,
+        CfgApprovalMode::Allow => ApprovalMode::Allow,
+        CfgApprovalMode::Deny => ApprovalMode::Deny,
+    };
+    let exec_timeout = Duration::from_secs(cfg.tools.exec_timeout_secs);
+
+    // file 允许根：当前工作目录 + OC_HOME。空环境下退回当前目录。
+    let mut roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Ok(home) = crate::paths::oc_home() {
+        roots.push(home);
+    }
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExecTool::new(mode, exec_timeout)));
+    registry.register(Arc::new(FileTool::new(roots)));
+
+    Ok(ToolExecutor::new(Arc::new(registry)))
 }
 
 fn resolve_secret(s: &SecretRef) -> Option<String> {

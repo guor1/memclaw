@@ -10,5 +10,6 @@ pub mod config;
 pub mod model;
 pub mod prompt;
 pub mod queue;
+pub mod tool;
 
 pub use config::{Config, ReloadKind, SecretRef};

@@ -18,6 +18,7 @@ fn cfg(idle_ms: u64) -> SessionConfig {
         idle_timeout: Duration::from_millis(idle_ms),
         run_timeout: None,
         queue_cap: 8,
+        tools: None,
     }
 }
 

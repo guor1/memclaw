@@ -16,6 +16,7 @@ oc-core   = { workspace = true }
 oc-store  = { workspace = true }
 oc-server = { workspace = true }
 oc-llm    = { workspace = true }
+oc-tools  = { workspace = true }
 oc-tui    = { path = "../oc-tui" }
 clap = { version = "4", features = ["derive"] }
 directories = "5"
