@@ -10,6 +10,10 @@ description = "oc 单库存储：SQLite + 迁移 + 单写线程 + 向量索引"
 oc-proto = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [features]
 default = []
