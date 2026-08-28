@@ -5,7 +5,7 @@
 use std::io::Stdout;
 
 use anyhow::Result;
-use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyModifiers};
+use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use oc_proto::{
     ChatSendParams, ConnectParams, Event, Frame, LifecyclePhase, Method, Req, ReqId, ResResult,
@@ -94,7 +94,11 @@ impl App {
                 // 键盘
                 maybe_key = keys.next() => {
                     if let Some(Ok(CtEvent::Key(key))) = maybe_key {
-                        self.on_key(key.code, key.modifiers).await?;
+                        // Windows 控制台会同时上报 Press/Release（甚至 Repeat），
+                        // 只处理 Press，否则一次按键被处理多次（字符重复/多空格）。
+                        if key.kind == KeyEventKind::Press {
+                            self.on_key(key.code, key.modifiers).await?;
+                        }
                     }
                 }
                 // daemon 帧
