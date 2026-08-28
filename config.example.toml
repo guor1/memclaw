@@ -1,0 +1,47 @@
+# oc 配置示例。复制到 ~/.oc/config.toml 后按需修改。
+#   Windows: C:\Users\<你>\.oc\config.toml
+#   Linux/macOS: ~/.oc/config.toml
+# 也可用环境变量 OC_HOME 覆盖根目录。
+
+proto_version = 1
+
+[server]
+# unix（Linux/macOS）| pipe（Windows）| ws
+transport = "pipe"
+
+# ── 模型 ─────────────────────────────────────────────────────
+# DeepSeek 是 OpenAI 兼容接口，provider 用 "openai"，指定 base_url 即可。
+[[models]]
+alias = "default"
+provider = "openai"                       # DeepSeek 走 openai 兼容
+model = "deepseek-chat"                    # 或 "deepseek-reasoner"（R1）
+hosting = "cloud"
+base_url = "https://api.deepseek.com/v1"   # DeepSeek 端点
+# API key 三选一：
+#   { env = "DEEPSEEK_API_KEY" }  从环境变量读（推荐）
+#   { file = "C:\\Users\\你\\.oc\\deepseek.key" }  从文件读
+#   { inline = "sk-xxxx" }  直接写（不建议，明文）
+api_key = { env = "DEEPSEEK_API_KEY" }
+
+[memory]
+vec = false                # M5 接入 embedding 前先关
+halflife_days = 30
+trigger_threshold = 0.72
+trigger_max_per_turn = 3
+
+[proactive]
+heartbeat_secs = 60
+intent_cooldown_secs = 86400
+intent_budget = 3
+intent_expiry_days = 90
+
+[tools]
+exec_timeout_secs = 120
+[tools.approval]
+mode = "prompt"            # prompt | allow | deny
+
+[watchdog]
+idle_cloud_secs = 120
+idle_self_secs = 300
+run_timeout_secs = 0       # 0 = 无限
+abort_min_secs = 300

@@ -41,7 +41,7 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
     let key = resolve_secret(&model.api_key);
 
     let provider: Arc<dyn Provider> = match key {
-        Some(k) if !k.is_empty() => make_real(model.provider, k),
+        Some(k) if !k.is_empty() => make_real(model.provider, k, model.base_url.clone()),
         _ => {
             eprintln!("[warn] 未找到 API key，回退到 mock provider（离线演示）");
             Arc::new(MockProvider::echo_text(
@@ -61,16 +61,16 @@ fn resolve_secret(s: &SecretRef) -> Option<String> {
     }
 }
 
-fn make_real(kind: ProviderKind, key: String) -> Arc<dyn Provider> {
+fn make_real(kind: ProviderKind, key: String, base_url: Option<String>) -> Arc<dyn Provider> {
     match kind {
         #[cfg(feature = "provider-openai")]
-        ProviderKind::Openai => Arc::new(oc_llm::openai::OpenAiProvider::new(key, None)),
+        ProviderKind::Openai => Arc::new(oc_llm::openai::OpenAiProvider::new(key, base_url)),
         #[cfg(feature = "provider-anthropic")]
-        ProviderKind::Anthropic => Arc::new(oc_llm::anthropic::AnthropicProvider::new(key, None)),
+        ProviderKind::Anthropic => Arc::new(oc_llm::anthropic::AnthropicProvider::new(key, base_url)),
         // 未启用对应 feature 时回退 mock（不 panic）。
         #[allow(unreachable_patterns)]
         _ => {
-            let _ = key;
+            let _ = (key, base_url);
             Arc::new(MockProvider::echo_text("（provider feature 未启用，mock 回复）"))
         }
     }

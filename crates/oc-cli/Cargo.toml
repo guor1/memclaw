@@ -20,6 +20,7 @@ oc-tui    = { path = "../oc-tui" }
 clap = { version = "4", features = ["derive"] }
 directories = "5"
 serde_json = "1"
+toml = "0.8"
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -4,6 +4,7 @@
 //! - `oc serve`：启动常驻进程（M2）
 //! - `oc`（无子命令）：连 daemon 进 TUI（M2）
 
+mod config_loader;
 mod doctor;
 mod lock;
 mod paths;
@@ -62,7 +63,7 @@ fn run_serve() -> anyhow::Result<()> {
 
     let kind = oc_server::TransportKind::platform_default(&home);
 
-    let cfg = oc_core::Config::default_local();
+    let cfg = config_loader::load()?;
     let (provider, session_cfg, heartbeat) = provider_setup::build(&cfg)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()

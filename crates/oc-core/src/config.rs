@@ -59,6 +59,10 @@ pub struct ModelConfig {
     /// API key，SecretRef 三态。
     #[garde(skip)]
     pub api_key: SecretRef,
+    /// 自定义 API 基地址（OpenAI 兼容端点，如 DeepSeek）。None = 官方默认。
+    #[garde(skip)]
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +182,7 @@ impl Config {
                 model: "claude-opus-4-8".to_string(),
                 hosting: Hosting::Cloud,
                 api_key: SecretRef::Env("ANTHROPIC_API_KEY".to_string()),
+                base_url: None,
             }],
             memory: MemoryConfig {
                 vec: true,
