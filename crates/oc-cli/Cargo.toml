@@ -1,0 +1,20 @@
+[package]
+name = "oc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "oc CLI：命令树 + doctor + onboard"
+
+[[bin]]
+name = "oc"
+path = "src/main.rs"
+
+[dependencies]
+oc-proto = { workspace = true }
+oc-core  = { workspace = true }
+oc-store = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+serde_json = "1"
+anyhow = "1"

@@ -1,0 +1,17 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# 导出的协议 schema（可由 `oc doctor --dump-schema` 复现）
+/schema
+
+# 本地运行时数据
+/.oc
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# 编辑器 / OS
+.DS_Store
+*.swp

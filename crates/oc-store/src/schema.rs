@@ -1,0 +1,101 @@
+//! Schema DDL（设计 §3.3）。每个版本的迁移 SQL 集中在此，供 [`crate::migrate`] 逐步应用。
+
+/// v1：MVP 全表（不含 sqlite-vec 虚表，虚表由 feature 单独创建）。
+pub const V1: &str = r#"
+-- ── 会话与转写 ──────────────────────────────────────────────
+CREATE TABLE session (
+  id            TEXT PRIMARY KEY,
+  kind          TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  reset_at      INTEGER
+);
+
+CREATE TABLE entry (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id    TEXT NOT NULL REFERENCES session(id),
+  seq           INTEGER NOT NULL,
+  role          TEXT NOT NULL,
+  content       TEXT NOT NULL,
+  tokens_est    INTEGER NOT NULL,
+  created_at    INTEGER NOT NULL,
+  UNIQUE(session_id, seq)
+);
+CREATE INDEX idx_entry_session_seq ON entry(session_id, seq);
+
+-- ── 记忆索引 ───────────────────────────────────────────────
+CREATE TABLE memory (
+  id            TEXT PRIMARY KEY,
+  tier          TEXT NOT NULL,
+  origin        TEXT NOT NULL,
+  text          TEXT NOT NULL,
+  keywords      TEXT,
+  importance    REAL NOT NULL DEFAULT 0.5,
+  created_at    INTEGER NOT NULL,
+  last_used_at  INTEGER,
+  use_count     INTEGER NOT NULL DEFAULT 0,
+  content_hash  TEXT NOT NULL,
+  injected_mark INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_memory_tier_origin ON memory(tier, origin);
+
+-- ── 主动性 ─────────────────────────────────────────────────
+CREATE TABLE cron (
+  id            TEXT PRIMARY KEY,
+  expr          TEXT NOT NULL,
+  prompt        TEXT NOT NULL,
+  tz            TEXT NOT NULL,
+  next_at       INTEGER,
+  last_fired_at INTEGER,
+  enabled       INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE standing_intent (
+  id            TEXT PRIMARY KEY,
+  text          TEXT NOT NULL,
+  keywords      TEXT,
+  trigger_vec   BLOB,
+  scope         TEXT,
+  cooldown_secs INTEGER NOT NULL DEFAULT 86400,
+  budget        INTEGER NOT NULL DEFAULT 3,
+  fired_count   INTEGER NOT NULL DEFAULT 0,
+  last_fired_at INTEGER,
+  expiry_at     INTEGER,
+  created_at    INTEGER NOT NULL
+);
+
+-- ── 后台任务台账 ───────────────────────────────────────────
+CREATE TABLE task (
+  id            TEXT PRIMARY KEY,
+  kind          TEXT NOT NULL,
+  state         TEXT NOT NULL,
+  detail        TEXT,
+  created_at    INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+
+-- ── 审批 / 审计 ────────────────────────────────────────────
+CREATE TABLE audit (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  at            INTEGER NOT NULL,
+  actor         TEXT NOT NULL,
+  action        TEXT NOT NULL,
+  payload       TEXT,
+  hash_prev     TEXT,
+  hash_self     TEXT
+);
+
+-- ── 配置状态 ───────────────────────────────────────────────
+CREATE TABLE kv (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+);
+"#;
+
+/// sqlite-vec 虚表（feature `sqlite-vec`）。维度随 embedding 模型，暂定 768。
+#[cfg(feature = "sqlite-vec")]
+pub const V1_VEC: &str = r#"
+CREATE VIRTUAL TABLE memory_vec USING vec0(
+  memory_id TEXT PRIMARY KEY,
+  embedding FLOAT[768]
+);
+"#;

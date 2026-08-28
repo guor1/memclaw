@@ -1,0 +1,22 @@
+[package]
+name = "oc-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "oc 单库存储：SQLite + 迁移 + 单写线程 + 向量索引"
+
+[dependencies]
+oc-proto = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2"
+
+[features]
+default = []
+# 向量记忆（sqlite-vec）。设计默认开，但为让 M1 先跑通建库/迁移，
+# 这里默认关，M5 接入 embedding 时再开。
+sqlite-vec = ["dep:sqlite-vec"]
+
+[dependencies.sqlite-vec]
+version = "0.1"
+optional = true

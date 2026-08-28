@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oc-proto",
+    "crates/oc-core",
+    "crates/oc-store",
+    "crates/oc-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+
+[workspace.dependencies]
+# 内部 crate
+oc-proto = { path = "crates/oc-proto" }
+oc-core  = { path = "crates/oc-core" }
+oc-store = { path = "crates/oc-store" }
+
+# 外部（版本由各 crate 通过 cargo add 解析后回填到此处）
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"   # 见设计 §10.3：run 边界 catch_unwind 隔离单次 panic
