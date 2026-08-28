@@ -83,6 +83,49 @@ impl MockProvider {
     }
 }
 
+/// 捕获型 mock：记录收到的 `ModelRequest`，用于验证上层组装（system prompt/
+/// messages/tools）是否按预期传达。回复固定文本。
+pub struct CapturingMock {
+    captured: std::sync::Arc<std::sync::Mutex<Vec<ModelRequest>>>,
+    reply: String,
+}
+
+impl CapturingMock {
+    pub fn new(reply: impl Into<String>) -> Self {
+        Self {
+            captured: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            reply: reply.into(),
+        }
+    }
+
+    /// 共享的捕获句柄（供测试断言）。
+    pub fn captures(&self) -> std::sync::Arc<std::sync::Mutex<Vec<ModelRequest>>> {
+        std::sync::Arc::clone(&self.captured)
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for CapturingMock {
+    fn id(&self) -> &str {
+        "mock-capture"
+    }
+
+    async fn stream_chat(
+        &self,
+        req: ModelRequest,
+        _cancel: CancellationToken,
+    ) -> LlmResult<BoxStream<'static, LlmResult<Delta>>> {
+        self.captured.lock().unwrap().push(req);
+        let reply = self.reply.clone();
+        let steps = vec![
+            ScriptStep { delay: Duration::ZERO, delta: Delta::Text(reply) },
+            ScriptStep { delay: Duration::ZERO, delta: Delta::Done(FinishReason::Stop) },
+        ];
+        let s = stream::iter(steps).map(|st| Ok(st.delta));
+        Ok(s.boxed())
+    }
+}
+
 /// 多轮 mock：每次 `stream_chat` 调用返回序列中的下一个脚本。
 /// 用于测试"模型请求工具 → 执行 → 再次调用模型 → 完成"的多轮循环。
 pub struct SequencedMock {

@@ -45,6 +45,10 @@ pub struct RunCtx {
     pub store: oc_store::Store,
     /// 预加载的对话历史（含本轮已落库的用户消息），作为初始 messages。
     pub history: Vec<Message>,
+    /// SOUL.md 人格文本（每轮经 oc-core::prompt 确定性组装）。
+    pub soul: String,
+    /// bootstrap 注入的 curated 记忆行（第 4/5 段填充；当前为空）。
+    pub bootstrap: Vec<oc_core::prompt::MemLine>,
 }
 
 /// 驱动一个 run 到终态。
@@ -174,7 +178,8 @@ async fn run_model_turn(
 
     let req = ModelRequest {
         model: ctx.model.clone(),
-        system: ctx.system_prompt.clone(),
+        // 经 oc-core::prompt 确定性组装（人格 + 工具 + 记忆 + 时间）。
+        system: Some(render_prompt(ctx)),
         messages: messages.to_vec(),
         tools: tool_specs,
         max_tokens: None,
@@ -341,6 +346,59 @@ async fn execute_effects(ctx: &RunCtx, effects: &[Effect], acc: &mut String) -> 
         }
     }
     keep_going
+}
+
+/// 用 oc-core::prompt 确定性组装系统提示词（设计 §4.4）。
+///
+/// 工具/技能/记忆按稳定 key 排序，时间放易变尾部，保证 prompt cache 前缀稳定。
+fn render_prompt(ctx: &RunCtx) -> String {
+    use oc_core::prompt::{render_system_prompt, PromptInputs, ToolBrief};
+
+    let tools: Vec<ToolBrief> = ctx
+        .tools
+        .as_ref()
+        .map(|t| {
+            t.llm_specs()
+                .into_iter()
+                .map(|s| ToolBrief {
+                    name: s.name,
+                    description: s.description,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let soul = if ctx.soul.trim().is_empty() {
+        DEFAULT_SOUL
+    } else {
+        ctx.soul.as_str()
+    };
+
+    let now = now_rfc3339();
+    let rendered = render_system_prompt(&PromptInputs {
+        soul,
+        bootstrap: &ctx.bootstrap,
+        skills: &[],
+        tools: &tools,
+        now: &now,
+    });
+    rendered.full()
+}
+
+/// 缺少 SOUL.md 时的默认人格。
+const DEFAULT_SOUL: &str = "你是 oc，一个长期陪伴用户的个人助手。\
+说话简洁、直接、务实。你可以使用工具执行命令和读写文件来完成任务；\
+危险操作会先请求用户审批。";
+
+/// 当前时间（RFC3339 近似，避免额外依赖格式化）。
+fn now_rfc3339() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // 简易表示：unix 秒。人类可读格式化留待引入 time 格式化时再换。
+    format!("unix:{secs}")
 }
 
 /// 落库一条消息（空文本跳过）。失败仅告警，不阻断 run。

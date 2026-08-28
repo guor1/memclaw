@@ -35,11 +35,8 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
 
     let session_cfg = SessionConfig {
         model: model.model.clone(),
-        system_prompt: Some(
-            "你是 oc，一个长期陪伴用户的个人助手。你可以使用 exec 工具执行命令、\
-             file 工具读写文件来完成任务。危险命令会先请求用户审批。"
-                .to_string(),
-        ),
+        // system_prompt 已由 oc-core::prompt 每轮组装（见 soul 字段），此处保留兼容。
+        system_prompt: None,
         idle_timeout: Duration::from_secs(idle),
         run_timeout: if cfg.watchdog.run_timeout_secs == 0 {
             None
@@ -52,6 +49,7 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         abort_min_secs: cfg.watchdog.abort_min_secs,
         max_history_entries: 200,
         history_token_budget: 8000,
+        soul: load_soul(),
     };
 
     // 解引用 api_key。
@@ -68,6 +66,17 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
     };
 
     Ok((provider, session_cfg, Duration::from_secs(cfg.proactive.heartbeat_secs)))
+}
+
+/// 加载 SOUL.md 人格（设计 §13.1：`~/.oc/soul/SOUL.md`）。
+///
+/// 文件缺失返回空串，由 run driver 用内置默认人格兜底。
+fn load_soul() -> String {
+    let Ok(home) = crate::paths::oc_home() else {
+        return String::new();
+    };
+    let path = home.join("soul").join("SOUL.md");
+    std::fs::read_to_string(&path).unwrap_or_default()
 }
 
 /// 组装工具注册表：exec（审批门由 config 派生）+ file（限当前目录 + OC_HOME）。

@@ -35,6 +35,7 @@ fn cfg_with_tools(tools: ToolExecutor) -> SessionConfig {
         abort_min_secs: 300,
         max_history_entries: 200,
         history_token_budget: 8000,
+        soul: String::new(),
     }
 }
 
@@ -131,6 +132,7 @@ async fn dangerous_command_triggers_approval_then_runs() {
         abort_min_secs: 300,
         max_history_entries: 200,
         history_token_budget: 8000,
+        soul: String::new(),
     };
 
     // 危险命令：sudo（会判 NeedsApproval）。审批放行后进入执行。

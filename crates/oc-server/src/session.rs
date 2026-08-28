@@ -35,6 +35,8 @@ pub struct SessionConfig {
     pub max_history_entries: i64,
     /// 历史 token 预算（超出则丢弃更早的消息）。
     pub history_token_budget: i64,
+    /// SOUL.md 人格文本（每轮由 oc-core::prompt 确定性组装进系统提示词）。
+    pub soul: String,
 }
 
 /// 发给 session actor 的命令。
@@ -225,6 +227,9 @@ fn start_run(
         tools: cfg.tools.clone(),
         store: store.clone(),
         history,
+        soul: cfg.soul.clone(),
+        // 第 4/5 段接入 Lane1 记忆注入；当前为空。
+        bootstrap: Vec::new(),
     };
 
     let self_tx = self_tx.clone();

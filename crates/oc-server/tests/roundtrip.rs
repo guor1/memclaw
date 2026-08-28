@@ -77,6 +77,7 @@ async fn connect_and_echo_roundtrip() {
             abort_min_secs: 300,
             max_history_entries: 200,
             history_token_budget: 8000,
+            soul: String::new(),
         };
         let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
     });

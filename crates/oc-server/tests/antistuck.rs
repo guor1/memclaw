@@ -23,6 +23,7 @@ fn cfg(idle_ms: u64) -> SessionConfig {
         abort_min_secs: 300,
         max_history_entries: 200,
         history_token_budget: 8000,
+        soul: String::new(),
     }
 }
 
@@ -125,6 +126,7 @@ async fn health_scan_aborts_stuck_run() {
         abort_min_secs: 2, // 2s 达 abort 条件
         max_history_entries: 200,
         history_token_budget: 8000,
+        soul: String::new(),
     };
     let handle = session::spawn(cfg, provider, tx, oc_store::Store::open_memory().unwrap());
 
