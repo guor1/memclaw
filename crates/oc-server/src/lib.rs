@@ -7,6 +7,7 @@ pub mod codec;
 pub mod conn;
 pub mod dispatch;
 pub mod error;
+pub mod ledger;
 pub mod run;
 pub mod scheduler;
 pub mod session;
@@ -43,23 +44,40 @@ pub async fn serve_with(
     // 审批注册表：EventApprovalHandler 与 ServerState 共享。
     let approvals: state::ApprovalRegistry = Arc::new(dashmap::DashMap::new());
 
-    // 若配置了工具，注入交互式审批处理器。
+    // 后台任务台账。
+    let ledger = ledger::TaskLedger::new(event_tx.clone());
+
+    // 若配置了工具，注入交互式审批处理器 + 把后台移交接到台账。
     let mut session_cfg = session_cfg;
     if let Some(tools) = session_cfg.tools.take() {
         let handler = Arc::new(tools_bridge::EventApprovalHandler::new(
             event_tx.clone(),
             Arc::clone(&approvals),
         ));
+        // 后台移交 → 台账登记。
+        if let Some(mut rx) = tools.take_handoff() {
+            let ledger2 = ledger.clone();
+            tokio::spawn(async move {
+                while let Some(handoff) = rx.recv().await {
+                    ledger2.register(handoff);
+                }
+            });
+        }
         session_cfg.tools = Some(tools.with_approval(handler));
     }
 
     let session = session::spawn(session_cfg, provider, event_tx.clone());
-    let state = Arc::new(ServerState::new(event_tx, session, approvals));
+    let state = Arc::new(ServerState::new(event_tx, session, approvals, ledger));
 
-    // 心跳 tick 底座（M3：占位回调；M4/M5 挂扫描/dreaming）。
+    // 心跳 tick：M4 挂卡死诊断扫描（M5 再挂 dreaming）。
     let shutdown = CancellationToken::new();
-    scheduler::Heartbeat::new(heartbeat_interval).spawn(shutdown.clone(), move |tick| async move {
-        tracing::debug!(tick, "heartbeat（M3 占位）");
+    let scan_session = state.session().clone();
+    scheduler::Heartbeat::new(heartbeat_interval).spawn(shutdown.clone(), move |tick| {
+        let session = scan_session.clone();
+        async move {
+            tracing::debug!(tick, "heartbeat：卡死诊断扫描");
+            session.health_scan().await;
+        }
     });
 
     let mut listener = transport::Listener::bind(&kind)?;

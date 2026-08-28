@@ -31,6 +31,8 @@ fn cfg_with_tools(tools: ToolExecutor) -> SessionConfig {
         run_timeout: None,
         queue_cap: 8,
         tools: Some(tools),
+        warn_secs: 60,
+        abort_min_secs: 300,
     }
 }
 
@@ -123,6 +125,8 @@ async fn dangerous_command_triggers_approval_then_runs() {
         run_timeout: None,
         queue_cap: 8,
         tools: Some(executor),
+        warn_secs: 60,
+        abort_min_secs: 300,
     };
 
     // 危险命令：sudo（会判 NeedsApproval）。审批放行后进入执行。

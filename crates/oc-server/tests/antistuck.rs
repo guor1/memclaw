@@ -19,6 +19,8 @@ fn cfg(idle_ms: u64) -> SessionConfig {
         run_timeout: None,
         queue_cap: 8,
         tools: None,
+        warn_secs: 60,
+        abort_min_secs: 300,
     }
 }
 
@@ -103,6 +105,43 @@ async fn abort_stops_active_run() {
 
     let evs = collect_until_terminal(&mut rx, Duration::from_secs(2)).await;
     assert!(has_error(&evs), "abort 应产生错误终态");
+}
+
+#[tokio::test]
+async fn health_scan_aborts_stuck_run() {
+    let (tx, mut rx) = broadcast::channel(256);
+    // 模型卡很久；idle 看门狗设长(60s)不先触发，让卡死诊断来处理。
+    let provider = Arc::new(MockProvider::stalls_for(Duration::from_secs(60)));
+    let cfg = SessionConfig {
+        model: "mock".into(),
+        system_prompt: None,
+        idle_timeout: Duration::from_secs(60), // 看门狗不先触发
+        run_timeout: None,
+        queue_cap: 8,
+        tools: None,
+        warn_secs: 1,      // 1s 警告
+        abort_min_secs: 2, // 2s 达 abort 条件
+    };
+    let handle = session::spawn(cfg, provider, tx);
+
+    let _run = handle.submit("会卡死".into()).await.expect("run");
+
+    // 模拟心跳：每 500ms 扫一次，累计触发卡死诊断。
+    let scanner = handle.clone();
+    tokio::spawn(async move {
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            scanner.health_scan().await;
+        }
+    });
+
+    let start = std::time::Instant::now();
+    let evs = collect_until_terminal(&mut rx, Duration::from_secs(8)).await;
+    let elapsed = start.elapsed();
+
+    assert!(has_error(&evs), "卡死诊断应中止 run 并产生错误终态");
+    // 应在 abort 阈值(2s)后不久被中止，远早于 60s。
+    assert!(elapsed < Duration::from_secs(6), "应及时中止，实际 {elapsed:?}");
 }
 
 fn has_assistant_containing(evs: &[Event], needle: &str) -> bool {

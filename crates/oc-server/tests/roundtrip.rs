@@ -73,6 +73,8 @@ async fn connect_and_echo_roundtrip() {
             run_timeout: None,
             queue_cap: 8,
             tools: None,
+            warn_secs: 60,
+            abort_min_secs: 300,
         };
         let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60)).await;
     });

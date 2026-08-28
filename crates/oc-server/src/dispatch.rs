@@ -36,12 +36,15 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
             db_version: oc_store::migrate::TARGET_VERSION,
         })),
         Method::ChatHistory(_) => Ok(MethodOk::History(vec![])),
+        Method::TasksList => Ok(MethodOk::Tasks(state.ledger().list())),
+        Method::TasksCancel(p) => {
+            state.ledger().cancel(&p.task_id);
+            Ok(MethodOk::Empty)
+        }
         // 以下方法在后续里程碑实现。
         Method::CronAdd(_)
         | Method::CronList
         | Method::CronRm(_)
-        | Method::TasksList
-        | Method::TasksCancel(_)
         | Method::MemorySearch(_) => Err(ProtoError {
             kind: oc_proto::ErrorKind::Unsupported,
             message: "该方法将在后续里程碑实现".to_string(),

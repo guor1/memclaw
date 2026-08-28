@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oc_core::agent::RunOutcome;
-use oc_core::queue::{QueuedTurn, RunQueue, SubmitResult};
+use oc_core::queue::{diagnose, QueuedTurn, RunHealth, RunQueue, SubmitResult};
 use oc_llm::Provider;
 use oc_proto::{Event, RunId};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -27,6 +27,10 @@ pub struct SessionConfig {
     pub queue_cap: usize,
     /// 工具执行器（None = 纯对话，无工具）。
     pub tools: Option<crate::tools_bridge::ToolExecutor>,
+    /// 卡死诊断警告阈值（秒）。超过则标记 long_running。
+    pub warn_secs: u64,
+    /// 卡死 abort 下限（秒）。达到 abort 条件才释放车道（设计 §10.1）。
+    pub abort_min_secs: u64,
 }
 
 /// 发给 session actor 的命令。
@@ -40,6 +44,8 @@ pub enum SessionCmd {
     Abort { run_id: RunId, hard: bool },
     /// 活跃 run 结束通知（内部）。
     Finished { run_id: RunId, outcome: RunOutcome },
+    /// 卡死诊断扫描（由心跳 tick 触发）：检查活跃 run 是否卡死。
+    HealthScan,
 }
 
 /// actor 句柄。
@@ -57,6 +63,11 @@ impl SessionHandle {
 
     pub async fn abort(&self, run_id: RunId, hard: bool) {
         let _ = self.tx.send(SessionCmd::Abort { run_id, hard }).await;
+    }
+
+    /// 触发一次卡死诊断扫描（心跳 tick 调用）。
+    pub async fn health_scan(&self) {
+        let _ = self.tx.send(SessionCmd::HealthScan).await;
     }
 }
 
@@ -76,6 +87,7 @@ pub fn spawn(
 struct ActiveRun {
     run_id: RunId,
     cancel: CancellationToken,
+    started_at: std::time::Instant,
 }
 
 async fn actor_loop(
@@ -132,6 +144,25 @@ async fn actor_loop(
                     }
                 }
             }
+            SessionCmd::HealthScan => {
+                if let Some(a) = &active {
+                    let elapsed = a.started_at.elapsed().as_secs();
+                    match diagnose(elapsed, cfg.warn_secs, cfg.abort_min_secs) {
+                        RunHealth::Stuck => {
+                            warn!(
+                                run_id = %a.run_id,
+                                elapsed,
+                                "卡死诊断：run 卡死，中止以释放车道"
+                            );
+                            a.cancel.cancel();
+                        }
+                        RunHealth::LongRunning => {
+                            warn!(run_id = %a.run_id, elapsed, "run 慢(long_running)，暂不中止");
+                        }
+                        RunHealth::Healthy => {}
+                    }
+                }
+            }
         }
     }
 }
@@ -176,7 +207,11 @@ fn start_run(
             .await;
     });
 
-    ActiveRun { run_id, cancel }
+    ActiveRun {
+        run_id,
+        cancel,
+        started_at: std::time::Instant::now(),
+    }
 }
 
 /// 简易 UUIDv7（避免为此引入额外依赖；server 已有 uuid）。

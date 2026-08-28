@@ -59,16 +59,39 @@ impl ApprovalHandler for EventApprovalHandler {
     }
 }
 
+/// 后台移交 receiver（可被 serve_with 取出接到台账）。
+pub type HandoffReceiver =
+    Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<oc_tools::process::BackgroundHandoff>>>>;
+
 /// run driver 用的工具执行器。
 #[derive(Clone)]
 pub struct ToolExecutor {
     registry: Arc<ToolRegistry>,
     approval: Option<Arc<dyn ApprovalHandler>>,
+    /// process 工具的后台移交 receiver（serve_with 取出接台账）。
+    handoff: Option<HandoffReceiver>,
 }
 
 impl ToolExecutor {
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
-        Self { registry, approval: None }
+        Self { registry, approval: None, handoff: None }
+    }
+
+    /// 设置后台移交 receiver。
+    pub fn with_handoff(
+        mut self,
+        rx: tokio::sync::mpsc::UnboundedReceiver<oc_tools::process::BackgroundHandoff>,
+    ) -> Self {
+        self.handoff = Some(Arc::new(tokio::sync::Mutex::new(Some(rx))));
+        self
+    }
+
+    /// 取出后台移交 receiver（仅一次）。
+    pub fn take_handoff(
+        &self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<oc_tools::process::BackgroundHandoff>> {
+        let h = self.handoff.as_ref()?;
+        h.try_lock().ok()?.take()
     }
 
     /// 注入审批处理器（交互式审批）。

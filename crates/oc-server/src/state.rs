@@ -28,6 +28,8 @@ pub struct ServerState {
     session: SessionHandle,
     /// 待处理审批注册表（与审批处理器共享）。
     approvals: ApprovalRegistry,
+    /// 后台任务台账。
+    ledger: crate::ledger::TaskLedger,
 }
 
 impl ServerState {
@@ -35,13 +37,20 @@ impl ServerState {
         event_tx: broadcast::Sender<Event>,
         session: SessionHandle,
         approvals: ApprovalRegistry,
+        ledger: crate::ledger::TaskLedger,
     ) -> Self {
         Self {
             event_tx,
             idem: DashMap::new(),
             session,
             approvals,
+            ledger,
         }
+    }
+
+    /// 后台任务台账。
+    pub fn ledger(&self) -> &crate::ledger::TaskLedger {
+        &self.ledger
     }
 
     /// 收到审批回执，唤醒等待方。

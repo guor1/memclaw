@@ -9,7 +9,7 @@ use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, Key
 use futures_util::StreamExt;
 use oc_proto::{
     ChatSendParams, ConnectParams, Event, Frame, LifecyclePhase, Method, Req, ReqId, ResResult,
-    PROTO_VERSION,
+    RunId, PROTO_VERSION,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -38,6 +38,8 @@ pub struct App {
     should_quit: bool,
     /// 待处理审批 id（非 None 时输入区进入 y/n 审批模式）。
     pending_approval: Option<oc_proto::ApprovalId>,
+    /// 最近一次 chat.send 分配的 run_id（用于 /stop）。
+    active_run: Option<RunId>,
 }
 
 impl App {
@@ -63,6 +65,7 @@ impl App {
             next_req: 1,
             should_quit: false,
             pending_approval: None,
+            active_run: None,
         };
         // 等 hello。
         if let Some(Frame::Res(res)) = app.client.recv().await? {
@@ -143,7 +146,13 @@ impl App {
             }
             KeyCode::Enter => {
                 let text = self.input.trim().to_string();
-                if !text.is_empty() && self.connected {
+                if text == "/stop" {
+                    // 完整 /stop：hard abort（先 drain 排队轮再中止活跃 run）。
+                    if let Some(run_id) = self.active_run.clone() {
+                        self.abort_run(run_id, true).await?;
+                        self.msgs.push(Msg { who: "系统", text: "已请求停止".into() });
+                    }
+                } else if !text.is_empty() && self.connected {
                     self.msgs.push(Msg { who: "你", text: text.clone() });
                     self.send_chat(text).await?;
                 }
@@ -195,10 +204,27 @@ impl App {
         Ok(())
     }
 
+    async fn abort_run(&mut self, run_id: RunId, hard: bool) -> Result<()> {
+        let req_id = format!("abort-{}", self.next_req);
+        self.next_req += 1;
+        let req = Req {
+            id: ReqId::new(req_id),
+            method: Method::ChatAbort(oc_proto::ChatAbortParams { run_id, hard }),
+            idempotency_key: None,
+        };
+        self.client.send(&Frame::Req(req)).await?;
+        Ok(())
+    }
+
     fn on_frame(&mut self, frame: Frame) {
         match frame {
             Frame::Event(ev) => self.on_event(ev),
-            Frame::Res(_) => { /* M2：run_id 应答暂不展示 */ }
+            Frame::Res(res) => {
+                // 记录 chat.send 分配的 run_id，供 /stop 使用。
+                if let ResResult::Ok(oc_proto::MethodOk::ChatSend { run_id }) = res.result {
+                    self.active_run = Some(run_id);
+                }
+            }
             Frame::Req(_) => {}
         }
     }

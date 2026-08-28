@@ -48,6 +48,8 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         },
         queue_cap: 16,
         tools: Some(tools),
+        warn_secs: idle, // 警告阈值取空闲看门狗阈值
+        abort_min_secs: cfg.watchdog.abort_min_secs,
     };
 
     // 解引用 api_key。
@@ -88,7 +90,11 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
     registry.register(Arc::new(ExecTool::new(mode, exec_timeout)));
     registry.register(Arc::new(FileTool::new(roots)));
 
-    Ok(ToolExecutor::new(Arc::new(registry)))
+    // process 工具：后台移交 channel，接口另一端在 serve_with 接到台账。
+    let (handoff_tx, handoff_rx) = tokio::sync::mpsc::unbounded_channel();
+    registry.register(Arc::new(oc_tools::process::ProcessTool::new(handoff_tx)));
+
+    Ok(ToolExecutor::new(Arc::new(registry)).with_handoff(handoff_rx))
 }
 
 fn resolve_secret(s: &SecretRef) -> Option<String> {
