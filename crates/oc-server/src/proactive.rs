@@ -119,6 +119,7 @@ async fn run_isolated_turn(ctx: &ProactiveCtx, prompt: &str) -> String {
             content: prompt.to_string(),
             tool_call_id: None,
             tool_calls: vec![],
+            reasoning: None,
         }],
         tools: Vec::new(), // cron 轮不带工具（M6 简化；后续可放开）。
         max_tokens: None,

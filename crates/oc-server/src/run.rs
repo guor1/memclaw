@@ -75,6 +75,8 @@ pub async fn drive(ctx: RunCtx) -> RunOutcome {
 async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
     let mut state = RunState::Idle;
     let mut acc = String::new();
+    // thinking 模式的推理内容累积（每轮清空）；发起工具调用时随 assistant 消息回喂。
+    let mut reasoning = String::new();
     // 对话历史（含用户输入、模型回复、工具结果），供多轮工具调用。
     // history 已含本轮落库的用户消息；为空时回退到 user_text。
     let mut messages: Vec<Message> = if ctx.history.is_empty() {
@@ -83,6 +85,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
             content: ctx.user_text.clone(),
             tool_call_id: None,
             tool_calls: vec![],
+            reasoning: None,
         }]
     } else {
         ctx.history.clone()
@@ -101,7 +104,8 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
     // 主循环：每次做一轮模型调用；若产生工具调用则执行后继续。
     loop {
         // 一次模型流：消费到 ModelDone / ModelToolCall / 错误 / 中止。
-        let turn = run_model_turn(ctx, &mut state, &mut acc, &messages).await;
+        reasoning.clear();
+        let turn = run_model_turn(ctx, &mut state, &mut acc, &mut reasoning, &messages).await;
 
         match turn {
             TurnResult::Completed => {
@@ -123,6 +127,12 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                         name: name.clone(),
                         args: args.clone(),
                     }],
+                    // thinking 模式：带回本轮 reasoning_content，否则回喂 400。
+                    reasoning: if reasoning.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning.clone())
+                    },
                 });
                 if !acc.is_empty() {
                     persist(ctx, oc_store::Role::Assistant, &acc).await;
@@ -154,6 +164,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                     content: output,
                     tool_call_id: Some(call_id.clone()),
                     tool_calls: vec![],
+                    reasoning: None,
                 });
                 let (next, effs) = step(
                     state.clone(),
@@ -213,6 +224,7 @@ fn apply_compaction(messages: &[Message], cfg: &oc_core::compaction::CompactCfg)
                 content: format!("{kept}\n…[旧工具输出已剪枝]"),
                 tool_call_id: m.tool_call_id.clone(),
                 tool_calls: m.tool_calls.clone(),
+                reasoning: m.reasoning.clone(),
             });
         } else {
             out.push(m.clone());
@@ -232,6 +244,7 @@ async fn run_model_turn(
     ctx: &RunCtx,
     state: &mut RunState,
     acc: &mut String,
+    reasoning: &mut String,
     messages: &[Message],
 ) -> TurnResult {
     let tool_specs = ctx
@@ -308,6 +321,11 @@ async fn run_model_turn(
                 let (n, effs) = step(state.clone(), StepEvent::ModelText(t), acc);
                 *state = n;
                 execute_effects(ctx, &effs, acc).await;
+            }
+            // thinking 内容：仅累积（供工具调用轮回喂），不进 assistant 可见文本、
+            // 不落库、不推事件流。
+            Delta::Reasoning(r) => {
+                reasoning.push_str(&r);
             }
             Delta::ToolCall(tc) => {
                 if !tc.call_id.is_empty() {

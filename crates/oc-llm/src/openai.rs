@@ -55,6 +55,10 @@ impl OpenAiProvider {
                     } else {
                         json!(m.content)
                     };
+                    // thinking 模式：把该轮的 reasoning_content 带回，否则 400。
+                    if let Some(rc) = &m.reasoning {
+                        msg["reasoning_content"] = json!(rc);
+                    }
                     msg["tool_calls"] = json!(m
                         .tool_calls
                         .iter()
@@ -185,6 +189,12 @@ fn parse_chunk(payload: &str) -> Option<Delta> {
             return Some(Delta::Text(text.to_string()));
         }
     }
+    // thinking 模式：reasoning_content 与 content 分离流出，累积后回喂时需带回。
+    if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+        if !rc.is_empty() {
+            return Some(Delta::Reasoning(rc.to_string()));
+        }
+    }
     if let Some(tc) = delta.get("tool_calls").and_then(|t| t.get(0)) {
         let call_id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
         let name = tc
@@ -247,7 +257,7 @@ mod tests {
     }
 
     fn user(text: &str) -> Message {
-        Message { role: MsgRole::User, content: text.into(), tool_call_id: None, tool_calls: vec![] }
+        Message { role: MsgRole::User, content: text.into(), tool_call_id: None, tool_calls: vec![], reasoning: None }
     }
 
     #[test]
@@ -263,6 +273,15 @@ mod tests {
         assert_eq!(arr[0]["type"], "function");
         assert_eq!(arr[0]["function"]["name"], "exec");
         assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn parses_reasoning_content_delta() {
+        let chunk = r#"{"choices":[{"delta":{"reasoning_content":"让我想想"}}]}"#;
+        assert_eq!(parse_chunk(chunk), Some(Delta::Reasoning("让我想想".into())));
+        // content 优先于 reasoning（正常回复片段）。
+        let chunk2 = r#"{"choices":[{"delta":{"content":"答案"}}]}"#;
+        assert_eq!(parse_chunk(chunk2), Some(Delta::Text("答案".into())));
     }
 
     #[test]
@@ -285,12 +304,14 @@ mod tests {
                     name: "exec".into(),
                     args: r#"{"cmd":"date"}"#.into(),
                 }],
+                reasoning: Some("先查当前时间".into()),
             },
             Message {
                 role: MsgRole::Tool,
                 content: "2026-08-29".into(),
                 tool_call_id: Some("call_1".into()),
                 tool_calls: vec![],
+                reasoning: None,
             },
         ];
         let body = OpenAiProvider::body(&req_with(messages, vec![]));
@@ -299,6 +320,7 @@ mod tests {
         let asst = &msgs[2];
         assert_eq!(asst["role"], "assistant");
         assert!(asst["content"].is_null(), "空 content 应为 null");
+        assert_eq!(asst["reasoning_content"], "先查当前时间", "thinking 内容应回喂");
         assert_eq!(asst["tool_calls"][0]["id"], "call_1");
         assert_eq!(asst["tool_calls"][0]["function"]["name"], "exec");
         assert_eq!(asst["tool_calls"][0]["function"]["arguments"], r#"{"cmd":"date"}"#);

@@ -339,6 +339,8 @@ async fn load_history(store: &oc_store::Store, cfg: &SessionConfig, session_id: 
             content,
             tool_call_id: None,
             tool_calls: vec![],
+            // 历史重放不带 reasoning（thinking 内容不落库，仅实时轮回喂）。
+            reasoning: None,
         });
     }
     kept.reverse(); // 变回正序

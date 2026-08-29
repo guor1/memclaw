@@ -26,6 +26,11 @@ pub struct Message {
     /// assistant 消息，否则回喂时报 400。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallSpec>,
+    /// thinking 模式模型（如 DeepSeek-reasoner）返回的推理内容。
+    /// 发起工具调用的 assistant 消息回喂时**必须带回**，否则报
+    /// "reasoning_content in the thinking mode must be passed back" 400。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// assistant 发起的一次工具调用（已拼装完整，非流式分片）。
@@ -60,6 +65,8 @@ pub struct ToolSpec {
 pub enum Delta {
     /// 文本片段。
     Text(String),
+    /// thinking 模式的推理内容片段（reasoning_content）。
+    Reasoning(String),
     /// 工具调用增量（分片拼装）。
     ToolCall(ToolCallDelta),
     /// token 计量。
