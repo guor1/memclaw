@@ -9,6 +9,7 @@ pub mod agent;
 pub mod compaction;
 pub mod config;
 pub mod dreaming;
+pub mod proactive;
 pub mod memory;
 pub mod model;
 pub mod prompt;
