@@ -162,8 +162,48 @@ oc status     # daemon 状态快照
 
 ## 开发
 
+### 开发期启动（未安装到 PATH）
+
+上面「使用指南」里的 `oc` 是已安装的二进制。开发时用 `cargo run -p oc-cli --` 代替，子命令原样跟在 `--` 后面。
+
+首次准备（生成 `~/.oc` 骨架 + 建库，只需一次）：
+
 ```bash
-cargo test               # 全部测试（当前 110 个）
+cargo run -p oc-cli -- onboard
+cargo run -p oc-cli -- doctor
+export DEEPSEEK_API_KEY=sk-xxxx        # Windows: setx DEEPSEEK_API_KEY sk-xxxx
+```
+
+两个终端跑起来对话：
+
+```bash
+# 终端 1：启动 daemon（阻塞；单实例锁，同时只能开一个）
+cargo run -p oc-cli -- serve
+
+# 终端 2：连上 daemon 进 TUI
+cargo run -p oc-cli
+```
+
+其余子命令同理：
+
+```bash
+cargo run -p oc-cli -- cron list
+cargo run -p oc-cli -- memory search "关键词" --limit 5
+cargo run -p oc-cli -- status
+```
+
+想看 daemon 细节日志：
+
+```bash
+RUST_LOG=oc_server=debug cargo run -p oc-cli -- serve
+```
+
+要点：先 `onboard` 再 `serve`（serve 会读 `~/.oc/config.toml`，缺失会失败）；跑 TUI 的终端不要再 `serve`（单实例锁）；首次 `cargo run` 会编译整个 workspace，之后增量很快。
+
+### 测试与检查
+
+```bash
+cargo test               # 全部测试（当前 113 个）
 cargo test -p oc-core    # 单 crate
 cargo clippy --all-targets
 ```
