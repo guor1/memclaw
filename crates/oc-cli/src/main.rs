@@ -48,6 +48,12 @@ enum Command {
     Sessions,
     /// 压缩当前会话上下文（摘要旧历史）。
     Compact,
+    /// 诊断快照：活跃 run、队列深度、车道占用、写线程健康。
+    Debug {
+        /// 持续刷新（每秒一次），观察卡住时状态如何演变。Ctrl-C 退出。
+        #[arg(long)]
+        watch: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -99,6 +105,7 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Status) => cli_client::status(),
         Some(Command::Sessions) => cli_client::sessions(),
         Some(Command::Compact) => cli_client::compact(),
+        Some(Command::Debug { watch }) => cli_client::debug(watch),
         // 无子命令 → 连 daemon 进 TUI。
         None => tui_runner::run(),
     }
@@ -106,15 +113,33 @@ fn main() -> anyhow::Result<()> {
 
 /// 启动常驻进程（阻塞直到收到关停信号）。
 fn run_serve() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "oc_server=info".into()),
-        )
-        .init();
-
     let home = paths::oc_home()?;
     std::fs::create_dir_all(&home)?;
+
+    // 日志：同时落盘（~/.oc/logs/oc.log.YYYY-MM-DD，按天滚动）+ stderr。
+    // daemon 与 TUI 是两个进程，落盘保证排障时能 tail 到 daemon 侧日志。
+    // _guard 必须存活到进程结束，否则 non_blocking writer 会丢日志。
+    let log_dir = home.join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "oc.log");
+    let (file_nb, _guard) = tracing_appender::non_blocking(file_appender);
+
+    use tracing_subscriber::prelude::*;
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "oc=info,oc_server=info,oc_llm=info".into());
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(file_nb)
+        .with_ansi(false)
+        .with_target(true)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE);
+    let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
+        .with(stderr_layer)
+        .init();
+
+    tracing::info!(log_dir = %log_dir.display(), "日志已初始化（落盘 + stderr）");
 
     // 单实例锁：防止多个 serve 争用同一 socket / 库。
     let _guard = lock::acquire(&home)?;

@@ -35,6 +35,8 @@ pub enum Method {
     ApprovalReply(ApprovalReplyParams),
     Status,
     Health,
+    /// 整机诊断快照（`oc debug`）：会话表 + 活跃 run + 队列 + 写线程健康。
+    Diagnostics,
 }
 
 /// 方法成功返回，与 [`Method`] 一一对应。
@@ -56,6 +58,7 @@ pub enum MethodOk {
     Sessions(Vec<SessionView>),
     Status(Snapshot),
     Health(HealthOk),
+    Diagnostics(DiagnosticsSnapshot),
 }
 
 // ── params ──────────────────────────────────────────────────────
@@ -226,4 +229,78 @@ pub struct MemHit {
     pub tier: String,
     pub text: String,
     pub score: f32,
+}
+
+// ── 诊断快照（oc debug）────────────────────────────────────────
+
+/// 整机诊断快照：运行时状态的一次采样，用于定位「不回复 / 截断 / 卡死」等
+/// 时序问题。纯观测数据，无副作用。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DiagnosticsSnapshot {
+    /// daemon 运行时长（秒）。
+    pub uptime_secs: u64,
+    /// 当前所有会话的运行时状态。
+    pub sessions: Vec<SessionDiag>,
+    /// 写线程是否存活（ping 一次写线程确认）。
+    pub store_writer_alive: bool,
+    /// 当前事件订阅者数（活跃连接近似）。
+    pub event_subscribers: usize,
+    /// 采样时刻（unix ms），供 client 计算各 run 的实时 age。
+    pub sampled_at: i64,
+    pub proto_version: u16,
+}
+
+/// 单会话运行时诊断。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SessionDiag {
+    pub session_id: SessionId,
+    /// 排队等待的轮数（不含活跃）。
+    pub queue_depth: usize,
+    /// 当前活跃 run（无则 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<RunSnapshot>,
+    /// 车道被占用起始时刻（unix ms）；长 run / compact 阻塞可一眼看出。无占用则 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane_busy_since: Option<i64>,
+    /// 本会话累计起过的 run 数。
+    pub total_runs: u64,
+    /// 最近一次 run 的结束原因（outcome / finish_reason 文本）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_finish_reason: Option<String>,
+    /// 最近一次错误文本（若有）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// 活跃 run 的运行时快照。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RunSnapshot {
+    pub run_id: RunId,
+    /// 当前阶段（排队/等模型/流式/工具执行）。
+    pub phase: RunPhase,
+    /// run 起始时刻（unix ms）。
+    pub started_at: i64,
+    /// 最近一次收到模型 delta 的时刻（unix ms）；判断「卡在等模型」用。无则 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_delta_at: Option<i64>,
+    /// 已进行的工具调用轮数。
+    pub tool_rounds: usize,
+    /// 已累积的 assistant 文本长度（字符）；判断「有没有在出字」。
+    pub acc_chars: usize,
+}
+
+/// run 阶段（诊断用，比 oc-core 的 RunState 更粗粒度且可跨 crate 传输）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPhase {
+    /// 已提交、尚未起步（仍在 append_entry / load_history 等准备阶段）。
+    Starting,
+    /// 已发起模型调用、等待响应。
+    AwaitingModel,
+    /// 正在接收模型流式输出。
+    Streaming,
+    /// 正在执行工具。
+    ToolExec,
+    /// 正在执行 compact 摘要（占用车道）。
+    Compacting,
 }

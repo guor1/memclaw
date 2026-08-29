@@ -32,6 +32,7 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
         Method::SessionReset(p) => handle_session_reset(p, state).await,
         Method::Compact(p) => handle_compact(p, state).await,
         Method::SessionsList => handle_sessions_list(state).await,
+        Method::Diagnostics => handle_diagnostics(state).await,
         Method::Status => Ok(MethodOk::Status(snapshot(state, &SessionId::main()))),
         Method::Health => Ok(MethodOk::Health(oc_proto::HealthOk {
             ok: true,
@@ -182,6 +183,28 @@ async fn handle_sessions_list(state: &Arc<ServerState>) -> Result<MethodOk, Prot
         })
         .collect();
     Ok(MethodOk::Sessions(out))
+}
+
+/// 整机诊断快照（`oc debug`）：会话运行时状态 + 写线程健康 + 订阅者数。
+async fn handle_diagnostics(state: &Arc<ServerState>) -> Result<MethodOk, ProtoError> {
+    // 写线程健康：发一个廉价读命令（session_list），能回即视为存活。
+    let store_writer_alive = state.store().writer().session_list().await.is_ok();
+    let snap = oc_proto::DiagnosticsSnapshot {
+        uptime_secs: state.diag().uptime_secs(),
+        sessions: state.diag().snapshot_sessions(),
+        store_writer_alive,
+        event_subscribers: state.subscriber_count(),
+        sampled_at: now_millis(),
+        proto_version: PROTO_VERSION,
+    };
+    Ok(MethodOk::Diagnostics(snap))
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// 新增 cron：校验表达式（core::next_fire）→ 算首次触发 → 落库。

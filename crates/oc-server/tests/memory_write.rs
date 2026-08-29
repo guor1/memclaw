@@ -50,7 +50,7 @@ async fn explicit_remember_then_recall() {
     let (tx, mut rx) = broadcast::channel(256);
     let provider = Arc::new(CapturingMock::new("好的，记下了"));
     let captures = provider.captures();
-    let handle = session::spawn(oc_proto::SessionId::main(), cfg(), provider, tx, store.clone());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     // 第 1 轮：显式"记住…"，触发 curated 写入。
     handle.submit("记住：我喜欢简洁直接的回复".into()).await.expect("run1");

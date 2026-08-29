@@ -50,7 +50,7 @@ async fn custom_soul_reaches_model_request() {
     let captures = provider.captures();
     let store = oc_store::Store::open_memory().unwrap();
 
-    let handle = session::spawn(oc_proto::SessionId::main(), cfg("我是测试人格 ZZZ。"), provider, tx, store);
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg("我是测试人格 ZZZ。"), provider, tx, store, oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
     handle.submit("你好".into()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
@@ -72,7 +72,7 @@ async fn empty_soul_falls_back_to_default_persona() {
     let captures = provider.captures();
     let store = oc_store::Store::open_memory().unwrap();
 
-    let handle = session::spawn(oc_proto::SessionId::main(), cfg(""), provider, tx, store);
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg(""), provider, tx, store, oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
     handle.submit("你好".into()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
@@ -94,7 +94,7 @@ async fn skills_reach_model_request() {
         body: "生成 PDF 时用 XXXPDFSKILL 工具链。".into(),
     }];
 
-    let handle = session::spawn(oc_proto::SessionId::main(), c, provider, tx, store);
+    let handle = session::spawn(oc_proto::SessionId::main(), c, provider, tx, store, oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
     handle.submit("你好".into()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
@@ -110,7 +110,7 @@ async fn history_is_passed_as_messages() {
     let captures = provider.captures();
     let store = oc_store::Store::open_memory().unwrap();
 
-    let handle = session::spawn(oc_proto::SessionId::main(), cfg("人格"), provider, tx, store.clone());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg("人格"), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
     handle.submit("第一句".into()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 

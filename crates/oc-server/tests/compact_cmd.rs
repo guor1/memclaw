@@ -49,7 +49,7 @@ async fn compact_summarizes_old_history() {
     // mock 摘要返回固定文本。
     let provider = Arc::new(CapturingMock::new("这是压缩后的结构化摘要文本"));
     let (tx, _rx) = broadcast::channel(64);
-    let handle = session::spawn(SessionId::main(), cfg(), provider, tx, store.clone());
+    let handle = session::spawn(SessionId::main(), cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     handle.compact().await;
 
@@ -68,4 +68,40 @@ async fn compact_summarizes_old_history() {
         }
     }
     assert!(ok, "compact 应在超时内完成落库");
+}
+
+#[tokio::test]
+async fn compact_short_history_notifies_instead_of_silent() {
+    let store = oc_store::Store::open_memory().unwrap();
+    let w = store.writer();
+    w.ensure_session("main".into(), "main".into()).await.unwrap();
+    // 只放 2 条（不足 keep_recent+1），应跳过压缩但给反馈。
+    for (role, text) in [(oc_store::Role::User, "hi"), (oc_store::Role::Assistant, "在")] {
+        w.append_entry(oc_store::NewEntry {
+            session_id: "main".into(),
+            role,
+            content: text.into(),
+            tokens_est: 1,
+        })
+        .await
+        .unwrap();
+    }
+
+    let provider = Arc::new(CapturingMock::new("不应被调用"));
+    let (tx, mut rx) = broadcast::channel(64);
+    let handle = session::spawn(SessionId::main(), cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
+
+    handle.compact().await;
+
+    // 应收到一条 Proactive 通知，说明无需压缩（而非静默）。
+    let mut notified = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        if let oc_proto::Event::Proactive { text, .. } = ev {
+            assert!(text.contains("无需压缩"), "应提示无需压缩: {text}");
+            notified = true;
+            break;
+        }
+    }
+    assert!(notified, "历史过短时应给出明确反馈，而非静默跳过");
 }

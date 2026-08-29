@@ -59,7 +59,7 @@ oc-cli ──▶ oc-tui ──▶ oc-server ──▶ oc-core   (纯策略：不
 | `oc-tools` | 工具集，Tool trait + 策略管道 + exec 审批门 |
 | `oc-server` | 常驻进程，agent 循环 / 看门狗 / 心跳 / 主动性 |
 | `oc-tui` | 本地终端 UI，协议第一个 client，纯展示 |
-| `oc-cli` | CLI 入口，doctor / serve / onboard / cron / memory / status |
+| `oc-cli` | CLI 入口，doctor / serve / onboard / cron / memory / status / debug |
 
 细节见 [docs/02-详细设计文档.md](docs/02-详细设计文档.md)。
 
@@ -120,11 +120,16 @@ oc cron rm <cron_id>
 oc memory search "上次讨论的架构决策" --limit 5
 ```
 
-### 状态
+### 状态与诊断
 
 ```bash
-oc status     # daemon 状态快照
+oc status            # daemon 状态快照（会话/活跃 run/上下文用量）
+oc debug             # 运行时诊断快照：各会话 phase、队列深度、车道占用、写线程健康
+oc debug --watch     # 每秒刷新，观察「不回复 / 卡住」时状态如何演变（Ctrl-C 退出）
 ```
+
+排查「消息不回复 / 回复截断 / 卡死」这类时序问题时，用 `oc debug --watch` 实时看 run 卡在哪个阶段
+（`awaiting-mdl` 长时间无 `last_delta` 即模型侧无响应），配合 daemon 日志（见下「开发」）定位。
 
 ### 配置要点
 
@@ -192,11 +197,30 @@ cargo run -p oc-cli -- memory search "关键词" --limit 5
 cargo run -p oc-cli -- status
 ```
 
-想看 daemon 细节日志：
+### 调试：日志 + 诊断快照
+
+daemon 与 TUI 是两个进程，`warn!`/错误都打在**跑 `serve` 的那个终端**。日志同时落盘到
+`~/.oc/logs/oc.log.YYYY-MM-DD`（按天滚动），排障时可直接 tail：
 
 ```bash
-RUST_LOG=oc_server=debug cargo run -p oc-cli -- serve
+# 终端 1：以 debug 级日志启动 daemon（含每个 run 的 span、建流延迟、finish_reason、看门狗等）
+RUST_LOG=oc=debug cargo run -p oc-cli -- serve
+
+# 另开一个终端：跟踪落盘日志（Windows 用 Get-Content -Wait 或编辑器打开）
+tail -f ~/.oc/logs/oc.log.*
 ```
+
+`RUST_LOG` 过滤器可按 crate/级别细调，例如 `oc=debug,oc_llm=info`（默认 `oc=info,oc_server=info,oc_llm=info`）。
+
+实时看运行时状态（不用翻日志）：
+
+```bash
+cargo run -p oc-cli -- debug            # 打印一次诊断快照
+cargo run -p oc-cli -- debug --watch    # 每秒刷新
+```
+
+一次典型的「不回复」排查：一边 `oc debug --watch` 看 run 卡在哪个 phase，一边 `tail -f` 看
+run span 是否起步、卡在哪个 await、`finish_reason` 是什么。
 
 要点：先 `onboard` 再 `serve`（serve 会读 `~/.oc/config.toml`，缺失会失败）；跑 TUI 的终端不要再 `serve`（单实例锁）；首次 `cargo run` 会编译整个 workspace，之后增量很快。
 

@@ -29,6 +29,7 @@ struct Inner {
     provider: Arc<dyn Provider>,
     events: broadcast::Sender<Event>,
     store: oc_store::Store,
+    diag: crate::diag::DiagRegistry,
 }
 
 impl SessionRegistry {
@@ -38,6 +39,7 @@ impl SessionRegistry {
         provider: Arc<dyn Provider>,
         events: broadcast::Sender<Event>,
         store: oc_store::Store,
+        diag: crate::diag::DiagRegistry,
     ) -> Self {
         let reg = Self {
             inner: Arc::new(Inner {
@@ -46,6 +48,7 @@ impl SessionRegistry {
                 provider,
                 events,
                 store,
+                diag,
             }),
         };
         // 预建 main（不必等首条消息）。
@@ -69,6 +72,7 @@ impl SessionRegistry {
                     Arc::clone(&self.inner.provider),
                     self.inner.events.clone(),
                     self.inner.store.clone(),
+                    self.inner.diag.for_session(id),
                 )
             })
             .clone()

@@ -13,7 +13,7 @@ use oc_llm::Provider;
 use oc_proto::{Event, RunId, SessionId};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use crate::run::{self, RunCtx};
 
@@ -104,10 +104,11 @@ pub fn spawn(
     provider: Arc<dyn Provider>,
     events: broadcast::Sender<Event>,
     store: oc_store::Store,
+    diag: crate::diag::SessionDiag,
 ) -> SessionHandle {
     let (tx, rx) = mpsc::channel(64);
     let handle = SessionHandle { tx: tx.clone() };
-    tokio::spawn(actor_loop(session_id, cfg, provider, events, tx, rx, store));
+    tokio::spawn(actor_loop(session_id, cfg, provider, events, tx, rx, store, diag));
     handle
 }
 
@@ -118,6 +119,7 @@ struct ActiveRun {
     started_at: std::time::Instant,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn actor_loop(
     session_id: SessionId,
     cfg: SessionConfig,
@@ -126,6 +128,7 @@ async fn actor_loop(
     self_tx: mpsc::Sender<SessionCmd>,
     mut rx: mpsc::Receiver<SessionCmd>,
     store: oc_store::Store,
+    diag: crate::diag::SessionDiag,
 ) {
     let mut queue = RunQueue::new(cfg.queue_cap);
     let mut active: Option<ActiveRun> = None;
@@ -145,9 +148,11 @@ async fn actor_loop(
         match cmd {
             SessionCmd::Submit { text, reply } => {
                 let run_id = RunId::new(uuid_v7());
+                info!(session = %sid, run_id = %run_id, chars = text.chars().count(), "submit 受理");
                 let _ = reply.send(run_id.clone());
 
                 // 落库用户消息（重启不失忆）。
+                let t0 = std::time::Instant::now();
                 let est = estimate_tokens(&text);
                 if let Err(e) = store
                     .writer()
@@ -160,7 +165,9 @@ async fn actor_loop(
                     .await
                 {
                     warn!(error = %e, "落库用户消息失败");
+                    diag.set_error(format!("落库用户消息失败: {e}"));
                 }
+                debug!(session = %sid, run_id = %run_id, ms = t0.elapsed().as_millis(), "落库用户消息完成");
 
                 // 显式"记住…"写入路径（设计 §4.1）：用户显式指令 → curated + Owner + 审计。
                 persist_explicit_memory(&store, &text).await;
@@ -171,13 +178,26 @@ async fn actor_loop(
                 };
                 match queue.submit(turn) {
                     SubmitResult::Started(t) => {
+                        // run 起步：登记诊断（phase=Starting，占用车道）。
+                        diag.run_start(t.run_id.as_str());
+                        let th = std::time::Instant::now();
                         let history = load_history(&store, &cfg, &sid).await;
+                        debug!(
+                            session = %sid, run_id = %run_id,
+                            entries = history.len(), ms = th.elapsed().as_millis(),
+                            "历史加载完成"
+                        );
                         let boot = lane1_bootstrap(&store, &cfg, &t.text).await;
-                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, t, history, boot));
+                        info!(session = %sid, run_id = %run_id, "run 起步");
+                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, &diag, t, history, boot));
                     }
-                    SubmitResult::Queued => { /* 等活跃结束再起 */ }
+                    SubmitResult::Queued => {
+                        diag.set_queue_depth(queue.pending_len());
+                        info!(session = %sid, run_id = %run_id, queued = queue.pending_len(), "轮已排队（车道忙）");
+                    }
                     SubmitResult::Rejected => {
-                        warn!("队列已满，拒绝新轮");
+                        warn!(session = %sid, "队列已满，拒绝新轮");
+                        diag.set_error("队列已满，拒绝新轮".to_string());
                     }
                 }
             }
@@ -196,19 +216,33 @@ async fn actor_loop(
             }
             SessionCmd::Compact => {
                 // 手动 /compact：摘要当前历史（保留最近 keep_recent 条）。
+                // 注意：compact 串行占用车道（与 OpenClaw 一致），期间新消息排队。
+                let tc = std::time::Instant::now();
+                info!(session = %sid, "compact 开始（占用车道）");
+                diag.compact_start();
                 compact_session(&store, &cfg, &provider, &events, &sid).await;
+                diag.compact_done();
+                info!(session = %sid, ms = tc.elapsed().as_millis(), "compact 结束");
             }
             SessionCmd::Finished { run_id, outcome } => {
                 if active.as_ref().map(|a| &a.run_id) == Some(&run_id) {
+                    let elapsed = active.as_ref().map(|a| a.started_at.elapsed().as_millis()).unwrap_or(0);
                     if !matches!(outcome, RunOutcome::Completed) {
-                        warn!(run_id = %run_id, ?outcome, "run 非正常终态");
+                        warn!(session = %sid, run_id = %run_id, ?outcome, ms = elapsed, "run 非正常终态");
+                        diag.set_error(format!("run {run_id} 终态: {outcome:?}"));
+                    } else {
+                        info!(session = %sid, run_id = %run_id, ms = elapsed, "run 完成");
                     }
+                    diag.run_done(format!("{outcome:?}"));
                     active = None;
                     // 取下一个排队轮。
                     if let Some(next) = queue.complete_active() {
+                        diag.set_queue_depth(queue.pending_len());
+                        diag.run_start(next.run_id.as_str());
+                        info!(session = %sid, run_id = %next.run_id, "起下一排队轮");
                         let history = load_history(&store, &cfg, &sid).await;
                         let boot = lane1_bootstrap(&store, &cfg, &next.text).await;
-                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, next, history, boot));
+                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, &diag, next, history, boot));
                     }
                 }
             }
@@ -236,6 +270,7 @@ async fn actor_loop(
 }
 
 /// 启动一个 run 任务（含 panic 隔离），返回可中止句柄。
+#[allow(clippy::too_many_arguments)]
 fn start_run(
     session_id: &SessionId,
     cfg: &SessionConfig,
@@ -243,6 +278,7 @@ fn start_run(
     events: &broadcast::Sender<Event>,
     self_tx: &mpsc::Sender<SessionCmd>,
     store: &oc_store::Store,
+    diag: &crate::diag::SessionDiag,
     turn: QueuedTurn,
     history: Vec<oc_llm::Message>,
     bootstrap: Vec<oc_core::prompt::MemLine>,
@@ -272,13 +308,16 @@ fn start_run(
             ..Default::default()
         },
         context_window: cfg.context_window,
+        diag: diag.clone(),
     };
 
     let self_tx = self_tx.clone();
     let rid = run_id.clone();
+    let span = tracing::info_span!("run", run_id = %run_id, session = %session_id);
     tokio::spawn(async move {
+        use tracing::Instrument;
         // panic 隔离：单 run panic 不拖垮进程（设计 §10.3）。
-        let fut = std::panic::AssertUnwindSafe(run::drive(ctx));
+        let fut = std::panic::AssertUnwindSafe(run::drive(ctx).instrument(span));
         let outcome = match futures_util::FutureExt::catch_unwind(fut).await {
             Ok(o) => o,
             Err(_) => {
@@ -382,11 +421,17 @@ async fn compact_session(
         Ok(e) => e,
         Err(e) => {
             warn!(error = %e, "compact：加载历史失败");
+            notify_compact(events, session_id, "压缩失败：加载历史出错");
             return;
         }
     };
-    // 少于阈值不值得压缩。
+    // 少于阈值不值得压缩：给出明确反馈，而非静默跳过。
     if entries.len() <= keep_recent + 1 {
+        notify_compact(
+            events,
+            session_id,
+            &format!("当前上下文较短（{} 条），无需压缩", entries.len()),
+        );
         return;
     }
 
@@ -412,8 +457,12 @@ async fn compact_session(
         })
         .collect();
 
+    let older_count = older.len();
+    let input_chars: usize = msgs.iter().map(|m| m.content.chars().count()).sum();
+    info!(session = %session_id, msgs = older_count, input_chars, "compact：调摘要模型");
     let Some(summary) = crate::summarize::summarize(provider, &cfg.model, &msgs).await else {
-        warn!("compact：摘要为空/失败，跳过");
+        warn!(session = %session_id, msgs = older_count, "compact：摘要为空/失败，跳过");
+        notify_compact(events, session_id, "压缩失败：摘要生成为空或超时");
         return;
     };
 
@@ -423,14 +472,23 @@ async fn compact_session(
         .await
     {
         warn!(error = %e, "compact：落库失败");
+        notify_compact(events, session_id, "压缩失败：写入出错");
         return;
     }
 
-    // 通知 client 压缩完成（走 Proactive 通道，归属本会话）。
+    notify_compact(
+        events,
+        session_id,
+        &format!("已压缩上下文：{older_count} 条历史消息总结为摘要"),
+    );
+}
+
+/// 向 client 推一条 compact 相关的系统通知（走 Proactive 通道，归属本会话）。
+fn notify_compact(events: &broadcast::Sender<Event>, session_id: &str, text: &str) {
     let _ = events.send(Event::Proactive {
         session: oc_proto::SessionId::new(session_id.to_string()),
         kind: oc_proto::ProactiveKind::Wake,
-        text: format!("已压缩上下文：{} 条历史消息总结为摘要", older.len()),
+        text: text.to_string(),
         source: oc_proto::ProactiveSource::Heartbeat,
     });
 }

@@ -42,7 +42,7 @@ async fn usage_delta_emits_usage_event() {
     ];
     let provider = Arc::new(MockProvider::scripted(script));
     let (tx, mut rx) = broadcast::channel(256);
-    let handle = session::spawn(SessionId::main(), cfg(64_000), provider, tx, oc_store::Store::open_memory().unwrap());
+    let handle = session::spawn(SessionId::main(), cfg(64_000), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     handle.submit("你好".into()).await.expect("run");
 

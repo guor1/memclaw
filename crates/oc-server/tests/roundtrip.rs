@@ -223,6 +223,78 @@ async fn sessions_list_roundtrip() {
     server.abort();
 }
 
+/// diagnostics 经真实传输往返：验证 DiagnosticsSnapshot 能被序列化，且预建的
+/// main 会话出现在快照里（回归 MethodOk 新变体的传输契约）。
+#[tokio::test]
+async fn diagnostics_roundtrip() {
+    let kind = test_transport("diag");
+
+    let server_kind = kind.clone();
+    let server = tokio::spawn(async move {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let provider = Arc::new(oc_llm::mock::MockProvider::echo_text("hi"));
+        let cfg = oc_server::SessionConfig {
+            model: "mock".into(),
+            system_prompt: None,
+            idle_timeout: Duration::from_secs(5),
+            run_timeout: None,
+            queue_cap: 8,
+            tools: None,
+            warn_secs: 60,
+            abort_min_secs: 300,
+            max_history_entries: 200,
+            history_token_budget: 8000,
+            soul: String::new(),
+            skills: Vec::new(),
+            trigger_threshold: 0.72,
+            trigger_max_per_turn: 3,
+            context_window: 65536,
+        };
+        let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let stream = connect(&kind).await;
+    let (r, mut w) = tokio::io::split(stream);
+    let mut reader = BufReader::new(r);
+
+    send(&mut w, &Frame::Req(Req {
+        id: ReqId::new("c0"),
+        method: Method::Connect(ConnectParams { proto_version: PROTO_VERSION, token: None }),
+        idempotency_key: None,
+    })).await;
+    let _ = recv(&mut reader).await;
+
+    send(&mut w, &Frame::Req(Req {
+        id: ReqId::new("d1"),
+        method: Method::Diagnostics,
+        idempotency_key: None,
+    })).await;
+
+    let f = tokio::time::timeout(std::time::Duration::from_secs(2), recv(&mut reader))
+        .await
+        .expect("diagnostics 不应超时/断连");
+    match f {
+        Frame::Res(res) => {
+            assert_eq!(res.id.as_str(), "d1");
+            match res.result {
+                ResResult::Ok(oc_proto::MethodOk::Diagnostics(snap)) => {
+                    assert!(snap.store_writer_alive, "写线程应存活");
+                    assert!(
+                        snap.sessions.iter().any(|s| s.session_id.as_str() == "main"),
+                        "快照应含预建的 main 会话"
+                    );
+                }
+                other => panic!("期望 Diagnostics 应答，得到 {other:?}"),
+            }
+        }
+        other => panic!("期望 Res，得到 {other:?}"),
+    }
+
+    server.abort();
+}
+
 async fn send<W: AsyncWriteExt + Unpin>(w: &mut W, frame: &Frame) {
     let mut s = serde_json::to_string(frame).unwrap();
     s.push('\n');

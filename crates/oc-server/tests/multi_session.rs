@@ -79,7 +79,7 @@ async fn events_are_attributed_to_correct_session() {
     let store = oc_store::Store::open_memory().unwrap();
     let (tx, mut rx) = broadcast::channel(512);
     let provider = Arc::new(CapturingMock::new("回复内容"));
-    let registry = SessionRegistry::new(cfg(), provider, tx, store.clone());
+    let registry = SessionRegistry::new(cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new());
 
     let work = SessionId::new("work");
     let personal = SessionId::new("personal");
@@ -117,7 +117,7 @@ async fn transcripts_are_isolated_per_session() {
     let store = oc_store::Store::open_memory().unwrap();
     let (tx, mut rx) = broadcast::channel(512);
     let provider = Arc::new(CapturingMock::new("知道了"));
-    let registry = SessionRegistry::new(cfg(), provider, tx, store.clone());
+    let registry = SessionRegistry::new(cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new());
 
     let a = SessionId::new("alpha");
     let b = SessionId::new("beta");
@@ -155,7 +155,7 @@ async fn same_id_reuses_one_actor() {
     let store = oc_store::Store::open_memory().unwrap();
     let (tx, _rx) = broadcast::channel(64);
     let provider = Arc::new(CapturingMock::new("ok"));
-    let registry = SessionRegistry::new(cfg(), provider, tx, store);
+    let registry = SessionRegistry::new(cfg(), provider, tx, store, oc_server::diag::DiagRegistry::new());
 
     // main 在 new() 里已预建；再取应是同一 actor（不 panic、不重复建）。
     let id = SessionId::new("dup");

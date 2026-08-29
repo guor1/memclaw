@@ -18,4 +18,5 @@ pub use method::*;
 /// 协议版本。单用户下不做 N-1 兼容协商，只做硬校验（不匹配拒连）。
 ///
 /// v2：Event 加 `session` 字段 + 多会话方法（sessions.list / session_reset 带 session）。
-pub const PROTO_VERSION: u16 = 2;
+/// v3：诊断方法（diagnostics）+ 每会话/每 run 运行时快照。
+pub const PROTO_VERSION: u16 = 3;

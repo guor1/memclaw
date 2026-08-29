@@ -36,6 +36,8 @@ pub struct ServerState {
     usage: Arc<DashMap<oc_proto::SessionId, u32>>,
     /// 模型上下文窗口（token），供 status/事件展示。
     context_window: u32,
+    /// 运行时诊断注册表（`oc debug` 采样）。
+    diag: crate::diag::DiagRegistry,
 }
 
 impl ServerState {
@@ -46,6 +48,7 @@ impl ServerState {
         ledger: crate::ledger::TaskLedger,
         store: oc_store::Store,
         context_window: u32,
+        diag: crate::diag::DiagRegistry,
     ) -> Self {
         Self {
             event_tx,
@@ -56,12 +59,18 @@ impl ServerState {
             store,
             usage: Arc::new(DashMap::new()),
             context_window,
+            diag,
         }
     }
 
     /// 模型上下文窗口（token）。
     pub fn context_window(&self) -> u32 {
         self.context_window
+    }
+
+    /// 运行时诊断注册表。
+    pub fn diag(&self) -> &crate::diag::DiagRegistry {
+        &self.diag
     }
 
     /// 记录某会话最近一轮真实输入 token。
@@ -99,6 +108,11 @@ impl ServerState {
     /// 订阅事件流。
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.event_tx.subscribe()
+    }
+
+    /// 当前事件订阅者数（活跃连接近似）。
+    pub fn subscriber_count(&self) -> usize {
+        self.event_tx.receiver_count()
     }
 
     /// 广播一个事件。慢 client 丢事件不影响此处（返回订阅者数量或 0）。

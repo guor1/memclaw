@@ -57,6 +57,8 @@ pub struct RunCtx {
     pub compact_cfg: oc_core::compaction::CompactCfg,
     /// 模型上下文窗口（token），随 Usage 事件推给 client。
     pub context_window: u32,
+    /// 运行时诊断句柄：run 在阶段迁移点更新（`oc debug` 采样）。
+    pub diag: crate::diag::SessionDiag,
 }
 
 /// 驱动一个 run 到终态。
@@ -153,12 +155,15 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                     return RunOutcome::LoopDetected;
                 }
                 tool_rounds += 1;
+                ctx.diag.set_tool_rounds(tool_rounds);
                 if tool_rounds > MAX_TOOL_ROUNDS {
                     emit_error(ctx, RunErrorKind::LoopDetected, "超过最大工具轮数");
                     return RunOutcome::LoopDetected;
                 }
 
                 // 执行工具。
+                ctx.diag.set_phase(oc_proto::RunPhase::ToolExec);
+                tracing::debug!(tool = %name, "执行工具");
                 let output = exec_tool(ctx, &call_id, &name, &args).await;
 
                 // 结果回喂历史 → 状态机回 AwaitingModel。
@@ -277,26 +282,56 @@ async fn run_model_turn(
         .map(|t| t.llm_specs())
         .unwrap_or_default();
 
+    let compacted = apply_compaction(messages, &ctx.compact_cfg, *last_input_tokens);
+    // role 序列 + 每条长度：排查「某种历史序列触发 provider 空回复」时用，
+    // 不打全文（噪音 + 隐私）。空 content 的 assistant/tool 会显式标 empty。
+    let shape: Vec<String> = compacted
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                MsgRole::System => "sys",
+                MsgRole::User => "usr",
+                MsgRole::Assistant => "ast",
+                MsgRole::Tool => "tool",
+            };
+            let n = m.content.chars().count();
+            let tc = if m.tool_calls.is_empty() { "" } else { "+tc" };
+            format!("{role}{tc}:{n}")
+        })
+        .collect();
+    tracing::debug!(
+        msg_count = compacted.len(),
+        orig_count = messages.len(),
+        tools = tool_specs.len(),
+        shape = %shape.join(","),
+        "构建模型请求"
+    );
     let req = ModelRequest {
         model: ctx.model.clone(),
         // 经 oc-core::prompt 确定性组装（人格 + 工具 + 记忆 + 时间）。
         system: Some(render_prompt(ctx)),
         // 超预算时按 oc-core 压缩计划裁剪（剪枝旧工具结果 → 丢弃最早消息）。
-        messages: apply_compaction(messages, &ctx.compact_cfg, *last_input_tokens),
+        messages: compacted,
         tools: tool_specs,
         max_tokens: None,
         temperature: None,
     };
 
+    // 阶段：等待模型响应（诊断可见「卡在等模型」）。
+    ctx.diag.set_phase(oc_proto::RunPhase::AwaitingModel);
+    let t_open = std::time::Instant::now();
     let mut stream = match ctx.provider.stream_chat(req, ctx.cancel.clone()).await {
         Ok(s) => s,
         Err(e) => {
+            warn!(error = %e, "建流失败");
+            ctx.diag.set_error(format!("建流失败: {e}"));
             let (n, effs) = step(state.clone(), StepEvent::ModelError(e.to_string()), acc);
             *state = n;
             execute_effects(ctx, &effs, acc).await;
             return TurnResult::Terminal(outcome_of(state));
         }
     };
+    tracing::debug!(ms = t_open.elapsed().as_millis(), "模型流已建立");
 
     // 累积工具调用分片。
     let mut tc_id = String::new();
@@ -324,13 +359,15 @@ async fn run_model_turn(
             }
             Ok(None) => {
                 // 流结束未见 Done：视为完成。
+                tracing::debug!(acc_chars = acc.chars().count(), "模型流结束（无显式 Done）");
                 let (n, effs) = step(state.clone(), StepEvent::ModelDone, acc);
                 *state = n;
                 execute_effects(ctx, &effs, acc).await;
                 return TurnResult::Completed;
             }
             Err(_) => {
-                warn!(run_id = %ctx.run_id, "空闲看门狗触发");
+                warn!(run_id = %ctx.run_id, acc_chars = acc.chars().count(), "空闲看门狗触发（模型迟迟无 delta）");
+                ctx.diag.set_error("空闲看门狗触发".to_string());
                 ctx.cancel.cancel();
                 let (n, effs) = step(state.clone(), StepEvent::Abort, acc);
                 *state = n;
@@ -345,6 +382,8 @@ async fn run_model_turn(
                 let (n, effs) = step(state.clone(), StepEvent::ModelText(t), acc);
                 *state = n;
                 execute_effects(ctx, &effs, acc).await;
+                // 诊断：刷新 last_delta_at + 累计文本长度（phase→Streaming）。
+                ctx.diag.delta_seen(acc.chars().count());
             }
             // thinking 内容：仅累积（供工具调用轮回喂），不进 assistant 可见文本、
             // 不落库、不推事件流。
@@ -390,7 +429,8 @@ async fn run_model_turn(
                     args: tc_args,
                 };
             }
-            Delta::Done(_) => {
+            Delta::Done(reason) => {
+                tracing::debug!(?reason, acc_chars = acc.chars().count(), "模型轮结束");
                 let (n, effs) = step(state.clone(), StepEvent::ModelDone, acc);
                 *state = n;
                 execute_effects(ctx, &effs, acc).await;

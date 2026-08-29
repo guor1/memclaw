@@ -61,7 +61,7 @@ async fn collect_until_terminal(
 async fn happy_multi_turn() {
     let (tx, mut rx) = broadcast::channel(256);
     let provider = Arc::new(MockProvider::echo_text("回复A"));
-    let handle = session::spawn(oc_proto::SessionId::main(), cfg(2000), provider, tx, oc_store::Store::open_memory().unwrap());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg(2000), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     // 第一轮
     let _run1 = handle.submit("你好".into()).await.expect("run1");
@@ -80,7 +80,7 @@ async fn idle_watchdog_aborts_stalled_model() {
     let (tx, mut rx) = broadcast::channel(256);
     // provider 在首个 Delta 前卡 5s，但 idle 超时设 200ms。
     let provider = Arc::new(MockProvider::stalls_for(Duration::from_secs(5)));
-    let handle = session::spawn(oc_proto::SessionId::main(), cfg(200), provider, tx, oc_store::Store::open_memory().unwrap());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg(200), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     let _run = handle.submit("会卡住".into()).await.expect("run");
     let start = std::time::Instant::now();
@@ -102,7 +102,7 @@ async fn abort_stops_active_run() {
         ScriptStep { delay: Duration::from_millis(300), delta: Delta::Done(FinishReason::Stop) },
     ];
     let provider = Arc::new(MockProvider::scripted(script));
-    let handle = session::spawn(oc_proto::SessionId::main(), cfg(2000), provider, tx, oc_store::Store::open_memory().unwrap());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg(2000), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     let run_id = handle.submit("长回复".into()).await.expect("run");
 
@@ -136,7 +136,7 @@ async fn health_scan_aborts_stuck_run() {
         trigger_max_per_turn: 3,
         context_window: 65536,
     };
-    let handle = session::spawn(oc_proto::SessionId::main(), cfg, provider, tx, oc_store::Store::open_memory().unwrap());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg, provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     let _run = handle.submit("会卡死".into()).await.expect("run");
 

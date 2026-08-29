@@ -1,0 +1,213 @@
+//! 运行时诊断状态（可观测性）。
+//!
+//! session actor 与 run 任务在状态迁移点更新自己会话的一份轻量快照，`oc debug`
+//! 通过 `Method::Diagnostics` 采样。目标是让「不回复 / 截断 / 卡死」等时序问题
+//! 能被实时快照直接定位，而非靠读代码猜。
+//!
+//! 并发：底层 `DashMap<SessionId, DiagState>`，每会话一格；actor 与其 run 任务
+//! 各持一份 [`SessionDiag`] 句柄（廉价克隆），写各自字段互不阻塞。
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use dashmap::DashMap;
+use oc_proto::{RunPhase, RunSnapshot, SessionDiag as SessionDiagView, SessionId};
+
+/// 当前 unix 毫秒。
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 单会话运行时状态（内部可变）。
+#[derive(Default)]
+struct DiagState {
+    queue_depth: usize,
+    active: Option<RunLive>,
+    lane_busy_since: Option<i64>,
+    total_runs: u64,
+    last_finish_reason: Option<String>,
+    last_error: Option<String>,
+}
+
+/// 活跃 run 的实时状态。
+struct RunLive {
+    run_id: String,
+    phase: RunPhase,
+    started_at: i64,
+    last_delta_at: Option<i64>,
+    tool_rounds: usize,
+    acc_chars: usize,
+}
+
+/// 全局诊断注册表。挂在 `ServerState`；`SessionRegistry` 为每个 actor 派生
+/// 会话级句柄。
+#[derive(Clone)]
+pub struct DiagRegistry {
+    inner: Arc<DashMap<SessionId, DiagState>>,
+    started: Instant,
+}
+
+impl DiagRegistry {
+    pub fn new() -> Self {
+        Self { inner: Arc::new(DashMap::new()), started: Instant::now() }
+    }
+
+    /// 为某会话派生一个诊断句柄（actor 与其 run 任务共用）。
+    pub fn for_session(&self, session: &SessionId) -> SessionDiag {
+        self.inner.entry(session.clone()).or_default();
+        SessionDiag { inner: Arc::clone(&self.inner), session: session.clone() }
+    }
+
+    /// daemon 运行时长（秒）。
+    pub fn uptime_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// 采样全部会话为对外视图。
+    pub fn snapshot_sessions(&self) -> Vec<SessionDiagView> {
+        let mut out: Vec<SessionDiagView> = self
+            .inner
+            .iter()
+            .map(|e| {
+                let s = e.value();
+                SessionDiagView {
+                    session_id: e.key().clone(),
+                    queue_depth: s.queue_depth,
+                    active: s.active.as_ref().map(|r| RunSnapshot {
+                        run_id: oc_proto::RunId::new(r.run_id.clone()),
+                        phase: r.phase,
+                        started_at: r.started_at,
+                        last_delta_at: r.last_delta_at,
+                        tool_rounds: r.tool_rounds,
+                        acc_chars: r.acc_chars,
+                    }),
+                    lane_busy_since: s.lane_busy_since,
+                    total_runs: s.total_runs,
+                    last_finish_reason: s.last_finish_reason.clone(),
+                    last_error: s.last_error.clone(),
+                }
+            })
+            .collect();
+        // 稳定排序：main 优先，其余按 id。
+        out.sort_by(|a, b| {
+            let ka = (a.session_id != SessionId::main(), a.session_id.as_str().to_string());
+            let kb = (b.session_id != SessionId::main(), b.session_id.as_str().to_string());
+            ka.cmp(&kb)
+        });
+        out
+    }
+}
+
+impl Default for DiagRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 会话级诊断句柄。所有更新方法都是 map 上的一次短写，不跨 await 持锁。
+#[derive(Clone)]
+pub struct SessionDiag {
+    inner: Arc<DashMap<SessionId, DiagState>>,
+    session: SessionId,
+}
+
+impl SessionDiag {
+    fn with<F: FnOnce(&mut DiagState)>(&self, f: F) {
+        if let Some(mut e) = self.inner.get_mut(&self.session) {
+            f(e.value_mut());
+        }
+    }
+
+    /// 更新排队深度。
+    pub fn set_queue_depth(&self, n: usize) {
+        self.with(|s| s.queue_depth = n);
+    }
+
+    /// run 起步：登记活跃 run（phase=Starting），占用车道，累加计数。
+    pub fn run_start(&self, run_id: &str) {
+        let at = now_ms();
+        self.with(|s| {
+            s.total_runs += 1;
+            s.lane_busy_since = Some(at);
+            s.active = Some(RunLive {
+                run_id: run_id.to_string(),
+                phase: RunPhase::Starting,
+                started_at: at,
+                last_delta_at: None,
+                tool_rounds: 0,
+                acc_chars: 0,
+            });
+        });
+    }
+
+    /// 切换活跃 run 的阶段（不改其它字段）。
+    pub fn set_phase(&self, phase: RunPhase) {
+        self.with(|s| {
+            if let Some(r) = s.active.as_mut() {
+                r.phase = phase;
+            }
+        });
+    }
+
+    /// 收到一次模型 delta：phase→Streaming，刷新 last_delta_at 与累计文本长度。
+    pub fn delta_seen(&self, acc_chars: usize) {
+        let at = now_ms();
+        self.with(|s| {
+            if let Some(r) = s.active.as_mut() {
+                r.phase = RunPhase::Streaming;
+                r.last_delta_at = Some(at);
+                r.acc_chars = acc_chars;
+            }
+        });
+    }
+
+    /// 更新工具轮数。
+    pub fn set_tool_rounds(&self, n: usize) {
+        self.with(|s| {
+            if let Some(r) = s.active.as_mut() {
+                r.tool_rounds = n;
+            }
+        });
+    }
+
+    /// run 结束：清活跃 + 释放车道，记录结束原因。
+    pub fn run_done(&self, finish_reason: impl Into<String>) {
+        self.with(|s| {
+            s.active = None;
+            s.lane_busy_since = None;
+            s.last_finish_reason = Some(finish_reason.into());
+        });
+    }
+
+    /// compact 开始：占用车道并标记阶段。
+    pub fn compact_start(&self) {
+        let at = now_ms();
+        self.with(|s| {
+            s.lane_busy_since = Some(at);
+            s.active = Some(RunLive {
+                run_id: "compact".to_string(),
+                phase: RunPhase::Compacting,
+                started_at: at,
+                last_delta_at: None,
+                tool_rounds: 0,
+                acc_chars: 0,
+            });
+        });
+    }
+
+    /// compact 结束：释放车道。
+    pub fn compact_done(&self) {
+        self.with(|s| {
+            s.active = None;
+            s.lane_busy_since = None;
+        });
+    }
+
+    /// 记录一次错误文本。
+    pub fn set_error(&self, msg: impl Into<String>) {
+        self.with(|s| s.last_error = Some(msg.into()));
+    }
+}

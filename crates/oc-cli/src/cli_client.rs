@@ -178,6 +178,127 @@ pub fn compact() -> Result<()> {
     })
 }
 
+pub fn debug(watch: bool) -> Result<()> {
+    run_once(async move {
+        let mut c = connect().await?;
+        if !watch {
+            let snap = fetch_diag(&mut c).await?;
+            print!("{}", render_diag(&snap));
+            return Ok(());
+        }
+        // --watch：每秒刷新。清屏 + 重绘。Ctrl-C 退出。
+        loop {
+            let snap = fetch_diag(&mut c).await?;
+            // ANSI 清屏 + 光标归位。
+            print!("\x1b[2J\x1b[H{}", render_diag(&snap));
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    })
+}
+
+async fn fetch_diag(c: &mut ClientTransport) -> Result<oc_proto::DiagnosticsSnapshot> {
+    match call(c, Method::Diagnostics).await? {
+        MethodOk::Diagnostics(s) => Ok(s),
+        _ => bail!("daemon 返回了非预期的应答类型"),
+    }
+}
+
+/// 渲染诊断快照为文本表格。
+fn render_diag(s: &oc_proto::DiagnosticsSnapshot) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let (hh, mm, ss) = (s.uptime_secs / 3600, (s.uptime_secs % 3600) / 60, s.uptime_secs % 60);
+    let writer = if s.store_writer_alive { "OK" } else { "DOWN" };
+    let _ = writeln!(
+        out,
+        "uptime {hh:02}:{mm:02}:{ss:02}   writer {writer}   subs {}   proto v{}",
+        s.event_subscribers, s.proto_version
+    );
+    let _ = writeln!(
+        out,
+        "{:<10} {:<6} {:<13} {:<12} {:>6} {:>10} {:>6} {:<20}",
+        "session", "queue", "phase", "run_id", "age", "last_delta", "tools", "err"
+    );
+    if s.sessions.is_empty() {
+        let _ = writeln!(out, "（无会话）");
+    }
+    for sess in &s.sessions {
+        let err = sess.last_error.as_deref().unwrap_or("-");
+        match &sess.active {
+            Some(r) => {
+                let age = fmt_age_ms(s.sampled_at - r.started_at);
+                let last_delta = match r.last_delta_at {
+                    Some(at) => fmt_age_ms(s.sampled_at - at),
+                    None => "-".to_string(),
+                };
+                let rid_short: String = r.run_id.as_str().chars().take(8).collect();
+                let _ = writeln!(
+                    out,
+                    "{:<10} {:<6} {:<13} {:<12} {:>6} {:>10} {:>6} {:<20}",
+                    truncate(sess.session_id.as_str(), 10),
+                    sess.queue_depth,
+                    phase_str(r.phase),
+                    rid_short,
+                    age,
+                    last_delta,
+                    r.tool_rounds,
+                    truncate(err, 20),
+                );
+            }
+            None => {
+                let last = sess.last_finish_reason.as_deref().unwrap_or("-");
+                let _ = writeln!(
+                    out,
+                    "{:<10} {:<6} {:<13} {:<12} {:>6} {:>10} {:>6} {:<20}",
+                    truncate(sess.session_id.as_str(), 10),
+                    sess.queue_depth,
+                    "idle",
+                    format!("last:{}", truncate(last, 6)),
+                    "-",
+                    "-",
+                    "-",
+                    truncate(err, 20),
+                );
+            }
+        }
+    }
+    out
+}
+
+fn phase_str(p: oc_proto::RunPhase) -> &'static str {
+    match p {
+        oc_proto::RunPhase::Starting => "starting",
+        oc_proto::RunPhase::AwaitingModel => "awaiting-mdl",
+        oc_proto::RunPhase::Streaming => "streaming",
+        oc_proto::RunPhase::ToolExec => "tool-exec",
+        oc_proto::RunPhase::Compacting => "compacting",
+    }
+}
+
+/// 毫秒时长格式化为紧凑 age（如 4.1s / 61s / 3m）。
+fn fmt_age_ms(ms: i64) -> String {
+    let ms = ms.max(0);
+    let secs = ms as f64 / 1000.0;
+    if secs < 10.0 {
+        format!("{secs:.1}s")
+    } else if secs < 120.0 {
+        format!("{:.0}s", secs)
+    } else {
+        format!("{:.0}m", secs / 60.0)
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{t}…")
+    }
+}
+
 pub fn status() -> Result<()> {
     run_once(async move {
         let mut c = connect().await?;

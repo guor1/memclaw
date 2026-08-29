@@ -5,6 +5,7 @@
 
 pub mod codec;
 pub mod conn;
+pub mod diag;
 pub mod dispatch;
 pub mod dreaming;
 pub mod error;
@@ -84,8 +85,15 @@ pub async fn serve_with(
     };
 
     let context_window = session_cfg.context_window;
-    let registry =
-        registry::SessionRegistry::new(session_cfg, provider, event_tx.clone(), store.clone());
+    // 诊断注册表：registry 派发会话级句柄给各 actor，state 侧供 diagnostics 采样。
+    let diag = diag::DiagRegistry::new();
+    let registry = registry::SessionRegistry::new(
+        session_cfg,
+        provider,
+        event_tx.clone(),
+        store.clone(),
+        diag.clone(),
+    );
     let dream_store = store.clone();
     let state = Arc::new(ServerState::new(
         event_tx,
@@ -94,6 +102,7 @@ pub async fn serve_with(
         ledger,
         store,
         context_window,
+        diag,
     ));
 
     // 订阅 Usage 事件，更新每会话最近用量（供 status 查询）。
