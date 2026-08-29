@@ -71,11 +71,22 @@ pub struct ToolExecutor {
     approval: Option<Arc<dyn ApprovalHandler>>,
     /// process 工具的后台移交 receiver（serve_with 取出接台账）。
     handoff: Option<HandoffReceiver>,
+    /// 每会话工作目录（cd 状态）。工具无状态，cwd 状态在此编排层。
+    cwds: Arc<dashmap::DashMap<oc_proto::SessionId, std::path::PathBuf>>,
+    /// 初始工作目录（会话首次用时的默认值）。
+    initial_cwd: std::path::PathBuf,
 }
 
 impl ToolExecutor {
     pub fn new(registry: Arc<ToolRegistry>) -> Self {
-        Self { registry, approval: None, handoff: None }
+        let initial_cwd = std::env::current_dir().unwrap_or_default();
+        Self {
+            registry,
+            approval: None,
+            handoff: None,
+            cwds: Arc::new(dashmap::DashMap::new()),
+            initial_cwd,
+        }
     }
 
     /// 设置后台移交 receiver。
@@ -175,10 +186,18 @@ impl ToolExecutor {
             (None, None)
         };
 
+        // 取该会话当前工作目录（缺省 = 初始目录）。
+        let cwd = self
+            .cwds
+            .get(session)
+            .map(|e| e.clone())
+            .unwrap_or_else(|| self.initial_cwd.clone());
+
         let cx = ToolCtx {
             cancel: cancel.clone(),
             emit: emit_tx,
             approval: approval_gate,
+            cwd,
         };
 
         let result = tokio::time::timeout(policy.timeout, tool.invoke(args_val, cx)).await;
@@ -189,6 +208,10 @@ impl ToolExecutor {
 
         match result {
             Ok(Ok(output)) => {
+                // cd 等工具变更了工作目录 → 写回该会话状态。
+                if let Some(new_cwd) = output.new_cwd {
+                    self.cwds.insert(session.clone(), new_cwd);
+                }
                 let status = if output.success {
                     ToolStatus::Ok
                 } else {

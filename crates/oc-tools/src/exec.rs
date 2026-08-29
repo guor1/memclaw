@@ -107,7 +107,7 @@ impl Tool for ExecTool {
 /// 常是 GBK(cp936) 而非 UTF-8，若按行做严格 UTF-8 解码会直接 `InvalidData`
 /// 报错（表现为「命令输出有编码问题」）。lossy 让非法字节退化为 `�` 而非崩溃。
 async fn run_command(cmd: &str, cx: &ToolCtx) -> ToolResult<ToolOutput> {
-    let mut command = shell_command(cmd);
+    let mut command = shell_command(cmd, &cx.cwd);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command.spawn()?;
@@ -148,21 +148,24 @@ async fn run_command(cmd: &str, cx: &ToolCtx) -> ToolResult<ToolOutput> {
         content: format!("{content}\n[退出码: {}]", status.code().unwrap_or(-1)),
         success: status.success(),
         background_task: None,
+        new_cwd: None,
     })
 }
 
-/// 跨平台 shell 命令构造。
-fn shell_command(cmd: &str) -> Command {
+/// 跨平台 shell 命令构造。子进程工作目录 = 会话 cwd（cd 后 exec 跟随）。
+fn shell_command(cmd: &str, cwd: &std::path::Path) -> Command {
     #[cfg(windows)]
     {
         let mut c = Command::new("cmd");
         c.arg("/C").arg(cmd);
+        c.current_dir(cwd);
         c
     }
     #[cfg(not(windows))]
     {
         let mut c = Command::new("sh");
         c.arg("-c").arg(cmd);
+        c.current_dir(cwd);
         c
     }
 }

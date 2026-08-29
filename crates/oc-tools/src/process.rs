@@ -62,7 +62,7 @@ impl Tool for ProcessTool {
         }
     }
 
-    async fn invoke(&self, args: serde_json::Value, _cx: ToolCtx) -> ToolResult<ToolOutput> {
+    async fn invoke(&self, args: serde_json::Value, cx: ToolCtx) -> ToolResult<ToolOutput> {
         let args: ProcArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::BadArgs(e.to_string()))?;
         let cmd = args.command.trim().to_string();
@@ -73,8 +73,8 @@ impl Tool for ProcessTool {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
 
-        // spawn 后台进程，输出打到 out_tx。
-        spawn_background(&cmd, out_tx, done_tx)?;
+        // spawn 后台进程（工作目录 = 会话 cwd），输出打到 out_tx。
+        spawn_background(&cmd, &cx.cwd, out_tx, done_tx)?;
 
         // 移交给 server 登记台账。
         self.handoff
@@ -85,16 +85,19 @@ impl Tool for ProcessTool {
             content: format!("已在后台启动：{cmd}"),
             success: true,
             background_task: Some("pending".to_string()), // server 分配真实 id
+            new_cwd: None,
         })
     }
 }
 
 fn spawn_background(
     cmd: &str,
+    cwd: &std::path::Path,
     out_tx: mpsc::UnboundedSender<String>,
     done_tx: tokio::sync::oneshot::Sender<i32>,
 ) -> ToolResult<()> {
     let mut command = shell_command(cmd);
+    command.current_dir(cwd);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
     let stdout = child.stdout.take();

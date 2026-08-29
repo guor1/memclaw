@@ -33,6 +33,7 @@ async fn exec_dangerous_needs_approval_and_denied() {
         cancel: CancellationToken::new(),
         emit: mpsc::unbounded_channel().0,
         approval: Some(ApprovalGate { request: req_tx }),
+        cwd: std::env::current_dir().unwrap(),
     };
     tokio::spawn(async move {
         if let Some(r) = req_rx.recv().await {
@@ -54,6 +55,7 @@ async fn exec_dangerous_approved_runs() {
         cancel: CancellationToken::new(),
         emit: mpsc::unbounded_channel().0,
         approval: Some(ApprovalGate { request: req_tx }),
+        cwd: std::env::current_dir().unwrap(),
     };
     // 审批放行；命令本身用无害的 sudo 替身——这里用 echo 触发 needs-approval 的替代。
     // 用 "sudo" 前缀触发审批，但实际执行会因无 sudo 而失败/或在 win 上不识别；
@@ -115,4 +117,27 @@ async fn file_outside_root_denied() {
         .invoke(serde_json::json!({ "op": "read", "path": outside }), cx)
         .await;
     assert!(res.is_err(), "根外路径应被拒");
+}
+
+/// 回归：allowed_roots 传入**未 canonicalize** 的裸路径（真实 wiring 就是裸
+/// current_dir），而 candidate 经 canonicalize 带 Windows `\\?\` 前缀，
+/// 两者必须归一后比较，否则合法路径被误拒（截图里的 bug）。
+#[tokio::test]
+async fn file_raw_root_allows_relative_path_via_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    // 故意用裸 path（不 canonicalize），模拟 provider_setup 传入的 current_dir。
+    let raw_root = dir.path().to_path_buf();
+    let tool = FileTool::new(vec![raw_root.clone()]);
+
+    // 在根内建文件。
+    std::fs::write(raw_root.join("hello.txt"), "内容").unwrap();
+
+    // cwd = 裸根；用相对路径读。
+    let mut cx = ToolCtx::detached(CancellationToken::new());
+    cx.cwd = raw_root.clone();
+    let r = tool
+        .invoke(serde_json::json!({ "op": "read", "path": "hello.txt" }), cx)
+        .await
+        .expect("裸 root + 相对路径应放行");
+    assert!(r.content.contains("内容"));
 }

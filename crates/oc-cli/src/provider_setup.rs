@@ -15,6 +15,7 @@ use oc_server::tools_bridge::ToolExecutor;
 use oc_server::SessionConfig;
 use oc_tools::exec::ExecTool;
 use oc_tools::file::FileTool;
+use oc_tools::sys::SysTool;
 use oc_tools::ToolRegistry;
 
 /// 返回 (provider, 会话配置, 心跳间隔)。
@@ -102,7 +103,9 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
 
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ExecTool::new(mode, exec_timeout)));
-    registry.register(Arc::new(FileTool::new(roots)));
+    registry.register(Arc::new(FileTool::new(roots.clone())));
+    // sys：pwd/cd/now（cd 受同一组 allowed_roots 约束）。
+    registry.register(Arc::new(SysTool::new(roots)));
 
     // process 工具：后台移交 channel，接口另一端在 serve_with 接到台账。
     let (handoff_tx, handoff_rx) = tokio::sync::mpsc::unbounded_channel();

@@ -44,14 +44,17 @@ pub struct ToolOutput {
     pub success: bool,
     /// 若转后台，返回任务句柄 id。
     pub background_task: Option<String>,
+    /// 若此工具变更了会话工作目录（如 `cd`），回传新目录；由 executor 写回状态。
+    /// 工具本身保持无状态（`Arc<dyn Tool>` 共享），cwd 状态在 server 编排层。
+    pub new_cwd: Option<std::path::PathBuf>,
 }
 
 impl ToolOutput {
     pub fn ok(content: impl Into<String>) -> Self {
-        Self { content: content.into(), success: true, background_task: None }
+        Self { content: content.into(), success: true, background_task: None, new_cwd: None }
     }
     pub fn err(content: impl Into<String>) -> Self {
-        Self { content: content.into(), success: false, background_task: None }
+        Self { content: content.into(), success: false, background_task: None, new_cwd: None }
     }
 }
 
@@ -63,13 +66,17 @@ pub struct ToolCtx {
     pub emit: mpsc::UnboundedSender<String>,
     /// 审批门：exec 用，向 server 请求审批并等回执。
     pub approval: Option<ApprovalGate>,
+    /// 当前会话工作目录：file/sys 相对路径基准、exec 子进程 current_dir。
+    /// 由 executor 按 session 注入（见 oc-server tools_bridge）。
+    pub cwd: std::path::PathBuf,
 }
 
 impl ToolCtx {
-    /// 便捷构造（无审批门、丢弃更新）。测试/简单场景用。
+    /// 便捷构造（无审批门、丢弃更新、cwd 取进程当前目录）。测试/简单场景用。
     pub fn detached(cancel: CancellationToken) -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
-        Self { cancel, emit: tx, approval: None }
+        let cwd = std::env::current_dir().unwrap_or_default();
+        Self { cancel, emit: tx, approval: None, cwd }
     }
 
     /// 发一条流式更新（失败静默——没人订阅不阻塞）。

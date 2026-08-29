@@ -8,9 +8,15 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::error::{ToolError, ToolResult};
+use crate::path_guard::resolve_in_roots;
 use crate::sanitize::sanitize;
 use crate::types::{ToolCtx, ToolOutput, ToolPolicy, ToolSpec};
 use crate::Tool;
+
+/// head/tail 默认行数。
+const DEFAULT_LINES: usize = 20;
+/// grep/glob 结果上限（防拉爆上下文）。
+const MAX_MATCHES: usize = 200;
 
 /// file 工具。允许的根目录列表；空 = 允许任意（信任环境）。
 pub struct FileTool {
@@ -23,6 +29,16 @@ enum FileArgs {
     Read { path: String },
     Write { path: String, content: String },
     List { path: String },
+    /// 文件元信息：大小/是否目录/修改时间。
+    Stat { path: String },
+    /// 文件头 N 行（默认 20）。
+    Head { path: String, #[serde(default)] lines: Option<usize> },
+    /// 文件尾 N 行（默认 20）。
+    Tail { path: String, #[serde(default)] lines: Option<usize> },
+    /// 在文件/目录内按正则搜内容，返回 路径:行号:内容。
+    Grep { pattern: String, path: String },
+    /// 按 glob 模式找文件（如 "**/*.rs"），相对 cwd。
+    Glob { pattern: String },
 }
 
 impl FileTool {
@@ -30,33 +46,9 @@ impl FileTool {
         Self { allowed_roots }
     }
 
-    /// 检查路径是否在允许范围（规范化后前缀匹配）。
-    fn check(&self, path: &Path) -> ToolResult<PathBuf> {
-        // 规范化：尽量 canonicalize；不存在的写目标退回其父目录判断。
-        let candidate = if path.exists() {
-            path.canonicalize()?
-        } else if let Some(parent) = path.parent() {
-            if parent.as_os_str().is_empty() {
-                std::env::current_dir()?.join(path)
-            } else {
-                parent.canonicalize()?.join(path.file_name().unwrap_or_default())
-            }
-        } else {
-            return Err(ToolError::PathNotAllowed(path.display().to_string()));
-        };
-
-        if self.allowed_roots.is_empty() {
-            return Ok(candidate);
-        }
-        let ok = self
-            .allowed_roots
-            .iter()
-            .any(|root| candidate.starts_with(root));
-        if ok {
-            Ok(candidate)
-        } else {
-            Err(ToolError::PathNotAllowed(candidate.display().to_string()))
-        }
+    /// 解析路径（相对 cwd）并校验在允许范围内。委托给共享的 path_guard。
+    fn check(&self, path: &Path, cwd: &Path) -> ToolResult<PathBuf> {
+        resolve_in_roots(path, cwd, &self.allowed_roots)
     }
 }
 
@@ -65,15 +57,18 @@ impl Tool for FileTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "file".to_string(),
-            description: "读/写/列文件。op=read|write|list。".to_string(),
+            description: "文件操作（优先于 exec）。op=read|write|list|stat|head|tail|grep|glob。\
+                路径可相对当前工作目录。".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "op": { "type": "string", "enum": ["read", "write", "list"] },
-                    "path": { "type": "string" },
-                    "content": { "type": "string", "description": "write 时的内容" }
+                    "op": { "type": "string", "enum": ["read", "write", "list", "stat", "head", "tail", "grep", "glob"] },
+                    "path": { "type": "string", "description": "文件/目录路径（read/write/list/stat/head/tail/grep 用）" },
+                    "content": { "type": "string", "description": "write 时的内容" },
+                    "lines": { "type": "integer", "description": "head/tail 的行数（默认 20）" },
+                    "pattern": { "type": "string", "description": "grep 的正则 / glob 的模式（如 **/*.rs）" }
                 },
-                "required": ["op", "path"]
+                "required": ["op"]
             }),
         }
     }
@@ -92,13 +87,13 @@ impl Tool for FileTool {
 
         match args {
             FileArgs::Read { path } => {
-                let p = self.check(Path::new(&path))?;
+                let p = self.check(Path::new(&path), &cx.cwd)?;
                 cx.update(format!("读取 {}\n", p.display()));
                 let content = tokio::fs::read_to_string(&p).await?;
                 Ok(ToolOutput::ok(sanitize(&content)))
             }
             FileArgs::Write { path, content } => {
-                let p = self.check(Path::new(&path))?;
+                let p = self.check(Path::new(&path), &cx.cwd)?;
                 if let Some(parent) = p.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
@@ -107,7 +102,7 @@ impl Tool for FileTool {
                 Ok(ToolOutput::ok(format!("已写入 {}", p.display())))
             }
             FileArgs::List { path } => {
-                let p = self.check(Path::new(&path))?;
+                let p = self.check(Path::new(&path), &cx.cwd)?;
                 let mut entries = tokio::fs::read_dir(&p).await?;
                 let mut out = String::new();
                 while let Some(e) = entries.next_entry().await? {
@@ -117,6 +112,109 @@ impl Tool for FileTool {
                 }
                 Ok(ToolOutput::ok(sanitize(&out)))
             }
+            FileArgs::Stat { path } => {
+                let p = self.check(Path::new(&path), &cx.cwd)?;
+                let md = tokio::fs::metadata(&p).await?;
+                let kind = if md.is_dir() { "目录" } else { "文件" };
+                let modified = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Ok(ToolOutput::ok(format!(
+                    "{}\n类型: {kind}\n大小: {} 字节\n修改时间(unix秒): {modified}",
+                    p.display(),
+                    md.len()
+                )))
+            }
+            FileArgs::Head { path, lines } => {
+                let p = self.check(Path::new(&path), &cx.cwd)?;
+                let content = tokio::fs::read_to_string(&p).await?;
+                let n = lines.unwrap_or(DEFAULT_LINES);
+                let out: String = content.lines().take(n).collect::<Vec<_>>().join("\n");
+                Ok(ToolOutput::ok(sanitize(&out)))
+            }
+            FileArgs::Tail { path, lines } => {
+                let p = self.check(Path::new(&path), &cx.cwd)?;
+                let content = tokio::fs::read_to_string(&p).await?;
+                let n = lines.unwrap_or(DEFAULT_LINES);
+                let all: Vec<&str> = content.lines().collect();
+                let start = all.len().saturating_sub(n);
+                let out = all[start..].join("\n");
+                Ok(ToolOutput::ok(sanitize(&out)))
+            }
+            FileArgs::Grep { pattern, path } => {
+                let p = self.check(Path::new(&path), &cx.cwd)?;
+                grep(&pattern, &p)
+            }
+            FileArgs::Glob { pattern } => glob_search(&pattern, &cx.cwd, &self.allowed_roots),
         }
     }
+}
+
+/// 在文件或目录（递归）内按正则搜内容。返回 相对路径:行号:内容。
+fn grep(pattern: &str, root: &Path) -> ToolResult<ToolOutput> {
+    let re = regex::Regex::new(pattern).map_err(|e| ToolError::BadArgs(format!("正则非法: {e}")))?;
+    let mut out = String::new();
+    let mut count = 0usize;
+    for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        // 二进制/大文件跳过：读文本失败即跳过。
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (i, line) in content.lines().enumerate() {
+            if re.is_match(line) {
+                out.push_str(&format!("{}:{}:{}\n", path.display(), i + 1, line.trim()));
+                count += 1;
+                if count >= MAX_MATCHES {
+                    out.push_str("…[匹配过多，已截断]\n");
+                    return Ok(ToolOutput::ok(sanitize(&out)));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push_str("（无匹配）");
+    }
+    Ok(ToolOutput::ok(sanitize(&out)))
+}
+
+/// 按 glob 模式找文件，相对 cwd 展开；结果受 allowed_roots 约束。
+fn glob_search(pattern: &str, cwd: &Path, allowed_roots: &[PathBuf]) -> ToolResult<ToolOutput> {
+    // 相对模式以 cwd 为基准。
+    let full = if Path::new(pattern).is_absolute() {
+        pattern.to_string()
+    } else {
+        cwd.join(pattern).to_string_lossy().into_owned()
+    };
+    let paths = glob::glob(&full).map_err(|e| ToolError::BadArgs(format!("glob 模式非法: {e}")))?;
+    let mut out = String::new();
+    let mut count = 0usize;
+    for entry in paths.flatten() {
+        // 受 allowed_roots 约束：两边都 canonicalize 后前缀匹配（Windows \\?\ 归一）。
+        let canon = entry.canonicalize().unwrap_or(entry);
+        let allowed = allowed_roots.is_empty()
+            || allowed_roots.iter().any(|r| {
+                let rc = r.canonicalize().unwrap_or_else(|_| r.clone());
+                canon.starts_with(&rc)
+            });
+        if !allowed {
+            continue;
+        }
+        out.push_str(&format!("{}\n", canon.display()));
+        count += 1;
+        if count >= MAX_MATCHES {
+            out.push_str("…[结果过多，已截断]\n");
+            break;
+        }
+    }
+    if out.is_empty() {
+        out.push_str("（无匹配文件）");
+    }
+    Ok(ToolOutput::ok(sanitize(&out)))
 }
