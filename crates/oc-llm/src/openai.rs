@@ -155,7 +155,11 @@ impl Provider for OpenAiProvider {
                                         yield Ok(Delta::Done(FinishReason::Stop));
                                         return;
                                     }
-                                    if let Some(d) = parse_chunk(&payload) {
+                                    // 原始 chunk 落 trace：排查「空回复 / 工具分片没被识别」时
+                                    // 用 RUST_LOG=oc_llm=trace 看 provider 到底发了什么。
+                                    tracing::trace!(payload = %payload, "raw chunk");
+                                    // 一个 chunk 可能产出多个 Delta（内容 + usage + Done）。
+                                    for d in parse_chunk(&payload) {
                                         yield Ok(d);
                                     }
                                 }
@@ -174,55 +178,80 @@ impl Provider for OpenAiProvider {
     }
 }
 
-/// 解析一条 OpenAI SSE chunk 为 Delta（仅取文本增量与结束原因）。
-fn parse_chunk(payload: &str) -> Option<Delta> {
-    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
-    // usage chunk：include_usage 下末尾会有一个 choices 为空、带顶层 usage 的 chunk。
-    // 先于 choices[0] 判断（否则空 choices 会提前返回 None，丢掉 usage）。
+/// 解析一条 OpenAI SSE chunk 为若干 [`Delta`]。
+///
+/// **一个 chunk 可能同时携带内容/finish_reason 和顶层 usage**（DeepSeek 在
+/// tool_calls 收尾时就把 `finish_reason:"tool_calls"` 与 `usage` 合并进同一个
+/// chunk）。因此不能"命中一项就提前返回"，否则会吞掉同 chunk 的其它信号——
+/// 历史 bug：usage 分支提前 return，吞掉了 `finish_reason:tool_calls`，导致工具
+/// 永不执行、空回复。
+///
+/// 顺序约定：内容/工具分片 → usage → Done。`Done` 必须最后，因为上层收到
+/// `Done(ToolUse)`/`Done(Stop)` 会立即结束本轮，其后的 Delta 会被丢弃。
+fn parse_chunk(payload: &str) -> Vec<Delta> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Delta> = Vec::new();
+    let mut done: Option<Delta> = None;
+
+    if let Some(choice) = v.get("choices").and_then(|c| c.get(0)) {
+        if let Some(delta) = choice.get("delta") {
+            if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
+                if !text.is_empty() {
+                    out.push(Delta::Text(text.to_string()));
+                }
+            }
+            // thinking 模式：reasoning_content 与 content 分离流出，累积后回喂时需带回。
+            if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
+                if !rc.is_empty() {
+                    out.push(Delta::Reasoning(rc.to_string()));
+                }
+            }
+            // 只取 tool_calls[index=0]：本轮架构一次执行一个工具，模型的并行
+            // tool_call（index>=1）忽略，模型会在下一轮按需重新请求。避免把不同
+            // index 的 arguments 分片拼成非法 JSON。
+            if let Some(tc) = delta.get("tool_calls").and_then(|t| t.get(0)) {
+                let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
+                if idx == 0 {
+                    let call_id =
+                        tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                    let name = tc
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string());
+                    let args = tc
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    out.push(Delta::ToolCall(ToolCallDelta { call_id, name, args_chunk: args }));
+                }
+            }
+        }
+        if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
+            done = Some(Delta::Done(match reason {
+                "tool_calls" => FinishReason::ToolUse,
+                "length" => FinishReason::Length,
+                _ => FinishReason::Stop,
+            }));
+        }
+    }
+
+    // usage 在 Done 之前发（Done 会结束本轮）。
     if let Some(u) = parse_usage(&v) {
-        return Some(Delta::Usage(u));
+        out.push(Delta::Usage(u));
     }
-    let choice = v.get("choices")?.get(0)?;
-    if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
-        return Some(Delta::Done(match reason {
-            "tool_calls" => FinishReason::ToolUse,
-            "length" => FinishReason::Length,
-            _ => FinishReason::Stop,
-        }));
+    if let Some(d) = done {
+        out.push(d);
     }
-    let delta = choice.get("delta")?;
-    if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
-        if !text.is_empty() {
-            return Some(Delta::Text(text.to_string()));
-        }
+
+    if out.is_empty() {
+        debug!(payload = %payload, "跳过无法识别的 chunk");
     }
-    // thinking 模式：reasoning_content 与 content 分离流出，累积后回喂时需带回。
-    if let Some(rc) = delta.get("reasoning_content").and_then(|c| c.as_str()) {
-        if !rc.is_empty() {
-            return Some(Delta::Reasoning(rc.to_string()));
-        }
-    }
-    if let Some(tc) = delta.get("tool_calls").and_then(|t| t.get(0)) {
-        let call_id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-        let name = tc
-            .get("function")
-            .and_then(|f| f.get("name"))
-            .and_then(|n| n.as_str())
-            .map(|s| s.to_string());
-        let args = tc
-            .get("function")
-            .and_then(|f| f.get("arguments"))
-            .and_then(|a| a.as_str())
-            .unwrap_or("")
-            .to_string();
-        return Some(Delta::ToolCall(ToolCallDelta {
-            call_id,
-            name,
-            args_chunk: args,
-        }));
-    }
-    debug!("跳过无法识别的 chunk");
-    None
+    out
 }
 
 fn classify_status(status: u16, retry_after: Option<u64>, detail: &str) -> ProviderErr {
@@ -306,11 +335,43 @@ mod tests {
         let chunk = r#"{"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":56}}"#;
         assert_eq!(
             parse_chunk(chunk),
-            Some(Delta::Usage(Usage { input_tokens: 1234, output_tokens: 56 }))
+            vec![Delta::Usage(Usage { input_tokens: 1234, output_tokens: 56 })]
         );
         // 普通增量 chunk 的 usage 为 null → 不误判。
         let normal = r#"{"choices":[{"delta":{"content":"hi"}}],"usage":null}"#;
-        assert_eq!(parse_chunk(normal), Some(Delta::Text("hi".into())));
+        assert_eq!(parse_chunk(normal), vec![Delta::Text("hi".into())]);
+    }
+
+    #[test]
+    fn finish_reason_and_usage_in_same_chunk() {
+        // 回归：DeepSeek 在 tool_calls 收尾时把 finish_reason 与 usage 合并进同一
+        // chunk。历史 bug 是 usage 分支提前 return 吞掉了 finish_reason，导致工具
+        // 永不执行、空回复。现在应同时产出 Usage + Done(ToolUse)，且 Done 在末尾。
+        let chunk = r#"{"choices":[{"delta":{"content":"","reasoning_content":null},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1306,"completion_tokens":95}}"#;
+        assert_eq!(
+            parse_chunk(chunk),
+            vec![
+                Delta::Usage(Usage { input_tokens: 1306, output_tokens: 95 }),
+                Delta::Done(FinishReason::ToolUse),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_first_tool_call_index_taken() {
+        // 并行 tool_call：只取 index=0，index>=1 忽略（避免拼成非法 JSON）。
+        let idx0 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"sys","arguments":""}}]}}]}"#;
+        assert_eq!(
+            parse_chunk(idx0),
+            vec![Delta::ToolCall(ToolCallDelta {
+                call_id: "call_a".into(),
+                name: Some("sys".into()),
+                args_chunk: String::new(),
+            })]
+        );
+        // index=1 的并行调用整体忽略 → 空。
+        let idx1 = r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"sys","arguments":""}}]}}]}"#;
+        assert_eq!(parse_chunk(idx1), Vec::<Delta>::new());
     }
 
     #[test]
@@ -322,10 +383,10 @@ mod tests {
     #[test]
     fn parses_reasoning_content_delta() {
         let chunk = r#"{"choices":[{"delta":{"reasoning_content":"让我想想"}}]}"#;
-        assert_eq!(parse_chunk(chunk), Some(Delta::Reasoning("让我想想".into())));
-        // content 优先于 reasoning（正常回复片段）。
+        assert_eq!(parse_chunk(chunk), vec![Delta::Reasoning("让我想想".into())]);
+        // content 与 reasoning 可共存（正常回复片段）。
         let chunk2 = r#"{"choices":[{"delta":{"content":"答案"}}]}"#;
-        assert_eq!(parse_chunk(chunk2), Some(Delta::Text("答案".into())));
+        assert_eq!(parse_chunk(chunk2), vec![Delta::Text("答案".into())]);
     }
 
     #[test]
