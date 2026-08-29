@@ -22,6 +22,9 @@ use crate::client::{ClientTransport, ConnectTo};
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
+/// PageUp/PageDown 每次滚动的保守行数（draw 时按可视高度再夹紧）。
+const SCROLL_PAGE: u16 = 10;
+
 /// 一行消息（用于渲染）。
 struct Msg {
     who: &'static str,
@@ -44,6 +47,9 @@ pub struct App {
     current_session: SessionId,
     /// 上下文用量提示（已用/窗口），随 Usage 事件更新，显示在状态栏。
     usage_hint: Option<String>,
+    /// 消息区滚动：距底部的行数偏移。0 = 跟随底部（自动滚到最新消息）；
+    /// >0 = 向上回滚查看历史。draw 时按可视高度夹紧。
+    scroll_back: u16,
 }
 
 impl App {
@@ -72,6 +78,7 @@ impl App {
             active_run: None,
             current_session: SessionId::main(),
             usage_hint: None,
+            scroll_back: 0,
         };
         // 等 hello。
         if let Some(Frame::Res(res)) = app.client.recv().await? {
@@ -102,6 +109,7 @@ impl App {
         term.draw(|f| self.draw(f))?;
 
         while !self.should_quit {
+            // 注：draw 需 &mut self（夹紧 scroll_back），下面两处 term.draw 同。
             tokio::select! {
                 // 键盘
                 maybe_key = keys.next() => {
@@ -178,10 +186,26 @@ impl App {
                     self.msgs.push(Msg { who: "你", text: text.clone() });
                     self.send_chat(text).await?;
                 }
+                // 发送后回到底部跟随，确保看到自己的消息与后续回复。
+                self.scroll_back = 0;
                 self.input.clear();
             }
             KeyCode::Backspace => {
                 self.input.pop();
+            }
+            // 消息区滚动。PageUp/Down 翻一屏（用保守步长，draw 时再按可视高度夹紧）；
+            // Ctrl+Home 跳最顶，Ctrl+End 回底部跟随。
+            KeyCode::PageUp => {
+                self.scroll_back = self.scroll_back.saturating_add(SCROLL_PAGE);
+            }
+            KeyCode::PageDown => {
+                self.scroll_back = self.scroll_back.saturating_sub(SCROLL_PAGE);
+            }
+            KeyCode::Home if mods.contains(KeyModifiers::CONTROL) => {
+                self.scroll_back = u16::MAX; // draw 夹到顶部最大偏移
+            }
+            KeyCode::End if mods.contains(KeyModifiers::CONTROL) => {
+                self.scroll_back = 0;
             }
             KeyCode::Char(c) => {
                 self.input.push(c);
@@ -361,7 +385,16 @@ impl App {
         }
     }
 
-    fn draw(&self, f: &mut UiFrame) {
+    /// 消息区标题：回滚查看历史时提示当前偏移，让用户知道未在底部。
+    fn msg_title(&self) -> String {
+        if self.scroll_back > 0 {
+            format!("oc [↑历史 -{} 行  PgDn/Ctrl-End 回底部]", self.scroll_back)
+        } else {
+            "oc".to_string()
+        }
+    }
+
+    fn draw(&mut self, f: &mut UiFrame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -390,10 +423,26 @@ impl App {
                 ])
             })
             .collect();
+
+        // 可视区（去掉上下边框各 1 行）与内容宽度（去左右边框各 1 列）。
+        let area = chunks[0];
+        let visible = area.height.saturating_sub(2);
+        let inner_w = area.width.saturating_sub(2);
+
+        // 先用无边框副本按内容宽度算 wrap 后真实行数（含中文双宽），据此夹紧
+        // scroll_back，再构建带标题的正式段落——标题读的是夹紧后的值。
+        let body = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
+        let total = body.line_count(inner_w) as u16;
+        let max_off = total.saturating_sub(visible);
+        // 夹紧回滚偏移：0..=max_off。scroll_back=0 贴底跟随最新。
+        self.scroll_back = self.scroll_back.min(max_off);
+        let y = max_off - self.scroll_back;
+
         let msgs = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("oc"))
-            .wrap(Wrap { trim: false });
-        f.render_widget(msgs, chunks[0]);
+            .block(Block::default().borders(Borders::ALL).title(self.msg_title()))
+            .wrap(Wrap { trim: false })
+            .scroll((y, 0));
+        f.render_widget(msgs, area);
 
         // 输入
         let input = Paragraph::new(self.input.as_str())
