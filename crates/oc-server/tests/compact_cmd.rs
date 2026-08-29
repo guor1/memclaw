@@ -1,0 +1,71 @@
+//! /compact 手动压缩：摘要旧历史 → 落库（reset_at 推进 + 摘要 entry）。
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use oc_llm::mock::CapturingMock;
+use oc_proto::SessionId;
+use oc_server::session::{self, SessionConfig};
+use tokio::sync::broadcast;
+
+fn cfg() -> SessionConfig {
+    SessionConfig {
+        model: "mock".into(),
+        system_prompt: None,
+        idle_timeout: Duration::from_secs(5),
+        run_timeout: None,
+        queue_cap: 8,
+        tools: None,
+        warn_secs: 60,
+        abort_min_secs: 300,
+        max_history_entries: 200,
+        history_token_budget: 8000,
+        soul: String::new(),
+        skills: Vec::new(),
+        trigger_threshold: 0.72,
+        trigger_max_per_turn: 3,
+        context_window: 65536,
+    }
+}
+
+#[tokio::test]
+async fn compact_summarizes_old_history() {
+    let store = oc_store::Store::open_memory().unwrap();
+    let w = store.writer();
+    w.ensure_session("main".into(), "main".into()).await.unwrap();
+    // 预置 10 条历史（足够超过 keep_recent）。
+    for i in 0..10 {
+        let role = if i % 2 == 0 { oc_store::Role::User } else { oc_store::Role::Assistant };
+        w.append_entry(oc_store::NewEntry {
+            session_id: "main".into(),
+            role,
+            content: format!("历史消息 {i}"),
+            tokens_est: 5,
+        })
+        .await
+        .unwrap();
+    }
+
+    // mock 摘要返回固定文本。
+    let provider = Arc::new(CapturingMock::new("这是压缩后的结构化摘要文本"));
+    let (tx, _rx) = broadcast::channel(64);
+    let handle = session::spawn(SessionId::main(), cfg(), provider, tx, store.clone());
+
+    handle.compact().await;
+
+    // compact 是异步执行，轮询等落库生效（摘要 entry 出现）。
+    let mut ok = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let hist = w.load_transcript("main".into(), 100).await.unwrap();
+        if hist.iter().any(|e| e.content.contains("上下文摘要")) {
+            // 应含摘要 + 最近若干条，且旧消息被排除。
+            assert!(hist.len() < 10, "压缩后条数应减少: {}", hist.len());
+            assert!(hist.iter().any(|e| e.content.contains("结构化摘要文本")), "应含摘要文本");
+            assert!(!hist.iter().any(|e| e.content.contains("历史消息 0")), "最早消息应被排除");
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "compact 应在超时内完成落库");
+}

@@ -17,6 +17,9 @@ provider = "openai"                       # DeepSeek 走 openai 兼容
 model = "deepseek-chat"                    # 或 "deepseek-reasoner"（R1）
 hosting = "cloud"
 base_url = "https://api.deepseek.com/v1"   # DeepSeek 端点
+# 上下文窗口(token)。省略则按 model 名查内置默认表(deepseek=65536)。
+# 压缩预算据此派生(budget = window − 16384 预留，保底 8000)。
+# context_window = 65536
 # API key 三选一：
 #   { env = "DEEPSEEK_API_KEY" }  从环境变量读（推荐）
 #   { file = "C:\\Users\\你\\.oc\\deepseek.key" }  从文件读

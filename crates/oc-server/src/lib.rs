@@ -15,6 +15,7 @@ pub mod run;
 pub mod scheduler;
 pub mod session;
 pub mod state;
+pub mod summarize;
 pub mod tools_bridge;
 pub mod transport;
 
@@ -82,10 +83,34 @@ pub async fn serve_with(
         soul: session_cfg.soul.clone(),
     };
 
+    let context_window = session_cfg.context_window;
     let registry =
         registry::SessionRegistry::new(session_cfg, provider, event_tx.clone(), store.clone());
     let dream_store = store.clone();
-    let state = Arc::new(ServerState::new(event_tx, registry, approvals, ledger, store));
+    let state = Arc::new(ServerState::new(
+        event_tx,
+        registry,
+        approvals,
+        ledger,
+        store,
+        context_window,
+    ));
+
+    // 订阅 Usage 事件，更新每会话最近用量（供 status 查询）。
+    let usage_state = Arc::clone(&state);
+    let mut usage_rx = usage_state.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match usage_rx.recv().await {
+                Ok(oc_proto::Event::Usage { session, input_tokens, .. }) => {
+                    usage_state.set_last_input_tokens(session, input_tokens);
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            }
+        }
+    });
 
     // 心跳 tick：每 tick 卡死诊断扫描 + cron 到期扫描；每 DREAM_EVERY_TICKS 一轮 dreaming。
     let shutdown = CancellationToken::new();

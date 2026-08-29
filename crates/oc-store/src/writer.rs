@@ -32,6 +32,12 @@ pub enum WriteCmd {
     SessionList {
         reply: oneshot::Sender<StoreResult<Vec<crate::types::SessionRow>>>,
     },
+    CompactWithSummary {
+        session_id: String,
+        up_to_seq: i64,
+        summary_text: String,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     UpsertMemory {
         mem: NewMemory,
         reply: oneshot::Sender<StoreResult<()>>,
@@ -154,6 +160,17 @@ impl Writer {
         rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
     }
 
+    pub async fn compact_with_summary(
+        &self,
+        session_id: String,
+        up_to_seq: i64,
+        summary_text: String,
+    ) -> StoreResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::CompactWithSummary { session_id, up_to_seq, summary_text, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
     pub async fn upsert_memory(&self, mem: NewMemory) -> StoreResult<()> {
         let (reply, rx) = oneshot::channel();
         self.send(WriteCmd::UpsertMemory { mem, reply })?;
@@ -265,6 +282,9 @@ fn run_loop(conn: Connection, rx: &mut mpsc::UnboundedReceiver<WriteCmd>) {
             }
             WriteCmd::SessionList { reply } => {
                 let _ = reply.send(ops::session_list(&conn));
+            }
+            WriteCmd::CompactWithSummary { session_id, up_to_seq, summary_text, reply } => {
+                let _ = reply.send(ops::compact_with_summary(&conn, &session_id, up_to_seq, &summary_text));
             }
             WriteCmd::UpsertMemory { mem, reply } => {
                 let _ = reply.send(ops::upsert_memory(&conn, &mem));

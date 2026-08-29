@@ -32,6 +32,10 @@ pub struct ServerState {
     ledger: crate::ledger::TaskLedger,
     /// 持久化句柄（chat.history 查询用）。
     store: oc_store::Store,
+    /// 每会话最近一轮真实输入 token（status 查询 + 用量展示）。
+    usage: Arc<DashMap<oc_proto::SessionId, u32>>,
+    /// 模型上下文窗口（token），供 status/事件展示。
+    context_window: u32,
 }
 
 impl ServerState {
@@ -41,6 +45,7 @@ impl ServerState {
         approvals: ApprovalRegistry,
         ledger: crate::ledger::TaskLedger,
         store: oc_store::Store,
+        context_window: u32,
     ) -> Self {
         Self {
             event_tx,
@@ -49,7 +54,24 @@ impl ServerState {
             approvals,
             ledger,
             store,
+            usage: Arc::new(DashMap::new()),
+            context_window,
         }
+    }
+
+    /// 模型上下文窗口（token）。
+    pub fn context_window(&self) -> u32 {
+        self.context_window
+    }
+
+    /// 记录某会话最近一轮真实输入 token。
+    pub fn set_last_input_tokens(&self, session: oc_proto::SessionId, tokens: u32) {
+        self.usage.insert(session, tokens);
+    }
+
+    /// 查某会话最近一轮真实输入 token。
+    pub fn last_input_tokens(&self, session: &oc_proto::SessionId) -> Option<u32> {
+        self.usage.get(session).map(|e| *e)
     }
 
     /// 后台任务台账。

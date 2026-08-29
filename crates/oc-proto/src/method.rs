@@ -19,6 +19,8 @@ pub enum Method {
     ChatHistory(HistoryParams),
     /// `/new` `/reset`：推进上下文起点（可指定会话，缺省 main）。
     SessionReset(SessionResetParams),
+    /// `/compact`：把历史摘要成 checkpoint（可指定会话，缺省 main）。
+    Compact(CompactParams),
     /// 列出所有会话（多会话切换/浏览用）。
     SessionsList,
     /// 添加定时任务。side-effecting。
@@ -74,6 +76,13 @@ pub struct ChatSendParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionResetParams {
+    /// 目标会话；缺省为 main。
+    #[serde(default)]
+    pub session: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CompactParams {
     /// 目标会话；缺省为 main。
     #[serde(default)]
     pub session: Option<SessionId>,
@@ -142,6 +151,11 @@ pub struct Snapshot {
     pub queued_turns: u32,
     pub background_tasks: u32,
     pub session: SessionId,
+    /// 模型上下文窗口（token）。
+    pub context_window: u32,
+    /// 最近一轮 provider 报告的真实输入 token 数（已用上下文近似）；无则 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_input_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

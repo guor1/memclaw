@@ -55,6 +55,8 @@ pub struct RunCtx {
     pub bootstrap: Vec<oc_core::prompt::MemLine>,
     /// 上下文压缩配置（设计 §4）。
     pub compact_cfg: oc_core::compaction::CompactCfg,
+    /// 模型上下文窗口（token），随 Usage 事件推给 client。
+    pub context_window: u32,
 }
 
 /// 驱动一个 run 到终态。
@@ -93,6 +95,8 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
     // loop detection：工具调用指纹历史。
     let mut fingerprints: Vec<ToolFingerprint> = Vec::new();
     let mut tool_rounds = 0usize;
+    // 最近一次 provider 报告的真实输入 token 数（compaction 优先用它校准估算）。
+    let mut last_input_tokens: Option<i64> = None;
 
     // 启动步进：发 lifecycle start + 首次 CallModel。
     let (next, effects) = step(state, StepEvent::Start, &acc);
@@ -105,7 +109,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
     loop {
         // 一次模型流：消费到 ModelDone / ModelToolCall / 错误 / 中止。
         reasoning.clear();
-        let turn = run_model_turn(ctx, &mut state, &mut acc, &mut reasoning, &messages).await;
+        let turn = run_model_turn(ctx, &mut state, &mut acc, &mut reasoning, &mut last_input_tokens, &messages).await;
 
         match turn {
             TurnResult::Completed => {
@@ -193,15 +197,34 @@ enum TurnResult {
 /// 按 oc-core 的压缩计划裁剪消息列表（设计 §4 compaction）。
 ///
 /// 优先剪枝旧工具结果，其次丢弃最早消息；最近若干条始终保留。
-fn apply_compaction(messages: &[Message], cfg: &oc_core::compaction::CompactCfg) -> Vec<Message> {
+fn apply_compaction(
+    messages: &[Message],
+    cfg: &oc_core::compaction::CompactCfg,
+    real_input_tokens: Option<i64>,
+) -> Vec<Message> {
     use oc_core::compaction::{plan_compaction, MsgMeta};
+
+    // 每消息基础估算：字符/4。
+    let est: Vec<i64> = messages
+        .iter()
+        .map(|m| (m.content.chars().count() as i64 / 4).max(1))
+        .collect();
+    let est_total: i64 = est.iter().sum();
+
+    // 校准：若有 provider 报告的真实输入 token，用它按比例缩放每条估算，
+    // 使总量贴近真实值（估算只反映字符数，真实值含分词/角色/工具结构开销）。
+    // 真实值来自「上一轮」的完整 prompt，作为当前决策的近似基线。
+    let scale = match real_input_tokens {
+        Some(real) if est_total > 0 && real > 0 => real as f64 / est_total as f64,
+        _ => 1.0,
+    };
 
     let metas: Vec<MsgMeta> = messages
         .iter()
         .enumerate()
         .map(|(i, m)| MsgMeta {
             index: i,
-            tokens: (m.content.chars().count() as i64 / 4).max(1),
+            tokens: ((est[i] as f64 * scale).round() as i64).max(1),
             is_tool_result: matches!(m.role, MsgRole::Tool),
         })
         .collect();
@@ -245,6 +268,7 @@ async fn run_model_turn(
     state: &mut RunState,
     acc: &mut String,
     reasoning: &mut String,
+    last_input_tokens: &mut Option<i64>,
     messages: &[Message],
 ) -> TurnResult {
     let tool_specs = ctx
@@ -258,7 +282,7 @@ async fn run_model_turn(
         // 经 oc-core::prompt 确定性组装（人格 + 工具 + 记忆 + 时间）。
         system: Some(render_prompt(ctx)),
         // 超预算时按 oc-core 压缩计划裁剪（剪枝旧工具结果 → 丢弃最早消息）。
-        messages: apply_compaction(messages, &ctx.compact_cfg),
+        messages: apply_compaction(messages, &ctx.compact_cfg, *last_input_tokens),
         tools: tool_specs,
         max_tokens: None,
         temperature: None,
@@ -336,7 +360,18 @@ async fn run_model_turn(
                 }
                 tc_args.push_str(&tc.args_chunk);
             }
-            Delta::Usage(_) => {}
+            Delta::Usage(u) => {
+                // 记录真实输入 token（含本轮完整 prompt），供下一轮 compaction 校准。
+                if u.input_tokens > 0 {
+                    *last_input_tokens = Some(u.input_tokens as i64);
+                    // 推 Usage 事件：client 实时显示「已用/窗口」。
+                    let _ = ctx.events.send(Event::Usage {
+                        session: ctx.session_id.clone(),
+                        input_tokens: u.input_tokens,
+                        context_window: ctx.context_window,
+                    });
+                }
+            }
             Delta::Done(FinishReason::ToolUse) => {
                 // 有工具调用。
                 let (n, _) = step(

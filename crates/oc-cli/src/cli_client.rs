@@ -169,17 +169,38 @@ pub fn sessions() -> Result<()> {
     })
 }
 
+pub fn compact() -> Result<()> {
+    run_once(async move {
+        let mut c = connect().await?;
+        call(&mut c, Method::Compact(oc_proto::CompactParams { session: None })).await?;
+        println!("已请求压缩上下文（摘要将在后台生成）。");
+        Ok(())
+    })
+}
+
 pub fn status() -> Result<()> {
     run_once(async move {
         let mut c = connect().await?;
         let ok = call(&mut c, Method::Status).await?;
         if let MethodOk::Status(s) = ok {
+            let ctx = match s.last_input_tokens {
+                Some(used) => {
+                    let pct = if s.context_window > 0 {
+                        used as f64 / s.context_window as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+                    format!("{used}/{} ({pct:.0}%)", s.context_window)
+                }
+                None => format!("-/{}", s.context_window),
+            };
             println!(
-                "会话:{}  活跃run:{}  排队:{}  后台任务:{}",
+                "会话:{}  活跃run:{}  排队:{}  后台任务:{}  上下文:{}",
                 s.session.as_str(),
                 s.active_run.map(|r| r.as_str().to_string()).unwrap_or_else(|| "-".into()),
                 s.queued_turns,
-                s.background_tasks
+                s.background_tasks,
+                ctx
             );
         }
         Ok(())

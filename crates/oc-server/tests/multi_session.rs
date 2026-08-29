@@ -30,6 +30,7 @@ fn cfg() -> SessionConfig {
         skills: Vec::new(),
         trigger_threshold: 0.5,
         trigger_max_per_turn: 3,
+        context_window: 65536,
     }
 }
 
@@ -68,6 +69,7 @@ fn ev_session(ev: &Event) -> &SessionId {
         | Event::Tool { session, .. }
         | Event::Proactive { session, .. }
         | Event::Task { session, .. }
+        | Event::Usage { session, .. }
         | Event::Approval { session, .. } => session,
     }
 }

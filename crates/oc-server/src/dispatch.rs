@@ -22,7 +22,7 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
     }
 
     let result = match &req.method {
-        Method::Connect(p) => handle_connect(p),
+        Method::Connect(p) => handle_connect(p, state),
         Method::ChatSend(p) => handle_chat_send(p, state).await,
         Method::ChatAbort(p) => handle_chat_abort(p, state).await,
         Method::ApprovalReply(p) => {
@@ -30,8 +30,9 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
             Ok(MethodOk::Empty)
         }
         Method::SessionReset(p) => handle_session_reset(p, state).await,
+        Method::Compact(p) => handle_compact(p, state).await,
         Method::SessionsList => handle_sessions_list(state).await,
-        Method::Status => Ok(MethodOk::Status(snapshot())),
+        Method::Status => Ok(MethodOk::Status(snapshot(state, &SessionId::main()))),
         Method::Health => Ok(MethodOk::Health(oc_proto::HealthOk {
             ok: true,
             db_version: oc_store::migrate::TARGET_VERSION,
@@ -86,7 +87,7 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
     }
 }
 
-fn handle_connect(p: &ConnectParams) -> Result<MethodOk, ProtoError> {
+fn handle_connect(p: &ConnectParams, state: &Arc<ServerState>) -> Result<MethodOk, ProtoError> {
     if p.proto_version != PROTO_VERSION {
         return Err(ProtoError {
             kind: oc_proto::ErrorKind::ProtoVersionMismatch,
@@ -103,7 +104,7 @@ fn handle_connect(p: &ConnectParams) -> Result<MethodOk, ProtoError> {
             sandbox: false,
             proto_version: PROTO_VERSION,
         },
-        snapshot: snapshot(),
+        snapshot: snapshot(state, &SessionId::main()),
     })
 }
 
@@ -151,6 +152,17 @@ async fn handle_session_reset(
             kind: oc_proto::ErrorKind::Internal,
             message: format!("重置会话失败: {e}"),
         })?;
+    Ok(MethodOk::Empty)
+}
+
+/// 手动压缩指定会话（/compact，缺省 main）：触发摘要，立即返回（异步执行）。
+async fn handle_compact(
+    p: &oc_proto::CompactParams,
+    state: &Arc<ServerState>,
+) -> Result<MethodOk, ProtoError> {
+    let session = p.session.clone().unwrap_or_else(SessionId::main);
+    let handle = state.registry().get_or_spawn(&session);
+    handle.compact().await;
     Ok(MethodOk::Empty)
 }
 
@@ -330,11 +342,13 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn snapshot() -> Snapshot {
+fn snapshot(state: &Arc<ServerState>, session: &SessionId) -> Snapshot {
     Snapshot {
         active_run: None,
         queued_turns: 0,
         background_tasks: 0,
-        session: SessionId::main(),
+        session: session.clone(),
+        context_window: state.context_window(),
+        last_input_tokens: state.last_input_tokens(session),
     }
 }

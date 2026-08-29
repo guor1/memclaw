@@ -46,6 +46,8 @@ pub struct SessionConfig {
     pub trigger_threshold: f64,
     /// trigger 每轮最多注入条数。
     pub trigger_max_per_turn: usize,
+    /// 模型上下文窗口（token），随 Usage 事件推给 client 显示。
+    pub context_window: u32,
 }
 
 /// 发给 session actor 的命令。
@@ -57,6 +59,8 @@ pub enum SessionCmd {
     },
     /// 中止：hard=先 drain 排队轮再中止活跃（M4 完整）；M3 中止活跃 run。
     Abort { run_id: RunId, hard: bool },
+    /// 手动压缩（/compact）：把当前历史摘要成 checkpoint。
+    Compact,
     /// 活跃 run 结束通知（内部）。
     Finished { run_id: RunId, outcome: RunOutcome },
     /// 卡死诊断扫描（由心跳 tick 触发）：检查活跃 run 是否卡死。
@@ -78,6 +82,11 @@ impl SessionHandle {
 
     pub async fn abort(&self, run_id: RunId, hard: bool) {
         let _ = self.tx.send(SessionCmd::Abort { run_id, hard }).await;
+    }
+
+    /// 手动触发压缩（/compact）。
+    pub async fn compact(&self) {
+        let _ = self.tx.send(SessionCmd::Compact).await;
     }
 
     /// 触发一次卡死诊断扫描（心跳 tick 调用）。
@@ -185,6 +194,10 @@ async fn actor_loop(
                     }
                 }
             }
+            SessionCmd::Compact => {
+                // 手动 /compact：摘要当前历史（保留最近 keep_recent 条）。
+                compact_session(&store, &cfg, &provider, &events, &sid).await;
+            }
             SessionCmd::Finished { run_id, outcome } => {
                 if active.as_ref().map(|a| &a.run_id) == Some(&run_id) {
                     if !matches!(outcome, RunOutcome::Completed) {
@@ -258,6 +271,7 @@ fn start_run(
             budget: cfg.history_token_budget,
             ..Default::default()
         },
+        context_window: cfg.context_window,
     };
 
     let self_tx = self_tx.clone();
@@ -345,6 +359,80 @@ async fn load_history(store: &oc_store::Store, cfg: &SessionConfig, session_id: 
     }
     kept.reverse(); // 变回正序
     kept
+}
+
+/// 手动/自动摘要压缩：把 reset 之后、除最近 keep_recent 条以外的历史总结成一条
+/// checkpoint，落库（推进 reset_at + 插摘要 entry）。失败仅告警，不影响后续。
+///
+/// keep_recent 取压缩配置的近期保留条数（沿用 CompactCfg 默认语义）。
+async fn compact_session(
+    store: &oc_store::Store,
+    cfg: &SessionConfig,
+    provider: &Arc<dyn Provider>,
+    events: &broadcast::Sender<Event>,
+    session_id: &str,
+) {
+    let keep_recent = oc_core::compaction::CompactCfg::default().keep_recent;
+
+    let entries = match store
+        .writer()
+        .load_transcript(session_id.into(), cfg.max_history_entries)
+        .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(error = %e, "compact：加载历史失败");
+            return;
+        }
+    };
+    // 少于阈值不值得压缩。
+    if entries.len() <= keep_recent + 1 {
+        return;
+    }
+
+    // 切点：保留最近 keep_recent 条，其余进摘要区。
+    let cut = entries.len() - keep_recent;
+    let older = &entries[..cut];
+    let up_to_seq = older.last().map(|e| e.seq).unwrap_or(0);
+
+    // 映射为 llm 消息喂给摘要模型。
+    let msgs: Vec<oc_llm::Message> = older
+        .iter()
+        .map(|e| oc_llm::Message {
+            role: match e.role {
+                oc_store::Role::Assistant => oc_llm::MsgRole::Assistant,
+                oc_store::Role::System => oc_llm::MsgRole::System,
+                oc_store::Role::Tool => oc_llm::MsgRole::User,
+                oc_store::Role::User => oc_llm::MsgRole::User,
+            },
+            content: e.content.clone(),
+            tool_call_id: None,
+            tool_calls: vec![],
+            reasoning: None,
+        })
+        .collect();
+
+    let Some(summary) = crate::summarize::summarize(provider, &cfg.model, &msgs).await else {
+        warn!("compact：摘要为空/失败，跳过");
+        return;
+    };
+
+    if let Err(e) = store
+        .writer()
+        .compact_with_summary(session_id.into(), up_to_seq, summary)
+        .await
+    {
+        warn!(error = %e, "compact：落库失败");
+        return;
+    }
+
+    // 通知 client 压缩完成（走 Proactive 通道，归属本会话）。
+    let _ = events.send(Event::Proactive {
+        session: oc_proto::SessionId::new(session_id.to_string()),
+        kind: oc_proto::ProactiveKind::Wake,
+        text: format!("已压缩上下文：{} 条历史消息总结为摘要", older.len()),
+        source: oc_proto::ProactiveSource::Heartbeat,
+    });
 }
 
 /// 把用户消息分词（词法检索用）。

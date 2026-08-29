@@ -45,6 +45,12 @@ pub enum Event {
         task_id: TaskId,
         update: TaskUpdate,
     },
+    /// ★上下文用量：每轮 provider 报告真实 token 后推送，供 client 显示进度。
+    Usage {
+        session: SessionId,
+        input_tokens: u32,
+        context_window: u32,
+    },
     /// ★审批请求：server 请求用户批准一个动作（如危险命令）。
     /// client 收到后应向用户展示，并用 `approval.reply` 方法回执。
     Approval {

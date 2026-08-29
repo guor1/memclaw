@@ -27,6 +27,7 @@ fn cfg(idle_ms: u64) -> SessionConfig {
         skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
+        context_window: 65536,
     }
 }
 
@@ -133,6 +134,7 @@ async fn health_scan_aborts_stuck_run() {
         skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
+        context_window: 65536,
     };
     let handle = session::spawn(oc_proto::SessionId::main(), cfg, provider, tx, oc_store::Store::open_memory().unwrap());
 

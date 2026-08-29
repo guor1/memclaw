@@ -124,6 +124,43 @@ pub fn load_transcript(conn: &Connection, session_id: &str, max_entries: i64) ->
     Ok(out)
 }
 
+/// 摘要式压缩：把 `seq <= up_to_seq` 的对话压成一条摘要 entry，并推进 reset_at
+/// 到 up_to_seq（排除被摘要的原始区间，但保留 transcript 供审计）。
+///
+/// 事务内完成：插入 System 角色的摘要 entry（seq 在 max+1，落在 reset 之后故会被
+/// 后续 load 取到）+ 更新 reset_at。摘要文本由 server 调模型生成后传入。
+pub fn compact_with_summary(
+    conn: &Connection,
+    session_id: &str,
+    up_to_seq: i64,
+    summary_text: &str,
+) -> StoreResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    let content = format!("【上下文摘要】\n{summary_text}");
+    let tokens_est = (content.chars().count() as i64 / 4).max(1);
+    // 摘要 entry 追加在末尾（新 seq），落在 reset_at 之后。
+    let next_seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM entry WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(1);
+    tx.execute(
+        "INSERT INTO entry(session_id, seq, role, content, tokens_est, created_at)
+         VALUES(?1, ?2, 'system', ?3, ?4, ?5)",
+        params![session_id, next_seq, content, tokens_est, now_millis()],
+    )?;
+    // 推进 reset_at 到 up_to_seq：排除原始被摘要区间，但摘要 entry(seq=next_seq)保留。
+    tx.execute(
+        "UPDATE session SET reset_at = ?2 WHERE id = ?1",
+        params![session_id, up_to_seq],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// upsert 一条记忆（按 id）。
 pub fn upsert_memory(conn: &Connection, m: &NewMemory) -> StoreResult<()> {
     conn.execute(

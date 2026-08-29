@@ -39,6 +39,7 @@ fn cfg_with_tools(tools: ToolExecutor) -> SessionConfig {
         skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
+        context_window: 65536,
     }
 }
 
@@ -139,6 +140,7 @@ async fn dangerous_command_triggers_approval_then_runs() {
         skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
+        context_window: 65536,
     };
 
     // 危险命令：sudo（会判 NeedsApproval）。审批放行后进入执行。

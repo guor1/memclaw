@@ -134,6 +134,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compact_with_summary_replaces_range() {
+        use crate::types::{NewEntry, Role};
+        let store = Store::open_memory().expect("open");
+        let w = store.writer();
+        w.ensure_session("main".into(), "main".into()).await.unwrap();
+
+        // 5 条历史。
+        for (role, text) in [
+            (Role::User, "第一个问题"),
+            (Role::Assistant, "第一个回答"),
+            (Role::User, "第二个问题"),
+            (Role::Assistant, "第二个回答"),
+            (Role::User, "最近的问题"),
+        ] {
+            w.append_entry(NewEntry {
+                session_id: "main".into(),
+                role,
+                content: text.into(),
+                tokens_est: 2,
+            })
+            .await
+            .unwrap();
+        }
+
+        // 压缩前 4 条（seq 1..=4）成摘要，保留第 5 条。
+        w.compact_with_summary("main".into(), 4, "前两轮讨论了问题一和问题二".into())
+            .await
+            .unwrap();
+
+        let hist = w.load_transcript("main".into(), 100).await.unwrap();
+        // reset_at=4 → 只回 seq>4：摘要 entry(seq6) + 最近一条(seq5)。
+        assert_eq!(hist.len(), 2, "应只剩摘要 + 最近一条: {hist:?}");
+        assert!(hist.iter().any(|e| e.content.contains("上下文摘要")), "应有摘要 entry");
+        assert!(hist.iter().any(|e| e.content.contains("最近的问题")), "最近消息应保留");
+        assert!(!hist.iter().any(|e| e.content.contains("第一个问题")), "旧消息应被排除");
+    }
+
+    #[tokio::test]
     async fn memory_upsert_and_search() {
         use crate::types::{NewMemory, Origin, Tier};
         let store = Store::open_memory().expect("open");

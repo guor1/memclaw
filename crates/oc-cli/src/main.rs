@@ -46,6 +46,8 @@ enum Command {
     Status,
     /// 列出所有会话。
     Sessions,
+    /// 压缩当前会话上下文（摘要旧历史）。
+    Compact,
 }
 
 #[derive(Subcommand)]
@@ -96,6 +98,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Status) => cli_client::status(),
         Some(Command::Sessions) => cli_client::sessions(),
+        Some(Command::Compact) => cli_client::compact(),
         // 无子命令 → 连 daemon 进 TUI。
         None => tui_runner::run(),
     }

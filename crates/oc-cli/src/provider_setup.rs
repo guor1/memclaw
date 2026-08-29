@@ -31,6 +31,11 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         Hosting::SelfHosted => cfg.watchdog.idle_self_secs,
     };
 
+    // 上下文窗口 → 压缩/历史预算（budget = window − reserve，保底 MIN）。
+    let context_window = model.effective_context_window() as i64;
+    let budget =
+        oc_core::compaction::CompactCfg::from_window(context_window, oc_core::compaction::DEFAULT_RESERVE_TOKENS).budget;
+
     // 组装工具注册表（exec + file）。
     let tools = build_tools(cfg)?;
 
@@ -49,11 +54,12 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         warn_secs: idle, // 警告阈值取空闲看门狗阈值
         abort_min_secs: cfg.watchdog.abort_min_secs,
         max_history_entries: 200,
-        history_token_budget: 8000,
+        history_token_budget: budget,
         soul: load_soul(),
         skills: crate::skills_loader::load(),
         trigger_threshold: cfg.memory.trigger_threshold as f64,
         trigger_max_per_turn: cfg.memory.trigger_max_per_turn as usize,
+        context_window: context_window as u32,
     };
 
     // 解引用 api_key。

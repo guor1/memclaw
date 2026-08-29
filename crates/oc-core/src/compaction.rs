@@ -66,6 +66,25 @@ impl Default for CompactCfg {
     }
 }
 
+/// 默认预留 token（输出 + 系统提示 + 压缩本身的余量）。对齐 OpenClaw reserveTokens。
+pub const DEFAULT_RESERVE_TOKENS: i64 = 16_384;
+
+/// 预算绝对下限：即使窗口很小，也保证给对话内容留这么多。对齐 OpenClaw MIN_PROMPT_BUDGET。
+pub const MIN_BUDGET_TOKENS: i64 = 8_000;
+
+impl CompactCfg {
+    /// 从上下文窗口派生预算：`budget = window − reserve`，并保底 [`MIN_BUDGET_TOKENS`]。
+    ///
+    /// 其余参数取默认（trigger_ratio/prune/keep_recent）。
+    pub fn from_window(context_window: i64, reserve: i64) -> Self {
+        let budget = (context_window - reserve).max(MIN_BUDGET_TOKENS);
+        Self {
+            budget,
+            ..Default::default()
+        }
+    }
+}
+
 /// 规划一次压缩（纯函数）。
 ///
 /// `metas` 按时间正序。返回的计划保证：
@@ -196,6 +215,16 @@ mod tests {
         };
         let plan = plan_compaction(&metas, &cfg);
         assert!(plan.is_noop(), "全为近期消息时不应动");
+    }
+
+    #[test]
+    fn from_window_derives_budget() {
+        // 大窗口：budget = window − reserve。
+        let c = CompactCfg::from_window(65_536, DEFAULT_RESERVE_TOKENS);
+        assert_eq!(c.budget, 65_536 - 16_384);
+        // 小窗口：保底不低于 MIN_BUDGET_TOKENS。
+        let c = CompactCfg::from_window(10_000, DEFAULT_RESERVE_TOKENS);
+        assert_eq!(c.budget, MIN_BUDGET_TOKENS);
     }
 
     #[test]

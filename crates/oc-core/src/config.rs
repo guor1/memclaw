@@ -63,6 +63,52 @@ pub struct ModelConfig {
     #[garde(skip)]
     #[serde(default)]
     pub base_url: Option<String>,
+    /// 上下文窗口（token）。None = 按 model 名查内置默认表，查不到用保守默认。
+    /// 压缩预算据此派生（budget = window − reserve）。
+    #[garde(skip)]
+    #[serde(default)]
+    pub context_window: Option<u32>,
+}
+
+/// 保守默认上下文窗口（内置表与手填都缺时兜底）。
+pub const DEFAULT_CONTEXT_WINDOW: u32 = 32_768;
+
+/// 按模型名查内置默认上下文窗口（手填缺失时的兜底表）。
+///
+/// 匹配常见模型名子串；查不到返回 [`DEFAULT_CONTEXT_WINDOW`]。单用户可随时
+/// 在 config 显式填 `context_window` 覆盖本表（手填优先）。
+pub fn default_context_window(model: &str) -> u32 {
+    let m = model.to_ascii_lowercase();
+    // 从具体到通用匹配。
+    if m.contains("deepseek") {
+        65_536
+    } else if m.contains("claude") {
+        200_000
+    } else if m.contains("gpt-4o") || m.contains("gpt-4.1") || m.contains("o1") || m.contains("o3") {
+        128_000
+    } else if m.contains("gpt-4-turbo") || m.contains("gpt-4-1106") {
+        128_000
+    } else if m.contains("gpt-4") {
+        8_192
+    } else if m.contains("gpt-3.5") {
+        16_385
+    } else if m.contains("kimi") || m.contains("moonshot") {
+        128_000
+    } else if m.contains("qwen") {
+        131_072
+    } else if m.contains("gemini") {
+        1_000_000
+    } else {
+        DEFAULT_CONTEXT_WINDOW
+    }
+}
+
+impl ModelConfig {
+    /// 生效的上下文窗口：手填优先，否则查内置默认表。
+    pub fn effective_context_window(&self) -> u32 {
+        self.context_window
+            .unwrap_or_else(|| default_context_window(&self.model))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +229,7 @@ impl Config {
                 hosting: Hosting::Cloud,
                 api_key: SecretRef::Env("ANTHROPIC_API_KEY".to_string()),
                 base_url: None,
+                context_window: None,
             }],
             memory: MemoryConfig {
                 vec: true,
@@ -234,5 +281,28 @@ mod tests {
         let mut cfg = Config::default_local();
         cfg.models.clear();
         assert!(cfg.validate_shape().is_err());
+    }
+
+    #[test]
+    fn default_context_window_table() {
+        assert_eq!(default_context_window("deepseek-chat"), 65_536);
+        assert_eq!(default_context_window("deepseek-reasoner"), 65_536);
+        assert_eq!(default_context_window("claude-opus-4-8"), 200_000);
+        assert_eq!(default_context_window("gpt-4o"), 128_000);
+        assert_eq!(default_context_window("gemini-2.0-flash"), 1_000_000);
+        // 未知模型 → 保守默认。
+        assert_eq!(default_context_window("some-unknown-model"), DEFAULT_CONTEXT_WINDOW);
+    }
+
+    #[test]
+    fn effective_window_prefers_explicit() {
+        let mut m = Config::default_local().models.remove(0);
+        m.model = "deepseek-chat".to_string();
+        // 未填 → 查表得 65536。
+        m.context_window = None;
+        assert_eq!(m.effective_context_window(), 65_536);
+        // 手填 → 优先。
+        m.context_window = Some(100_000);
+        assert_eq!(m.effective_context_window(), 100_000);
     }
 }

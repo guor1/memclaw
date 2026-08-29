@@ -42,6 +42,8 @@ pub struct App {
     active_run: Option<RunId>,
     /// 当前活跃会话（chat.send 归属；事件按此过滤显示）。
     current_session: SessionId,
+    /// 上下文用量提示（已用/窗口），随 Usage 事件更新，显示在状态栏。
+    usage_hint: Option<String>,
 }
 
 impl App {
@@ -69,6 +71,7 @@ impl App {
             pending_approval: None,
             active_run: None,
             current_session: SessionId::main(),
+            usage_hint: None,
         };
         // 等 hello。
         if let Some(Frame::Res(res)) = app.client.recv().await? {
@@ -157,6 +160,9 @@ impl App {
                     }
                 } else if text == "/sessions" {
                     self.list_sessions().await?;
+                } else if text == "/compact" {
+                    self.compact().await?;
+                    self.push_sys("已请求压缩上下文…");
                 } else if let Some(arg) = text.strip_prefix("/session ") {
                     // 切换/新建会话：后续 chat.send 归属该会话，事件按此过滤。
                     let id = arg.trim();
@@ -218,6 +224,21 @@ impl App {
                 text,
             }),
             idempotency_key: Some(oc_proto::IdemKey::new(uuid_like(self.next_req))),
+        };
+        self.client.send(&Frame::Req(req)).await?;
+        Ok(())
+    }
+
+    /// 请求压缩当前会话上下文。
+    async fn compact(&mut self) -> Result<()> {
+        let id = format!("req-{}", self.next_req);
+        self.next_req += 1;
+        let req = Req {
+            id: ReqId::new(id),
+            method: Method::Compact(oc_proto::CompactParams {
+                session: Some(self.current_session.clone()),
+            }),
+            idempotency_key: None,
         };
         self.client.send(&Frame::Req(req)).await?;
         Ok(())
@@ -333,6 +354,10 @@ impl App {
                 self.status = "等待审批：按 y 批准 / n 拒绝".to_string();
             }
             Event::Task { .. } => {}
+            Event::Usage { input_tokens, context_window, .. } => {
+                // 实时更新上下文用量提示（显示在状态栏）。
+                self.usage_hint = Some(format_usage(input_tokens, context_window));
+            }
         }
     }
 
@@ -375,10 +400,28 @@ impl App {
             .block(Block::default().borders(Borders::ALL).title("输入"));
         f.render_widget(input, chunks[1]);
 
-        // 状态栏
-        let status = Paragraph::new(self.status.as_str())
-            .style(Style::default().fg(Color::DarkGray));
+        // 状态栏：状态文本 +（可选）上下文用量。
+        let status_line = match &self.usage_hint {
+            Some(u) => format!("{}  |  ctx {}", self.status, u),
+            None => self.status.clone(),
+        };
+        let status = Paragraph::new(status_line).style(Style::default().fg(Color::DarkGray));
         f.render_widget(status, chunks[2]);
+    }
+}
+
+/// 格式化上下文用量：「12.3K/64K (19%)」。
+fn format_usage(used: u32, window: u32) -> String {
+    let pct = if window > 0 { used as f64 / window as f64 * 100.0 } else { 0.0 };
+    format!("{}/{} ({:.0}%)", short_k(used), short_k(window), pct)
+}
+
+/// 紧凑显示 token 数：1234→1.2K，65536→64K。
+fn short_k(n: u32) -> String {
+    if n >= 1000 {
+        format!("{:.1}K", n as f64 / 1000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -390,6 +433,7 @@ fn event_session(ev: &Event) -> Option<&SessionId> {
         | Event::Tool { session, .. }
         | Event::Proactive { session, .. }
         | Event::Task { session, .. }
+        | Event::Usage { session, .. }
         | Event::Approval { session, .. } => session,
     })
 }

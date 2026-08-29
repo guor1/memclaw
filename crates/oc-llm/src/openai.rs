@@ -82,6 +82,8 @@ impl OpenAiProvider {
             "model": req.model,
             "messages": messages,
             "stream": true,
+            // 流式返回 token 用量（末尾附一个带 usage 的 chunk）。DeepSeek/OpenAI 支持。
+            "stream_options": { "include_usage": true },
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
         });
@@ -175,6 +177,11 @@ impl Provider for OpenAiProvider {
 /// 解析一条 OpenAI SSE chunk 为 Delta（仅取文本增量与结束原因）。
 fn parse_chunk(payload: &str) -> Option<Delta> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    // usage chunk：include_usage 下末尾会有一个 choices 为空、带顶层 usage 的 chunk。
+    // 先于 choices[0] 判断（否则空 choices 会提前返回 None，丢掉 usage）。
+    if let Some(u) = parse_usage(&v) {
+        return Some(Delta::Usage(u));
+    }
     let choice = v.get("choices")?.get(0)?;
     if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
         return Some(Delta::Done(match reason {
@@ -234,10 +241,28 @@ fn classify_status(status: u16, retry_after: Option<u64>, detail: &str) -> Provi
     }
 }
 
-// 忽略 usage 的解析以保持 M3 精简；M5 需要时补。
-#[allow(dead_code)]
-fn parse_usage(_v: &serde_json::Value) -> Option<Usage> {
-    None
+/// 从 chunk 顶层解析 `usage`（include_usage 开启时末尾 chunk 携带）。
+/// 兼容 OpenAI 别名：prompt_tokens/completion_tokens。
+fn parse_usage(v: &serde_json::Value) -> Option<Usage> {
+    let u = v.get("usage")?;
+    // usage 可能为 null（普通增量 chunk）。
+    if u.is_null() {
+        return None;
+    }
+    let input = u
+        .get("prompt_tokens")
+        .or_else(|| u.get("input_tokens"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
+    let output = u
+        .get("completion_tokens")
+        .or_else(|| u.get("output_tokens"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
+    if input == 0 && output == 0 {
+        return None;
+    }
+    Some(Usage { input_tokens: input, output_tokens: output })
 }
 
 #[cfg(test)]
@@ -273,6 +298,25 @@ mod tests {
         assert_eq!(arr[0]["type"], "function");
         assert_eq!(arr[0]["function"]["name"], "exec");
         assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn parses_usage_chunk() {
+        // include_usage 末尾 chunk：choices 空 + 顶层 usage。
+        let chunk = r#"{"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":56}}"#;
+        assert_eq!(
+            parse_chunk(chunk),
+            Some(Delta::Usage(Usage { input_tokens: 1234, output_tokens: 56 }))
+        );
+        // 普通增量 chunk 的 usage 为 null → 不误判。
+        let normal = r#"{"choices":[{"delta":{"content":"hi"}}],"usage":null}"#;
+        assert_eq!(parse_chunk(normal), Some(Delta::Text("hi".into())));
+    }
+
+    #[test]
+    fn body_includes_usage_option() {
+        let body = OpenAiProvider::body(&req_with(vec![user("hi")], vec![]));
+        assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
     #[test]
