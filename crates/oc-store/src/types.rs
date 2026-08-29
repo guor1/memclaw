@@ -140,6 +140,29 @@ pub struct NewMemory {
     pub content_hash: String,
 }
 
+/// 待写入的一条定时任务。
+#[derive(Debug, Clone)]
+pub struct NewCron {
+    pub id: String,
+    pub expr: String,
+    pub prompt: String,
+    pub tz: String,
+    /// 下次触发（unix 秒）；由 core::next_fire 算好传入。
+    pub next_at: Option<i64>,
+}
+
+/// 已存储的一条定时任务。
+#[derive(Debug, Clone)]
+pub struct CronRow {
+    pub id: String,
+    pub expr: String,
+    pub prompt: String,
+    pub tz: String,
+    pub next_at: Option<i64>,
+    pub last_fired_at: Option<i64>,
+    pub enabled: bool,
+}
+
 /// 已存储的记忆（含检索所需字段）。
 #[derive(Debug, Clone)]
 pub struct MemoryRow {

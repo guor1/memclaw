@@ -137,6 +137,50 @@ pub fn touch_memory(conn: &Connection, id: &str, at: i64) -> StoreResult<()> {
     Ok(())
 }
 
+/// 新增一条 cron 定时任务。
+pub fn cron_add(conn: &Connection, c: &crate::types::NewCron) -> StoreResult<()> {
+    conn.execute(
+        "INSERT INTO cron(id, expr, prompt, tz, next_at, enabled) VALUES(?1, ?2, ?3, ?4, ?5, 1)",
+        params![c.id, c.expr, c.prompt, c.tz, c.next_at],
+    )?;
+    Ok(())
+}
+
+/// 列出所有 cron 任务。
+pub fn cron_list(conn: &Connection) -> StoreResult<Vec<crate::types::CronRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, expr, prompt, tz, next_at, last_fired_at, enabled FROM cron ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(crate::types::CronRow {
+            id: r.get(0)?,
+            expr: r.get(1)?,
+            prompt: r.get(2)?,
+            tz: r.get(3)?,
+            next_at: r.get(4)?,
+            last_fired_at: r.get(5)?,
+            enabled: r.get::<_, i64>(6)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// 删除一条 cron 任务。返回是否删到行。
+pub fn cron_rm(conn: &Connection, id: &str) -> StoreResult<bool> {
+    let n = conn.execute("DELETE FROM cron WHERE id = ?1", params![id])?;
+    Ok(n > 0)
+}
+
+/// 触发后更新：记录 last_fired_at + 抬 fired_count（借 standing_intent 语义？
+/// cron 无 fired_count 列，仅更 next_at / last_fired_at）。
+pub fn cron_mark_fired(conn: &Connection, id: &str, fired_at: i64, next_at: Option<i64>) -> StoreResult<()> {
+    conn.execute(
+        "UPDATE cron SET last_fired_at = ?2, next_at = ?3 WHERE id = ?1",
+        params![id, fired_at, next_at],
+    )?;
+    Ok(())
+}
+
 /// 取 dreaming 待巩固候选：episodic tier 的记忆（双门判定在 oc-core）。
 ///
 /// 返回字段含 use_count / created_at / last_used_at，供 core 算频次/时间窗门。

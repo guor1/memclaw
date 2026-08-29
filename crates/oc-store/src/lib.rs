@@ -206,4 +206,39 @@ mod tests {
             .unwrap();
         // 无直接读 API，此处只验证不报错即通过（链完整性属实现内不变量）。
     }
+
+    #[tokio::test]
+    async fn cron_crud_roundtrip() {
+        use crate::types::NewCron;
+        let store = Store::open_memory().expect("open");
+        let w = store.writer();
+
+        w.cron_add(NewCron {
+            id: "c1".into(),
+            expr: "0 9 * * *".into(),
+            prompt: "写周报".into(),
+            tz: "UTC".into(),
+            next_at: Some(12345),
+        })
+        .await
+        .unwrap();
+
+        let list = w.cron_list().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].expr, "0 9 * * *");
+        assert!(list[0].enabled);
+        assert_eq!(list[0].next_at, Some(12345));
+
+        // 触发后更新。
+        w.cron_mark_fired("c1".into(), 20000, Some(99999)).await.unwrap();
+        let after = w.cron_list().await.unwrap();
+        assert_eq!(after[0].last_fired_at, Some(20000));
+        assert_eq!(after[0].next_at, Some(99999));
+
+        // 删除。
+        assert!(w.cron_rm("c1".into()).await.unwrap());
+        assert!(w.cron_list().await.unwrap().is_empty());
+        // 删不存在的返回 false。
+        assert!(!w.cron_rm("nope".into()).await.unwrap());
+    }
 }

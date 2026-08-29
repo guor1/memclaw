@@ -9,6 +9,7 @@ pub mod dispatch;
 pub mod dreaming;
 pub mod error;
 pub mod ledger;
+pub mod proactive;
 pub mod run;
 pub mod scheduler;
 pub mod session;
@@ -71,25 +72,37 @@ pub async fn serve_with(
         session_cfg.tools = Some(tools.with_approval(handler));
     }
 
+    // proactive 上下文：在 provider 被 session 接管前克隆出所需句柄。
+    let proactive_ctx = proactive::ProactiveCtx {
+        provider: Arc::clone(&provider),
+        events: event_tx.clone(),
+        store: store.clone(),
+        model: session_cfg.model.clone(),
+        soul: session_cfg.soul.clone(),
+    };
+
     let session = session::spawn(session_cfg, provider, event_tx.clone(), store.clone());
     let dream_store = store.clone();
     let state = Arc::new(ServerState::new(event_tx, session, approvals, ledger, store));
 
-    // 心跳 tick：每 tick 做卡死诊断扫描；每 DREAM_EVERY_TICKS 触发一轮 dreaming 巩固。
+    // 心跳 tick：每 tick 卡死诊断扫描 + cron 到期扫描；每 DREAM_EVERY_TICKS 一轮 dreaming。
     let shutdown = CancellationToken::new();
     let scan_session = state.session().clone();
     scheduler::Heartbeat::new(heartbeat_interval).spawn(shutdown.clone(), move |tick| {
         let session = scan_session.clone();
         let store = dream_store.clone();
+        let pctx = proactive_ctx.clone();
         async move {
-            tracing::debug!(tick, "heartbeat：卡死诊断扫描");
+            tracing::debug!(tick, "heartbeat：扫描");
             session.health_scan().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            // cron 到期触发（失败不阻塞）。
+            proactive::cron_scan(&pctx, now).await;
             // dreaming 巩固：稀疏触发（设计 §7.4 夜间/空闲；M5 先按 tick 周期）。
             if tick % DREAM_EVERY_TICKS == 0 {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
                 dreaming::scan(&store, now, &oc_core::dreaming::DreamCfg::default()).await;
             }
         }

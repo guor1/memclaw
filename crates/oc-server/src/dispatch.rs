@@ -66,14 +66,10 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
             state.ledger().cancel(&p.task_id);
             Ok(MethodOk::Empty)
         }
-        // 以下方法在后续里程碑实现。
-        Method::CronAdd(_)
-        | Method::CronList
-        | Method::CronRm(_)
-        | Method::MemorySearch(_) => Err(ProtoError {
-            kind: oc_proto::ErrorKind::Unsupported,
-            message: "该方法将在后续里程碑实现".to_string(),
-        }),
+        Method::CronAdd(p) => handle_cron_add(p, state).await,
+        Method::CronList => handle_cron_list(state).await,
+        Method::CronRm(p) => handle_cron_rm(p, state).await,
+        Method::MemorySearch(p) => handle_memory_search(p, state).await,
     };
 
     match result {
@@ -130,6 +126,164 @@ async fn handle_chat_abort(
 ) -> Result<MethodOk, ProtoError> {
     state.session().abort(p.run_id.clone(), p.hard).await;
     Ok(MethodOk::Empty)
+}
+
+/// 新增 cron：校验表达式（core::next_fire）→ 算首次触发 → 落库。
+async fn handle_cron_add(
+    p: &oc_proto::CronAddParams,
+    state: &Arc<ServerState>,
+) -> Result<MethodOk, ProtoError> {
+    let now = now_secs();
+    // 校验 + 算首次触发。
+    let next_at = match oc_core::proactive::next_fire(&p.expr, now) {
+        Ok(n) => n,
+        Err(e) => {
+            return Err(ProtoError {
+                kind: oc_proto::ErrorKind::BadRequest,
+                message: format!("cron 表达式非法: {e}"),
+            })
+        }
+    };
+    let id = format!("cron-{}", uuid::Uuid::now_v7());
+    let cron = oc_store::NewCron {
+        id: id.clone(),
+        expr: p.expr.clone(),
+        prompt: p.prompt.clone(),
+        tz: p.tz.clone(),
+        next_at,
+    };
+    state.store().writer().cron_add(cron).await.map_err(|e| ProtoError {
+        kind: oc_proto::ErrorKind::Internal,
+        message: format!("新增 cron 失败: {e}"),
+    })?;
+    Ok(MethodOk::CronAdd { cron_id: oc_proto::CronId::new(id) })
+}
+
+async fn handle_cron_list(state: &Arc<ServerState>) -> Result<MethodOk, ProtoError> {
+    let rows = state.store().writer().cron_list().await.map_err(|e| ProtoError {
+        kind: oc_proto::ErrorKind::Internal,
+        message: format!("列出 cron 失败: {e}"),
+    })?;
+    let out = rows
+        .into_iter()
+        .map(|c| oc_proto::CronSpec {
+            id: oc_proto::CronId::new(c.id),
+            expr: c.expr,
+            prompt: c.prompt,
+            tz: c.tz,
+            enabled: c.enabled,
+            next_at: c.next_at,
+        })
+        .collect();
+    Ok(MethodOk::CronList(out))
+}
+
+async fn handle_cron_rm(
+    p: &oc_proto::CronRmParams,
+    state: &Arc<ServerState>,
+) -> Result<MethodOk, ProtoError> {
+    state
+        .store()
+        .writer()
+        .cron_rm(p.cron_id.to_string())
+        .await
+        .map_err(|e| ProtoError {
+            kind: oc_proto::ErrorKind::Internal,
+            message: format!("删除 cron 失败: {e}"),
+        })?;
+    Ok(MethodOk::Empty)
+}
+
+/// 记忆检索（调试/自省）：Lane1 词法排名（复用 core::rank）。
+async fn handle_memory_search(
+    p: &oc_proto::MemSearchParams,
+    state: &Arc<ServerState>,
+) -> Result<MethodOk, ProtoError> {
+    use oc_core::memory::{rank, MemCandidate, Origin as CoreOrigin, Tier as CoreTier, RankCfg};
+
+    let terms = tokenize(&p.query);
+    let limit = p.limit.unwrap_or(10) as i64;
+    let rows = state
+        .store()
+        .writer()
+        .search_candidates(terms.clone(), None, 64)
+        .await
+        .map_err(|e| ProtoError {
+            kind: oc_proto::ErrorKind::Internal,
+            message: format!("记忆检索失败: {e}"),
+        })?;
+
+    let cands: Vec<MemCandidate> = rows
+        .iter()
+        .map(|r| MemCandidate {
+            id: r.id.clone(),
+            tier: match r.tier {
+                oc_store::Tier::Curated => CoreTier::Curated,
+                oc_store::Tier::Episodic => CoreTier::Episodic,
+                oc_store::Tier::Prospective => CoreTier::Prospective,
+                oc_store::Tier::Review => CoreTier::Review,
+            },
+            origin: match r.origin {
+                oc_store::Origin::Owner => CoreOrigin::Owner,
+                oc_store::Origin::Agent => CoreOrigin::Agent,
+                oc_store::Origin::Untrusted => CoreOrigin::Untrusted,
+                oc_store::Origin::System => CoreOrigin::System,
+            },
+            text: r.text.clone(),
+            importance: r.importance,
+            last_used_secs: r.last_used_at.unwrap_or(r.created_at) / 1000,
+        })
+        .collect();
+
+    let ranked = rank(&cands, &terms, now_secs(), &RankCfg::default());
+    let hits: Vec<oc_proto::MemHit> = ranked
+        .into_iter()
+        .filter(|r| r.score > 0.0)
+        .take(limit as usize)
+        .filter_map(|r| {
+            let c = cands.iter().find(|c| c.id == r.id)?;
+            Some(oc_proto::MemHit {
+                id: oc_proto::MemoryId::new(r.id.clone()),
+                tier: match c.tier {
+                    CoreTier::Curated => "curated",
+                    CoreTier::Episodic => "episodic",
+                    CoreTier::Prospective => "prospective",
+                    CoreTier::Review => "review",
+                }
+                .to_string(),
+                text: c.text.clone(),
+                score: r.score as f32,
+            })
+        })
+        .collect();
+    Ok(MethodOk::MemorySearch(hits))
+}
+
+/// 词法分词（与 session::tokenize 同策略：空白/标点切 + CJK 2-gram）。
+fn tokenize(msg: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for seg in msg.split(|c: char| c.is_whitespace() || c.is_ascii_punctuation()) {
+        let chars: Vec<char> = seg.chars().collect();
+        if chars.len() < 2 {
+            continue;
+        }
+        terms.push(seg.to_string());
+        if chars.len() > 2 {
+            for w in chars.windows(2) {
+                terms.push(w.iter().collect());
+            }
+        }
+    }
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn snapshot() -> Snapshot {

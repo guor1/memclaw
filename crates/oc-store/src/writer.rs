@@ -64,6 +64,23 @@ pub enum WriteCmd {
         payload: Option<String>,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    CronAdd {
+        cron: crate::types::NewCron,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    CronList {
+        reply: oneshot::Sender<StoreResult<Vec<crate::types::CronRow>>>,
+    },
+    CronRm {
+        id: String,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    CronMarkFired {
+        id: String,
+        fired_at: i64,
+        next_at: Option<i64>,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     /// 用于优雅关停。
     Shutdown,
 }
@@ -183,6 +200,35 @@ impl Writer {
         self.send(WriteCmd::WriteAudit { actor, action, payload, reply })?;
         rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
     }
+
+    pub async fn cron_add(&self, cron: crate::types::NewCron) -> StoreResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::CronAdd { cron, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
+    pub async fn cron_list(&self) -> StoreResult<Vec<crate::types::CronRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::CronList { reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
+    pub async fn cron_rm(&self, id: String) -> StoreResult<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::CronRm { id, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
+    pub async fn cron_mark_fired(
+        &self,
+        id: String,
+        fired_at: i64,
+        next_at: Option<i64>,
+    ) -> StoreResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::CronMarkFired { id, fired_at, next_at, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
 }
 
 fn open_writer_conn(db: Option<PathBuf>) -> StoreResult<Connection> {
@@ -228,6 +274,18 @@ fn run_loop(conn: Connection, rx: &mut mpsc::UnboundedReceiver<WriteCmd>) {
             }
             WriteCmd::WriteAudit { actor, action, payload, reply } => {
                 let _ = reply.send(ops::write_audit(&conn, &actor, &action, payload.as_deref()));
+            }
+            WriteCmd::CronAdd { cron, reply } => {
+                let _ = reply.send(ops::cron_add(&conn, &cron));
+            }
+            WriteCmd::CronList { reply } => {
+                let _ = reply.send(ops::cron_list(&conn));
+            }
+            WriteCmd::CronRm { id, reply } => {
+                let _ = reply.send(ops::cron_rm(&conn, &id));
+            }
+            WriteCmd::CronMarkFired { id, fired_at, next_at, reply } => {
+                let _ = reply.send(ops::cron_mark_fired(&conn, &id, fired_at, next_at));
             }
             WriteCmd::Shutdown => break,
         }
