@@ -24,6 +24,8 @@ fn cfg(idle_ms: u64) -> SessionConfig {
         max_history_entries: 200,
         history_token_budget: 8000,
         soul: String::new(),
+        trigger_threshold: 0.72,
+        trigger_max_per_turn: 3,
     }
 }
 
@@ -127,6 +129,8 @@ async fn health_scan_aborts_stuck_run() {
         max_history_entries: 200,
         history_token_budget: 8000,
         soul: String::new(),
+        trigger_threshold: 0.72,
+        trigger_max_per_turn: 3,
     };
     let handle = session::spawn(cfg, provider, tx, oc_store::Store::open_memory().unwrap());
 

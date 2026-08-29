@@ -37,6 +37,10 @@ pub struct SessionConfig {
     pub history_token_budget: i64,
     /// SOUL.md 人格文本（每轮由 oc-core::prompt 确定性组装进系统提示词）。
     pub soul: String,
+    /// trigger 注入相关性阈值（Lane1，设计 §4.3）。
+    pub trigger_threshold: f64,
+    /// trigger 每轮最多注入条数。
+    pub trigger_max_per_turn: usize,
 }
 
 /// 发给 session actor 的命令。
@@ -145,7 +149,8 @@ async fn actor_loop(
                 match queue.submit(turn) {
                     SubmitResult::Started(t) => {
                         let history = load_history(&store, &cfg).await;
-                        active = Some(start_run(&cfg, &provider, &events, &self_tx, &store, t, history));
+                        let boot = lane1_bootstrap(&store, &cfg, &t.text).await;
+                        active = Some(start_run(&cfg, &provider, &events, &self_tx, &store, t, history, boot));
                     }
                     SubmitResult::Queued => { /* 等活跃结束再起 */ }
                     SubmitResult::Rejected => {
@@ -175,7 +180,8 @@ async fn actor_loop(
                     // 取下一个排队轮。
                     if let Some(next) = queue.complete_active() {
                         let history = load_history(&store, &cfg).await;
-                        active = Some(start_run(&cfg, &provider, &events, &self_tx, &store, next, history));
+                        let boot = lane1_bootstrap(&store, &cfg, &next.text).await;
+                        active = Some(start_run(&cfg, &provider, &events, &self_tx, &store, next, history, boot));
                     }
                 }
             }
@@ -211,6 +217,7 @@ fn start_run(
     store: &oc_store::Store,
     turn: QueuedTurn,
     history: Vec<oc_llm::Message>,
+    bootstrap: Vec<oc_core::prompt::MemLine>,
 ) -> ActiveRun {
     let cancel = CancellationToken::new();
     let run_id = RunId::new(turn.run_id.clone());
@@ -228,8 +235,8 @@ fn start_run(
         store: store.clone(),
         history,
         soul: cfg.soul.clone(),
-        // 第 4/5 段接入 Lane1 记忆注入；当前为空。
-        bootstrap: Vec::new(),
+        // Lane1 记忆注入（curated，trigger 预筛命中的）。
+        bootstrap,
         compact_cfg: oc_core::compaction::CompactCfg {
             budget: cfg.history_token_budget,
             ..Default::default()
@@ -309,4 +316,93 @@ async fn load_history(store: &oc_store::Store, cfg: &SessionConfig) -> Vec<oc_ll
     }
     kept.reverse(); // 变回正序
     kept
+}
+
+/// 把用户消息分词（词法检索用）。
+///
+/// 中文无空格，按空白/标点切后往往整句成一个词，contains 命中率低。
+/// 折中方案：空白/标点切分的词 + 对每段连续字符生成 2-gram（相邻两字），
+/// 让"回复"这类双字词能被 contains 命中。去重后返回。
+fn tokenize(msg: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for seg in msg.split(|c: char| c.is_whitespace() || c.is_ascii_punctuation()) {
+        let chars: Vec<char> = seg.chars().collect();
+        if chars.len() < 2 {
+            continue;
+        }
+        // 整段作为词（利于英文单词、短中文短语）。
+        terms.push(seg.to_string());
+        // 2-gram：相邻两字，覆盖中文双字词。
+        if chars.len() > 2 {
+            for w in chars.windows(2) {
+                terms.push(w.iter().collect());
+            }
+        }
+    }
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+/// Lane1 记忆检索（设计 §4.3）：取候选 → core trigger 预筛 → 命中的 curated
+/// 记忆作为 bootstrap 注入。**失败绝不阻塞回复**（返回空）。
+async fn lane1_bootstrap(
+    store: &oc_store::Store,
+    cfg: &SessionConfig,
+    user_msg: &str,
+) -> Vec<oc_core::prompt::MemLine> {
+    use oc_core::memory::{trigger_prefilter, MemCandidate, Origin as CoreOrigin, Tier as CoreTier};
+
+    let terms = tokenize(user_msg);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+
+    // 仅取 curated 候选（自动注入只限 curated）。
+    let rows = match store
+        .writer()
+        .search_candidates(terms.clone(), Some(oc_store::Tier::Curated), 32)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "Lane1 检索失败，跳过记忆注入");
+            return Vec::new();
+        }
+    };
+
+    // 映射为 core 候选。
+    let cands: Vec<MemCandidate> = rows
+        .iter()
+        .map(|r| MemCandidate {
+            id: r.id.clone(),
+            tier: CoreTier::Curated,
+            origin: match r.origin {
+                oc_store::Origin::Owner => CoreOrigin::Owner,
+                oc_store::Origin::Agent => CoreOrigin::Agent,
+                oc_store::Origin::Untrusted => CoreOrigin::Untrusted,
+                oc_store::Origin::System => CoreOrigin::System,
+            },
+            text: r.text.clone(),
+            importance: r.importance,
+            last_used_secs: r.last_used_at.unwrap_or(r.created_at) / 1000,
+        })
+        .collect();
+
+    let hits = trigger_prefilter(
+        user_msg,
+        &cands,
+        &terms,
+        cfg.trigger_threshold,
+        cfg.trigger_max_per_turn,
+    );
+
+    // 命中 id → 取全文作为 MemLine 注入。
+    hits.iter()
+        .filter_map(|id| cands.iter().find(|c| &c.id == id))
+        .map(|c| oc_core::prompt::MemLine {
+            key: c.id.clone(),
+            text: c.text.clone(),
+        })
+        .collect()
 }

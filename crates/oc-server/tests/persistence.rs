@@ -21,6 +21,8 @@ fn cfg() -> SessionConfig {
         max_history_entries: 200,
         history_token_budget: 8000,
         soul: String::new(),
+        trigger_threshold: 0.72,
+        trigger_max_per_turn: 3,
     }
 }
 

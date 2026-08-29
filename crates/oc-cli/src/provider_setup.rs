@@ -50,6 +50,8 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         max_history_entries: 200,
         history_token_budget: 8000,
         soul: load_soul(),
+        trigger_threshold: cfg.memory.trigger_threshold as f64,
+        trigger_max_per_turn: cfg.memory.trigger_max_per_turn as usize,
     };
 
     // 解引用 api_key。

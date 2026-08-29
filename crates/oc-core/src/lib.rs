@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod compaction;
 pub mod config;
+pub mod memory;
 pub mod model;
 pub mod prompt;
 pub mod queue;
