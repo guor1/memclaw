@@ -1,15 +1,18 @@
 //! oc 工具集（设计 §6）。
 //!
-//! `Tool` trait + 策略管道 + exec 审批门 + 结果净化。M4 首批：exec/file/process。
-//! web_fetch/web_search/ask_user/message 紧接着补。
+//! `Tool` trait + 策略管道 + exec 审批门 + 结果净化。
+//! 工具：exec/file/process/web_fetch/web_search/message（ask_user 待协议补自由文本回传）。
 
 pub mod error;
 pub mod exec;
 pub mod file;
+pub mod message;
 pub mod process;
 pub mod registry;
 pub mod sanitize;
 pub mod types;
+#[cfg(feature = "web")]
+pub mod web;
 
 pub use error::{ToolError, ToolResult};
 pub use registry::ToolRegistry;

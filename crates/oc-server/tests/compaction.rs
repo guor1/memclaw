@@ -22,6 +22,7 @@ fn cfg(budget: i64) -> SessionConfig {
         max_history_entries: 500,
         history_token_budget: budget,
         soul: "人格".into(),
+        skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
     }

@@ -76,6 +76,14 @@ const DEFAULT_MEMORY: &str = r#"# MEMORY.md — curated 核心记忆
 （dreaming 巩固会重写这里；也可手工编辑。）
 "#;
 
+const DEFAULT_SKILL: &str = r#"# example — 示例技能
+
+这是一个技能示例。skills/ 下每个 .md 文件是一个技能，文件名即技能名，
+正文会在会话起始注入系统提示词，用来教 oc 做某类任务的固定流程。
+
+删除本文件或替换为你自己的技能。
+"#;
+
 pub fn run() -> Result<()> {
     let home = paths::oc_home()?;
     fs::create_dir_all(&home).with_context(|| format!("创建 {} 失败", home.display()))?;
@@ -84,7 +92,8 @@ pub fn run() -> Result<()> {
     fs::create_dir_all(&soul_dir)?;
     fs::create_dir_all(home.join("memory"))?;
     fs::create_dir_all(home.join("logs"))?;
-    fs::create_dir_all(home.join("skills"))?;
+    let skills_dir = home.join("skills");
+    fs::create_dir_all(&skills_dir)?;
 
     let mut created = Vec::new();
     write_if_absent(&home.join("config.toml"), DEFAULT_CONFIG, &mut created)?;
@@ -92,6 +101,7 @@ pub fn run() -> Result<()> {
     write_if_absent(&soul_dir.join("USER.md"), DEFAULT_USER, &mut created)?;
     write_if_absent(&soul_dir.join("AGENTS.md"), DEFAULT_AGENTS, &mut created)?;
     write_if_absent(&soul_dir.join("MEMORY.md"), DEFAULT_MEMORY, &mut created)?;
+    write_if_absent(&skills_dir.join("example.md"), DEFAULT_SKILL, &mut created)?;
 
     println!("oc 初始化完成：{}", home.display());
     if created.is_empty() {

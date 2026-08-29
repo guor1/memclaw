@@ -50,6 +50,7 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         max_history_entries: 200,
         history_token_budget: 8000,
         soul: load_soul(),
+        skills: crate::skills_loader::load(),
         trigger_threshold: cfg.memory.trigger_threshold as f64,
         trigger_max_per_turn: cfg.memory.trigger_max_per_turn as usize,
     };
@@ -106,6 +107,16 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
     // process 工具：后台移交 channel，接口另一端在 serve_with 接到台账。
     let (handoff_tx, handoff_rx) = tokio::sync::mpsc::unbounded_channel();
     registry.register(Arc::new(oc_tools::process::ProcessTool::new(handoff_tx)));
+
+    // message：主动通知用户（不等回复）。
+    registry.register(Arc::new(oc_tools::message::MessageTool));
+
+    // web_fetch / web_search：联网（需 web-tools feature，默认开）。
+    #[cfg(feature = "web-tools")]
+    {
+        registry.register(Arc::new(oc_tools::web::WebFetchTool));
+        registry.register(Arc::new(oc_tools::web::WebSearchTool));
+    }
 
     Ok(ToolExecutor::new(Arc::new(registry)).with_handoff(handoff_rx))
 }

@@ -30,6 +30,8 @@ ratatui = "0.28"
 crossterm = "0.28"
 
 [features]
-default = ["provider-openai", "provider-anthropic"]
+default = ["provider-openai", "provider-anthropic", "web-tools"]
 provider-openai = ["oc-llm/openai"]
 provider-anthropic = ["oc-llm/anthropic"]
+# 联网工具（web_fetch/web_search）。
+web-tools = ["oc-tools/web"]

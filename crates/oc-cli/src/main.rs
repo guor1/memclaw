@@ -11,6 +11,7 @@ mod lock;
 mod onboard;
 mod paths;
 mod provider_setup;
+mod skills_loader;
 mod tui_runner;
 
 use clap::{Parser, Subcommand};

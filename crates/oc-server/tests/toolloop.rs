@@ -36,6 +36,7 @@ fn cfg_with_tools(tools: ToolExecutor) -> SessionConfig {
         max_history_entries: 200,
         history_token_budget: 8000,
         soul: String::new(),
+        skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
     }
@@ -135,6 +136,7 @@ async fn dangerous_command_triggers_approval_then_runs() {
         max_history_entries: 200,
         history_token_budget: 8000,
         soul: String::new(),
+        skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
     };

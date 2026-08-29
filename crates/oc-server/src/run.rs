@@ -47,6 +47,8 @@ pub struct RunCtx {
     pub history: Vec<Message>,
     /// SOUL.md 人格文本（每轮经 oc-core::prompt 确定性组装）。
     pub soul: String,
+    /// 技能文档（~/.oc/skills/*.md），确定性排序注入 prompt。
+    pub skills: Vec<oc_core::prompt::SkillBrief>,
     /// bootstrap 注入的 curated 记忆行（第 4/5 段填充；当前为空）。
     pub bootstrap: Vec<oc_core::prompt::MemLine>,
     /// 上下文压缩配置（设计 §4）。
@@ -429,7 +431,7 @@ fn render_prompt(ctx: &RunCtx) -> String {
     let rendered = render_system_prompt(&PromptInputs {
         soul,
         bootstrap: &ctx.bootstrap,
-        skills: &[],
+        skills: &ctx.skills,
         tools: &tools,
         now: &now,
     });

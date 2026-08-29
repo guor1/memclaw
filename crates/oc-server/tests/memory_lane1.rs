@@ -22,6 +22,7 @@ fn cfg() -> SessionConfig {
         max_history_entries: 200,
         history_token_budget: 8000,
         soul: "人格".into(),
+        skills: Vec::new(),
         trigger_threshold: 0.5,
         trigger_max_per_turn: 3,
     }

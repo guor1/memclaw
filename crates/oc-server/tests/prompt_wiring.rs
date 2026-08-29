@@ -23,6 +23,7 @@ fn cfg(soul: &str) -> SessionConfig {
         max_history_entries: 200,
         history_token_budget: 8000,
         soul: soul.to_string(),
+        skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
     }
@@ -77,6 +78,28 @@ async fn empty_soul_falls_back_to_default_persona() {
     let reqs = captures.lock().unwrap();
     let system = reqs[0].system.as_deref().unwrap_or("");
     assert!(system.contains("oc"), "缺 SOUL.md 应回退内置人格: {system}");
+}
+
+#[tokio::test]
+async fn skills_reach_model_request() {
+    let (tx, mut rx) = broadcast::channel(256);
+    let provider = Arc::new(CapturingMock::new("好"));
+    let captures = provider.captures();
+    let store = oc_store::Store::open_memory().unwrap();
+
+    let mut c = cfg("人格");
+    c.skills = vec![oc_core::prompt::SkillBrief {
+        name: "pdf".into(),
+        body: "生成 PDF 时用 XXXPDFSKILL 工具链。".into(),
+    }];
+
+    let handle = session::spawn(c, provider, tx, store);
+    handle.submit("你好".into()).await.expect("run");
+    wait_terminal(&mut rx, Duration::from_secs(5)).await;
+
+    let reqs = captures.lock().unwrap();
+    let system = reqs[0].system.as_deref().unwrap_or("");
+    assert!(system.contains("XXXPDFSKILL"), "技能正文应注入系统提示词: {system}");
 }
 
 #[tokio::test]

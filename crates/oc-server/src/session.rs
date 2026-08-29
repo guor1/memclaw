@@ -37,6 +37,8 @@ pub struct SessionConfig {
     pub history_token_budget: i64,
     /// SOUL.md 人格文本（每轮由 oc-core::prompt 确定性组装进系统提示词）。
     pub soul: String,
+    /// 加载的技能文档（~/.oc/skills/*.md），确定性排序后注入 prompt（设计 §4.4）。
+    pub skills: Vec<oc_core::prompt::SkillBrief>,
     /// trigger 注入相关性阈值（Lane1，设计 §4.3）。
     pub trigger_threshold: f64,
     /// trigger 每轮最多注入条数。
@@ -238,6 +240,7 @@ fn start_run(
         store: store.clone(),
         history,
         soul: cfg.soul.clone(),
+        skills: cfg.skills.clone(),
         // Lane1 记忆注入（curated，trigger 预筛命中的）。
         bootstrap,
         compact_cfg: oc_core::compaction::CompactCfg {
