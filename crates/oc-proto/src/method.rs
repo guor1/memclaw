@@ -17,8 +17,10 @@ pub enum Method {
     ChatAbort(ChatAbortParams),
     /// 拉历史。
     ChatHistory(HistoryParams),
-    /// `/new` `/reset`：推进上下文起点。
-    SessionReset,
+    /// `/new` `/reset`：推进上下文起点（可指定会话，缺省 main）。
+    SessionReset(SessionResetParams),
+    /// 列出所有会话（多会话切换/浏览用）。
+    SessionsList,
     /// 添加定时任务。side-effecting。
     CronAdd(CronAddParams),
     CronList,
@@ -34,8 +36,12 @@ pub enum Method {
 }
 
 /// 方法成功返回，与 [`Method`] 一一对应。
+///
+/// 用**邻接标签**（`tag` + `content`）而非内部标签：内部标签无法序列化
+/// "包着序列的 newtype 变体"（如 `Sessions(Vec<..>)` 会在运行时报错），
+/// 邻接标签把载荷放进独立的 `data` 字段，规避该限制。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "ok", rename_all = "snake_case")]
+#[serde(tag = "ok", content = "data", rename_all = "snake_case")]
 pub enum MethodOk {
     Hello { features: Features, snapshot: Snapshot },
     ChatSend { run_id: RunId },
@@ -45,6 +51,7 @@ pub enum MethodOk {
     CronList(Vec<CronSpec>),
     Tasks(Vec<TaskView>),
     MemorySearch(Vec<MemHit>),
+    Sessions(Vec<SessionView>),
     Status(Snapshot),
     Health(HealthOk),
 }
@@ -63,6 +70,13 @@ pub struct ChatSendParams {
     #[serde(default)]
     pub session: Option<SessionId>,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SessionResetParams {
+    /// 目标会话；缺省为 main。
+    #[serde(default)]
+    pub session: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -152,6 +166,16 @@ pub enum Role {
     Assistant,
     Tool,
     System,
+}
+
+/// 一个会话的对外视图（sessions.list 用）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SessionView {
+    pub id: SessionId,
+    pub kind: String,
+    pub created_at: i64,
+    /// 上下文起点（reset 推进），无则 0。
+    pub reset_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

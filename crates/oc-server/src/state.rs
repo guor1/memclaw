@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use oc_proto::{ApprovalId, Event, IdemKey, MethodOk};
 use tokio::sync::{broadcast, oneshot};
 
-use crate::session::SessionHandle;
+use crate::registry::SessionRegistry;
 
 /// 幂等缓存条目（M2 仅缓存 chat.send 的 run_id 结果）。
 #[derive(Clone)]
@@ -24,8 +24,8 @@ pub struct ServerState {
     event_tx: broadcast::Sender<Event>,
     /// side-effecting 方法的幂等缓存（TTL 由清理策略决定，M2 先不过期）。
     idem: DashMap<IdemKey, CachedRes>,
-    /// 主会话车道句柄。
-    session: SessionHandle,
+    /// 会话注册表（每会话一条车道，懒创建）。
+    registry: SessionRegistry,
     /// 待处理审批注册表（与审批处理器共享）。
     approvals: ApprovalRegistry,
     /// 后台任务台账。
@@ -37,7 +37,7 @@ pub struct ServerState {
 impl ServerState {
     pub fn new(
         event_tx: broadcast::Sender<Event>,
-        session: SessionHandle,
+        registry: SessionRegistry,
         approvals: ApprovalRegistry,
         ledger: crate::ledger::TaskLedger,
         store: oc_store::Store,
@@ -45,7 +45,7 @@ impl ServerState {
         Self {
             event_tx,
             idem: DashMap::new(),
-            session,
+            registry,
             approvals,
             ledger,
             store,
@@ -69,9 +69,9 @@ impl ServerState {
         }
     }
 
-    /// 主会话句柄。
-    pub fn session(&self) -> &SessionHandle {
-        &self.session
+    /// 会话注册表。
+    pub fn registry(&self) -> &SessionRegistry {
+        &self.registry
     }
 
     /// 订阅事件流。

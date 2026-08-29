@@ -9,7 +9,7 @@ use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, Key
 use futures_util::StreamExt;
 use oc_proto::{
     ChatSendParams, ConnectParams, Event, Frame, LifecyclePhase, Method, Req, ReqId, ResResult,
-    RunId, PROTO_VERSION,
+    RunId, SessionId, PROTO_VERSION,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -40,6 +40,8 @@ pub struct App {
     pending_approval: Option<oc_proto::ApprovalId>,
     /// 最近一次 chat.send 分配的 run_id（用于 /stop）。
     active_run: Option<RunId>,
+    /// 当前活跃会话（chat.send 归属；事件按此过滤显示）。
+    current_session: SessionId,
 }
 
 impl App {
@@ -66,6 +68,7 @@ impl App {
             should_quit: false,
             pending_approval: None,
             active_run: None,
+            current_session: SessionId::main(),
         };
         // 等 hello。
         if let Some(Frame::Res(res)) = app.client.recv().await? {
@@ -152,6 +155,19 @@ impl App {
                         self.abort_run(run_id, true).await?;
                         self.msgs.push(Msg { who: "系统", text: "已请求停止".into() });
                     }
+                } else if text == "/sessions" {
+                    self.list_sessions().await?;
+                } else if let Some(arg) = text.strip_prefix("/session ") {
+                    // 切换/新建会话：后续 chat.send 归属该会话，事件按此过滤。
+                    let id = arg.trim();
+                    if !id.is_empty() {
+                        self.current_session = SessionId::new(id.to_string());
+                        self.active_run = None;
+                        self.msgs.push(Msg {
+                            who: "系统",
+                            text: format!("已切换到会话「{id}」（新 id 将在首次发送时创建）"),
+                        });
+                    }
                 } else if !text.is_empty() && self.connected {
                     self.msgs.push(Msg { who: "你", text: text.clone() });
                     self.send_chat(text).await?;
@@ -197,8 +213,24 @@ impl App {
         self.next_req += 1;
         let req = Req {
             id: ReqId::new(id),
-            method: Method::ChatSend(ChatSendParams { session: None, text }),
+            method: Method::ChatSend(ChatSendParams {
+                session: Some(self.current_session.clone()),
+                text,
+            }),
             idempotency_key: Some(oc_proto::IdemKey::new(uuid_like(self.next_req))),
+        };
+        self.client.send(&Frame::Req(req)).await?;
+        Ok(())
+    }
+
+    /// 请求会话列表并显示。
+    async fn list_sessions(&mut self) -> Result<()> {
+        let id = format!("req-{}", self.next_req);
+        self.next_req += 1;
+        let req = Req {
+            id: ReqId::new(id),
+            method: Method::SessionsList,
+            idempotency_key: None,
         };
         self.client.send(&Frame::Req(req)).await?;
         Ok(())
@@ -219,17 +251,38 @@ impl App {
     fn on_frame(&mut self, frame: Frame) {
         match frame {
             Frame::Event(ev) => self.on_event(ev),
-            Frame::Res(res) => {
+            Frame::Res(res) => match res.result {
                 // 记录 chat.send 分配的 run_id，供 /stop 使用。
-                if let ResResult::Ok(oc_proto::MethodOk::ChatSend { run_id }) = res.result {
+                ResResult::Ok(oc_proto::MethodOk::ChatSend { run_id }) => {
                     self.active_run = Some(run_id);
                 }
-            }
+                ResResult::Ok(oc_proto::MethodOk::Sessions(list)) => {
+                    if list.is_empty() {
+                        self.push_sys("（无会话）");
+                    } else {
+                        for s in list {
+                            let cur = if s.id == self.current_session { " ←当前" } else { "" };
+                            self.msgs.push(Msg {
+                                who: "会话",
+                                text: format!("{} [{}]{}", s.id.as_str(), s.kind, cur),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            },
             Frame::Req(_) => {}
         }
     }
 
     fn on_event(&mut self, ev: Event) {
+        // 只显示归属当前会话的事件（Proactive 归属 main，见下单独放行）。
+        if let Some(sid) = event_session(&ev) {
+            let is_proactive = matches!(ev, Event::Proactive { .. });
+            if sid != &self.current_session && !is_proactive {
+                return;
+            }
+        }
         match ev {
             Event::Lifecycle { phase, .. } => match phase {
                 LifecyclePhase::Start => self.status = "助手思考中…".to_string(),
@@ -327,6 +380,18 @@ impl App {
             .style(Style::default().fg(Color::DarkGray));
         f.render_widget(status, chunks[2]);
     }
+}
+
+/// 取事件归属的会话 id（所有变体都带 session）。
+fn event_session(ev: &Event) -> Option<&SessionId> {
+    Some(match ev {
+        Event::Lifecycle { session, .. }
+        | Event::Assistant { session, .. }
+        | Event::Tool { session, .. }
+        | Event::Proactive { session, .. }
+        | Event::Task { session, .. }
+        | Event::Approval { session, .. } => session,
+    })
 }
 
 /// 简易唯一键（避免为 TUI 引入 uuid 依赖）。

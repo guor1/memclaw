@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use oc_proto::{
     ChatAbortParams, ChatSendParams, ConnectParams, Features, Method, MethodOk, ProtoError, Req,
-    ResResult, SessionId, Snapshot, PROTO_VERSION,
+    ResResult, SessionId, SessionResetParams, Snapshot, PROTO_VERSION,
 };
 
 use crate::state::{CachedRes, ServerState};
@@ -29,7 +29,8 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
             state.resolve_approval(&p.approval_id, p.allow);
             Ok(MethodOk::Empty)
         }
-        Method::SessionReset => Ok(MethodOk::Empty),
+        Method::SessionReset(p) => handle_session_reset(p, state).await,
+        Method::SessionsList => handle_sessions_list(state).await,
         Method::Status => Ok(MethodOk::Status(snapshot())),
         Method::Health => Ok(MethodOk::Health(oc_proto::HealthOk {
             ok: true,
@@ -37,7 +38,8 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
         })),
         Method::ChatHistory(p) => {
             let limit = p.limit.unwrap_or(200) as i64;
-            match state.store().writer().load_transcript("main".into(), limit).await {
+            let session = p.session.clone().unwrap_or_else(SessionId::main);
+            match state.store().writer().load_transcript(session.to_string(), limit).await {
                 Ok(entries) => {
                     let out = entries
                         .into_iter()
@@ -110,7 +112,10 @@ async fn handle_chat_send(
     p: &ChatSendParams,
     state: &Arc<ServerState>,
 ) -> Result<MethodOk, ProtoError> {
-    match state.session().submit(p.text.clone()).await {
+    // 缺省路由到 main；未知 id 由 registry 懒创建（隐式建会话）。
+    let session = p.session.clone().unwrap_or_else(SessionId::main);
+    let handle = state.registry().get_or_spawn(&session);
+    match handle.submit(p.text.clone()).await {
         Some(run_id) => Ok(MethodOk::ChatSend { run_id }),
         None => Err(ProtoError {
             kind: oc_proto::ErrorKind::Internal,
@@ -120,12 +125,51 @@ async fn handle_chat_send(
 }
 
 /// M3：中止活跃 run（hard 语义在 M4 完整）。
+///
+/// abort 不带 session 字段，故对所有活跃会话广播中止请求；各 actor 只中止
+/// 匹配 run_id 的活跃 run（run_id 全局唯一），互不影响。
 async fn handle_chat_abort(
     p: &ChatAbortParams,
     state: &Arc<ServerState>,
 ) -> Result<MethodOk, ProtoError> {
-    state.session().abort(p.run_id.clone(), p.hard).await;
+    state.registry().abort_all(p.run_id.clone(), p.hard).await;
     Ok(MethodOk::Empty)
+}
+
+/// 重置指定会话（缺省 main）：推进上下文起点，transcript 保留。
+async fn handle_session_reset(
+    p: &SessionResetParams,
+    state: &Arc<ServerState>,
+) -> Result<MethodOk, ProtoError> {
+    let session = p.session.clone().unwrap_or_else(SessionId::main);
+    state
+        .store()
+        .writer()
+        .reset_session(session.to_string())
+        .await
+        .map_err(|e| ProtoError {
+            kind: oc_proto::ErrorKind::Internal,
+            message: format!("重置会话失败: {e}"),
+        })?;
+    Ok(MethodOk::Empty)
+}
+
+/// 列出所有会话（sessions.list）。
+async fn handle_sessions_list(state: &Arc<ServerState>) -> Result<MethodOk, ProtoError> {
+    let rows = state.store().writer().session_list().await.map_err(|e| ProtoError {
+        kind: oc_proto::ErrorKind::Internal,
+        message: format!("列出会话失败: {e}"),
+    })?;
+    let out = rows
+        .into_iter()
+        .map(|s| oc_proto::SessionView {
+            id: SessionId::new(s.id),
+            kind: s.kind,
+            created_at: s.created_at,
+            reset_at: s.reset_at,
+        })
+        .collect();
+    Ok(MethodOk::Sessions(out))
 }
 
 /// 新增 cron：校验表达式（core::next_fire）→ 算首次触发 → 落库。

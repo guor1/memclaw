@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use oc_proto::{Event, TaskId, TaskState, TaskUpdate, TaskView};
+use oc_proto::{Event, SessionId, TaskId, TaskState, TaskUpdate, TaskView};
 use oc_tools::process::BackgroundHandoff;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -103,7 +103,9 @@ impl TaskLedger {
     }
 
     fn emit(&self, id: &TaskId, state: TaskState, detail: Option<String>) {
+        // 后台任务当前不跟踪来源会话，事件归属 main（与 proactive 一致）。
         let _ = self.events.send(Event::Task {
+            session: SessionId::main(),
             task_id: id.clone(),
             update: TaskUpdate { state, detail },
         });
@@ -121,6 +123,7 @@ fn set_state(
         e.state = state;
     }
     let _ = events.send(Event::Task {
+        session: SessionId::main(),
         task_id: id.clone(),
         update: TaskUpdate { state, detail },
     });

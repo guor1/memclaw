@@ -152,6 +152,23 @@ pub fn memory_search(query: String, limit: Option<u32>) -> Result<()> {
     })
 }
 
+pub fn sessions() -> Result<()> {
+    run_once(async move {
+        let mut c = connect().await?;
+        let ok = call(&mut c, Method::SessionsList).await?;
+        if let MethodOk::Sessions(list) = ok {
+            if list.is_empty() {
+                println!("（无会话）");
+            } else {
+                for s in list {
+                    println!("{}  [{}]  创建:{}", s.id.as_str(), s.kind, s.created_at);
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 pub fn status() -> Result<()> {
     run_once(async move {
         let mut c = connect().await?;

@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use oc_llm::ToolSpec as LlmToolSpec;
-use oc_proto::{Event, RunId, ToolCallId, ToolPhase, ToolStatus};
+use oc_proto::{Event, RunId, SessionId, ToolCallId, ToolPhase, ToolStatus};
 use oc_tools::types::{ApprovalGate, ApprovalReply, ToolCtx};
 use oc_tools::{ToolError, ToolRegistry};
 use tokio::sync::broadcast;
@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 #[async_trait::async_trait]
 pub trait ApprovalHandler: Send + Sync {
     /// 请求用户审批一个命令。返回是否批准。
-    async fn request(&self, run_id: &RunId, summary: &str, command: &str) -> bool;
+    async fn request(&self, session: &SessionId, run_id: &RunId, summary: &str, command: &str) -> bool;
 }
 
 /// 基于事件流的审批处理器：发 `Approval` 事件给 client，等 `approval.reply` 回执。
@@ -36,12 +36,13 @@ impl EventApprovalHandler {
 
 #[async_trait::async_trait]
 impl ApprovalHandler for EventApprovalHandler {
-    async fn request(&self, run_id: &RunId, summary: &str, command: &str) -> bool {
+    async fn request(&self, session: &SessionId, run_id: &RunId, summary: &str, command: &str) -> bool {
         let approval_id = oc_proto::ApprovalId::new(uuid::Uuid::now_v7().to_string());
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.registry.insert(approval_id.clone(), tx);
 
         let _ = self.events.send(Event::Approval {
+            session: session.clone(),
             approval_id: approval_id.clone(),
             run_id: run_id.clone(),
             summary: summary.to_string(),
@@ -118,6 +119,7 @@ impl ToolExecutor {
         &self,
         name: &str,
         args: &str,
+        session: &SessionId,
         run_id: &RunId,
         call_id: &ToolCallId,
         cancel: CancellationToken,
@@ -135,11 +137,13 @@ impl ToolExecutor {
         // 工具流式更新 → tool(update) 事件。
         let (emit_tx, mut emit_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let ev = events.clone();
+        let sid = session.clone();
         let rid = run_id.clone();
         let cid = call_id.clone();
         let pump = tokio::spawn(async move {
             while let Some(chunk) = emit_rx.recv().await {
                 let _ = ev.send(Event::Tool {
+                    session: sid.clone(),
                     run_id: rid.clone(),
                     call_id: cid.clone(),
                     phase: ToolPhase::Update { chunk },
@@ -153,11 +157,12 @@ impl ToolExecutor {
         let (approval_gate, approval_pump) = if let Some(handler) = &self.approval {
             let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel();
             let handler = Arc::clone(handler);
+            let sid = session.clone();
             let rid = run_id.clone();
             let pump = tokio::spawn(async move {
                 while let Some(r) = req_rx.recv().await {
                     let oc_tools::types::ApprovalRequest { summary, command, reply } = r;
-                    let allow = handler.request(&rid, &summary, &command).await;
+                    let allow = handler.request(&sid, &rid, &summary, &command).await;
                     let _ = reply.send(if allow {
                         ApprovalReply::Allow
                     } else {

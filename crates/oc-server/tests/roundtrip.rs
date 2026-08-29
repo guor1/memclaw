@@ -43,14 +43,16 @@ async fn connect(kind: &TransportKind) -> Box<dyn ClientStream> {
 trait ClientStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> ClientStream for T {}
 
-fn test_transport() -> TransportKind {
+/// 唯一传输端点。`tag` 用于区分同一进程内并发运行的多个测试，
+/// 避免命名管道/socket 名冲突（`first_pipe_instance` 下第二个 server 绑定会失败）。
+fn test_transport(tag: &str) -> TransportKind {
     #[cfg(windows)]
     {
-        TransportKind::Pipe(format!(r"\\.\pipe\oc-test-{}", std::process::id()))
+        TransportKind::Pipe(format!(r"\\.\pipe\oc-test-{}-{tag}", std::process::id()))
     }
     #[cfg(not(windows))]
     {
-        let dir = std::env::temp_dir().join(format!("oc-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("oc-test-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         TransportKind::Unix(dir.join("oc.sock"))
     }
@@ -58,7 +60,7 @@ fn test_transport() -> TransportKind {
 
 #[tokio::test]
 async fn connect_and_echo_roundtrip() {
-    let kind = test_transport();
+    let kind = test_transport("echo");
 
     // 起 server（mock provider 回显含"你好"的文本，供断言）。
     let server_kind = kind.clone();
@@ -146,6 +148,75 @@ async fn connect_and_echo_roundtrip() {
     assert!(got_run_id, "应收到 chat.send 的 run_id 应答");
     assert!(got_echo, "应收到 assistant echo 事件");
     assert!(got_end, "应收到 lifecycle end 事件");
+
+    server.abort();
+}
+
+/// sessions.list 经真实传输往返：验证返回 Vec 的 MethodOk 能被序列化
+/// （回归 MethodOk 内部标签无法序列化 newtype-包-Vec 的 bug）。
+#[tokio::test]
+async fn sessions_list_roundtrip() {
+    let kind = test_transport("sessions");
+
+    let server_kind = kind.clone();
+    let server = tokio::spawn(async move {
+        use std::sync::Arc;
+        use std::time::Duration;
+        let provider = Arc::new(oc_llm::mock::MockProvider::echo_text("hi"));
+        let cfg = oc_server::SessionConfig {
+            model: "mock".into(),
+            system_prompt: None,
+            idle_timeout: Duration::from_secs(5),
+            run_timeout: None,
+            queue_cap: 8,
+            tools: None,
+            warn_secs: 60,
+            abort_min_secs: 300,
+            max_history_entries: 200,
+            history_token_budget: 8000,
+            soul: String::new(),
+            skills: Vec::new(),
+            trigger_threshold: 0.72,
+            trigger_max_per_turn: 3,
+        };
+        let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let stream = connect(&kind).await;
+    let (r, mut w) = tokio::io::split(stream);
+    let mut reader = BufReader::new(r);
+
+    // connect（registry 预建 main 会话）。
+    send(&mut w, &Frame::Req(Req {
+        id: ReqId::new("c0"),
+        method: Method::Connect(ConnectParams { proto_version: PROTO_VERSION, token: None }),
+        idempotency_key: None,
+    })).await;
+    let _ = recv(&mut reader).await;
+
+    // sessions.list → 应成功返回含 main 的列表（此前会序列化失败并断连）。
+    send(&mut w, &Frame::Req(Req {
+        id: ReqId::new("s1"),
+        method: Method::SessionsList,
+        idempotency_key: None,
+    })).await;
+
+    let f = tokio::time::timeout(std::time::Duration::from_secs(2), recv(&mut reader))
+        .await
+        .expect("sessions.list 不应超时/断连");
+    match f {
+        Frame::Res(res) => {
+            assert_eq!(res.id.as_str(), "s1");
+            match res.result {
+                ResResult::Ok(oc_proto::MethodOk::Sessions(list)) => {
+                    assert!(list.iter().any(|s| s.id.as_str() == "main"), "应含 main 会话");
+                }
+                other => panic!("期望 Sessions 应答，得到 {other:?}"),
+            }
+        }
+        other => panic!("期望 Res，得到 {other:?}"),
+    }
 
     server.abort();
 }

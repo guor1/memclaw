@@ -29,6 +29,9 @@ pub enum WriteCmd {
         id: String,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    SessionList {
+        reply: oneshot::Sender<StoreResult<Vec<crate::types::SessionRow>>>,
+    },
     UpsertMemory {
         mem: NewMemory,
         reply: oneshot::Sender<StoreResult<()>>,
@@ -145,6 +148,12 @@ impl Writer {
         rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
     }
 
+    pub async fn session_list(&self) -> StoreResult<Vec<crate::types::SessionRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::SessionList { reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
     pub async fn upsert_memory(&self, mem: NewMemory) -> StoreResult<()> {
         let (reply, rx) = oneshot::channel();
         self.send(WriteCmd::UpsertMemory { mem, reply })?;
@@ -253,6 +262,9 @@ fn run_loop(conn: Connection, rx: &mut mpsc::UnboundedReceiver<WriteCmd>) {
             }
             WriteCmd::ResetSession { id, reply } => {
                 let _ = reply.send(ops::reset_session(&conn, &id));
+            }
+            WriteCmd::SessionList { reply } => {
+                let _ = reply.send(ops::session_list(&conn));
             }
             WriteCmd::UpsertMemory { mem, reply } => {
                 let _ = reply.send(ops::upsert_memory(&conn, &mem));

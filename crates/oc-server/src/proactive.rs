@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use oc_llm::{Delta, Message, ModelRequest, MsgRole, Provider};
-use oc_proto::{Event, ProactiveKind, ProactiveSource};
+use oc_proto::{Event, ProactiveKind, ProactiveSource, SessionId};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -67,7 +67,9 @@ pub async fn cron_scan(ctx: &ProactiveCtx, now_secs: i64) -> usize {
         } else {
             text
         };
+        // cron 是隔离子会话，事件归属 main 让 client 能在主视图显示。
         let _ = ctx.events.send(Event::Proactive {
+            session: SessionId::main(),
             kind: ProactiveKind::Reminder,
             text: out,
             source: ProactiveSource::Cron { cron_id: cron.id.clone() },

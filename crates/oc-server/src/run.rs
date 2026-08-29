@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use oc_core::agent::{step, Effect, RunOutcome, RunState, StepEvent};
 use oc_core::tool::{detect_loop, ToolFingerprint};
 use oc_llm::{Delta, FinishReason, Message, ModelRequest, MsgRole, Provider};
-use oc_proto::{Event, LifecyclePhase, RunErrorKind, RunId, ToolCallId, ToolPhase};
+use oc_proto::{Event, LifecyclePhase, RunErrorKind, RunId, SessionId, ToolCallId, ToolPhase};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -30,6 +30,8 @@ const MAX_TOOL_ROUNDS: usize = 24;
 
 /// run 驱动所需的上下文。
 pub struct RunCtx {
+    /// 本 run 所属会话（事件归属 + transcript 落库）。
+    pub session_id: SessionId,
     pub run_id: RunId,
     pub user_text: String,
     pub system_prompt: Option<String>,
@@ -349,6 +351,7 @@ async fn run_model_turn(
 async fn exec_tool(ctx: &RunCtx, call_id: &str, name: &str, args: &str) -> String {
     let cid = ToolCallId::new(call_id.to_string());
     let _ = ctx.events.send(Event::Tool {
+        session: ctx.session_id.clone(),
         run_id: ctx.run_id.clone(),
         call_id: cid.clone(),
         phase: ToolPhase::Start {
@@ -362,10 +365,11 @@ async fn exec_tool(ctx: &RunCtx, call_id: &str, name: &str, args: &str) -> Strin
     };
 
     let (status, content) = executor
-        .run(name, args, &ctx.run_id, &cid, ctx.cancel.clone(), &ctx.events)
+        .run(name, args, &ctx.session_id, &ctx.run_id, &cid, ctx.cancel.clone(), &ctx.events)
         .await;
 
     let _ = ctx.events.send(Event::Tool {
+        session: ctx.session_id.clone(),
         run_id: ctx.run_id.clone(),
         call_id: cid,
         phase: ToolPhase::End { status },
@@ -381,6 +385,7 @@ async fn execute_effects(ctx: &RunCtx, effects: &[Effect], acc: &mut String) -> 
         match eff {
             Effect::EmitLifecycleStart => {
                 let _ = ctx.events.send(Event::Lifecycle {
+                    session: ctx.session_id.clone(),
                     run_id: ctx.run_id.clone(),
                     phase: LifecyclePhase::Start,
                 });
@@ -388,12 +393,14 @@ async fn execute_effects(ctx: &RunCtx, effects: &[Effect], acc: &mut String) -> 
             Effect::EmitAssistant(text) => {
                 acc.push_str(text);
                 let _ = ctx.events.send(Event::Assistant {
+                    session: ctx.session_id.clone(),
                     run_id: ctx.run_id.clone(),
                     delta: text.clone(),
                 });
             }
             Effect::EmitLifecycleEnd => {
                 let _ = ctx.events.send(Event::Lifecycle {
+                    session: ctx.session_id.clone(),
                     run_id: ctx.run_id.clone(),
                     phase: LifecyclePhase::End,
                 });
@@ -485,7 +492,7 @@ async fn persist(ctx: &RunCtx, role: oc_store::Role, content: &str) {
         .store
         .writer()
         .append_entry(oc_store::NewEntry {
-            session_id: "main".into(),
+            session_id: ctx.session_id.to_string(),
             role,
             content: content.to_string(),
             tokens_est: est,
@@ -498,6 +505,7 @@ async fn persist(ctx: &RunCtx, role: oc_store::Role, content: &str) {
 
 fn emit_error(ctx: &RunCtx, kind: RunErrorKind, msg: &str) {
     let _ = ctx.events.send(Event::Lifecycle {
+        session: ctx.session_id.clone(),
         run_id: ctx.run_id.clone(),
         phase: LifecyclePhase::Error {
             message: msg.to_string(),

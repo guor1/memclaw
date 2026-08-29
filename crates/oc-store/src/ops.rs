@@ -52,6 +52,24 @@ pub fn append_entry(conn: &Connection, e: &NewEntry) -> StoreResult<i64> {
     Ok(conn.last_insert_rowid())
 }
 
+/// 列出所有会话，按创建时间倒序（最近的在前）。
+pub fn session_list(conn: &Connection) -> StoreResult<Vec<crate::types::SessionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, created_at, COALESCE(reset_at, 0)
+         FROM session
+         ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(crate::types::SessionRow {
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            created_at: r.get(2)?,
+            reset_at: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// 重置会话：推进 reset_at 到当前最大 seq（上下文起点前移，transcript 保留）。
 pub fn reset_session(conn: &Connection, id: &str) -> StoreResult<()> {
     let max_seq: i64 = conn

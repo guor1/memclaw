@@ -10,6 +10,7 @@ pub mod dreaming;
 pub mod error;
 pub mod ledger;
 pub mod proactive;
+pub mod registry;
 pub mod run;
 pub mod scheduler;
 pub mod session;
@@ -81,20 +82,21 @@ pub async fn serve_with(
         soul: session_cfg.soul.clone(),
     };
 
-    let session = session::spawn(session_cfg, provider, event_tx.clone(), store.clone());
+    let registry =
+        registry::SessionRegistry::new(session_cfg, provider, event_tx.clone(), store.clone());
     let dream_store = store.clone();
-    let state = Arc::new(ServerState::new(event_tx, session, approvals, ledger, store));
+    let state = Arc::new(ServerState::new(event_tx, registry, approvals, ledger, store));
 
     // 心跳 tick：每 tick 卡死诊断扫描 + cron 到期扫描；每 DREAM_EVERY_TICKS 一轮 dreaming。
     let shutdown = CancellationToken::new();
-    let scan_session = state.session().clone();
+    let scan_registry = state.registry().clone();
     scheduler::Heartbeat::new(heartbeat_interval).spawn(shutdown.clone(), move |tick| {
-        let session = scan_session.clone();
+        let registry = scan_registry.clone();
         let store = dream_store.clone();
         let pctx = proactive_ctx.clone();
         async move {
             tracing::debug!(tick, "heartbeat：扫描");
-            session.health_scan().await;
+            registry.health_scan_all().await;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)

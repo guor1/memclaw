@@ -69,7 +69,7 @@ async fn long_history_gets_compacted_before_model() {
     let (tx, mut rx) = broadcast::channel(512);
     let provider = Arc::new(CapturingMock::new("好"));
     let captures = provider.captures();
-    let handle = session::spawn(cfg(1000), provider, tx, store.clone());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg(1000), provider, tx, store.clone());
 
     handle.submit("最新一句".into()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
@@ -98,7 +98,7 @@ async fn short_history_not_compacted() {
     let provider = Arc::new(CapturingMock::new("好"));
     let captures = provider.captures();
     // 大预算，短对话，不应压缩。
-    let handle = session::spawn(cfg(100_000), provider, tx, store);
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg(100_000), provider, tx, store);
 
     handle.submit("就一句".into()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;

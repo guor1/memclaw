@@ -44,6 +44,8 @@ enum Command {
     },
     /// 查看 daemon 状态快照。
     Status,
+    /// 列出所有会话。
+    Sessions,
 }
 
 #[derive(Subcommand)]
@@ -93,6 +95,7 @@ fn main() -> anyhow::Result<()> {
             cli_client::memory_search(query, limit)
         }
         Some(Command::Status) => cli_client::status(),
+        Some(Command::Sessions) => cli_client::sessions(),
         // 无子命令 → 连 daemon 进 TUI。
         None => tui_runner::run(),
     }

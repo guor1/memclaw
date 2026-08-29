@@ -3,34 +3,52 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ApprovalId, RunId, TaskId, ToolCallId};
+use crate::ids::{ApprovalId, RunId, SessionId, TaskId, ToolCallId};
 use crate::method::TaskState;
 
 /// 服务端主动推送的事件。`tag = "event"`。
+///
+/// 每个变体都带 `session`，让多会话并发下 client 能把事件归属到正确的会话
+/// （设计：多会话支持）。cron/heartbeat 等隔离子会话产生的事件归属 `main`。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     /// run 生命周期。
-    Lifecycle { run_id: RunId, phase: LifecyclePhase },
+    Lifecycle {
+        session: SessionId,
+        run_id: RunId,
+        phase: LifecyclePhase,
+    },
     /// 流式回复增量。
-    Assistant { run_id: RunId, delta: String },
+    Assistant {
+        session: SessionId,
+        run_id: RunId,
+        delta: String,
+    },
     /// 工具活动。
     Tool {
+        session: SessionId,
         run_id: RunId,
         call_id: ToolCallId,
         phase: ToolPhase,
     },
-    /// ★主动提醒推送（cron/intent 触发）。
+    /// ★主动提醒推送（cron/intent 触发）。归属 `main` 会话。
     Proactive {
+        session: SessionId,
         kind: ProactiveKind,
         text: String,
         source: ProactiveSource,
     },
     /// 后台任务进展/完成。
-    Task { task_id: TaskId, update: TaskUpdate },
+    Task {
+        session: SessionId,
+        task_id: TaskId,
+        update: TaskUpdate,
+    },
     /// ★审批请求：server 请求用户批准一个动作（如危险命令）。
     /// client 收到后应向用户展示，并用 `approval.reply` 方法回执。
     Approval {
+        session: SessionId,
         approval_id: ApprovalId,
         run_id: RunId,
         summary: String,

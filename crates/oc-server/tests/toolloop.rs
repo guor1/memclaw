@@ -93,7 +93,7 @@ async fn model_calls_tool_then_completes() {
         text_step("命令已执行完成"),
     ];
     let provider = Arc::new(SequencedMock::new(scripts));
-    let handle = session::spawn(cfg_with_tools(tool_executor()), provider, tx, oc_store::Store::open_memory().unwrap());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg_with_tools(tool_executor()), provider, tx, oc_store::Store::open_memory().unwrap());
 
     let _run = handle.submit("帮我执行 echo".into()).await.expect("run");
     let evs = collect_until_terminal(&mut rx, Duration::from_secs(5)).await;
@@ -147,7 +147,7 @@ async fn dangerous_command_triggers_approval_then_runs() {
         text_step("完成"),
     ];
     let provider = StdArc::new(SequencedMock::new(scripts));
-    let handle = session::spawn(cfg, provider, tx, oc_store::Store::open_memory().unwrap());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg, provider, tx, oc_store::Store::open_memory().unwrap());
 
     let _run = handle.submit("执行危险命令".into()).await.expect("run");
 
@@ -182,7 +182,7 @@ async fn loop_detection_breaks_repeated_tool_calls() {
     let same = tool_call_step("call-x", "exec", "{\"command\": \"echo loop\"}");
     let scripts = vec![same.clone(), same.clone(), same.clone(), same.clone(), same.clone()];
     let provider = Arc::new(SequencedMock::new(scripts));
-    let handle = session::spawn(cfg_with_tools(tool_executor()), provider, tx, oc_store::Store::open_memory().unwrap());
+    let handle = session::spawn(oc_proto::SessionId::main(), cfg_with_tools(tool_executor()), provider, tx, oc_store::Store::open_memory().unwrap());
 
     let _run = handle.submit("触发打转".into()).await.expect("run");
     let evs = collect_until_terminal(&mut rx, Duration::from_secs(5)).await;

@@ -44,7 +44,7 @@ async fn due_cron_fires_and_reschedules() {
     // 收到 Proactive 提醒事件。
     let mut got_reminder = false;
     while let Ok(ev) = rx.try_recv() {
-        if let Event::Proactive { kind, source, text } = ev {
+        if let Event::Proactive { kind, source, text, .. } = ev {
             assert_eq!(kind, ProactiveKind::Reminder);
             assert!(matches!(source, ProactiveSource::Cron { .. }));
             assert!(text.contains("周报"), "提醒文本应含模型输出: {text}");

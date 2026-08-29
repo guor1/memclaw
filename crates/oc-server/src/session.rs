@@ -10,7 +10,7 @@ use std::time::Duration;
 use oc_core::agent::RunOutcome;
 use oc_core::queue::{diagnose, QueuedTurn, RunHealth, RunQueue, SubmitResult};
 use oc_llm::Provider;
-use oc_proto::{Event, RunId};
+use oc_proto::{Event, RunId, SessionId};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -18,6 +18,9 @@ use tracing::warn;
 use crate::run::{self, RunCtx};
 
 /// 会话配置（从 Config 派生）。
+///
+/// 不含 `session_id`：同一份 cfg 被 registry 复用来 spawn 多个会话 actor，
+/// 会话 id 在 `spawn` 时单独传入。
 #[derive(Clone)]
 pub struct SessionConfig {
     pub model: String,
@@ -84,7 +87,10 @@ impl SessionHandle {
 }
 
 /// 启动 session actor，返回句柄。
+///
+/// `session_id`：本 actor 服务的会话 id（transcript 落库/加载、事件归属都用它）。
 pub fn spawn(
+    session_id: SessionId,
     cfg: SessionConfig,
     provider: Arc<dyn Provider>,
     events: broadcast::Sender<Event>,
@@ -92,7 +98,7 @@ pub fn spawn(
 ) -> SessionHandle {
     let (tx, rx) = mpsc::channel(64);
     let handle = SessionHandle { tx: tx.clone() };
-    tokio::spawn(actor_loop(cfg, provider, events, tx, rx, store));
+    tokio::spawn(actor_loop(session_id, cfg, provider, events, tx, rx, store));
     handle
 }
 
@@ -104,6 +110,7 @@ struct ActiveRun {
 }
 
 async fn actor_loop(
+    session_id: SessionId,
     cfg: SessionConfig,
     provider: Arc<dyn Provider>,
     events: broadcast::Sender<Event>,
@@ -113,14 +120,16 @@ async fn actor_loop(
 ) {
     let mut queue = RunQueue::new(cfg.queue_cap);
     let mut active: Option<ActiveRun> = None;
+    let sid = session_id.to_string();
 
-    // 确保主会话存在。
+    // 确保本会话存在。kind 统一记为 "main"（用户会话）；cron/dreaming 等隔离
+    // 子会话不经本 actor，细分留待后续。
     if let Err(e) = store
         .writer()
-        .ensure_session("main".into(), "main".into())
+        .ensure_session(sid.clone(), "main".into())
         .await
     {
-        warn!(error = %e, "创建主会话失败");
+        warn!(error = %e, session = %sid, "创建会话失败");
     }
 
     while let Some(cmd) = rx.recv().await {
@@ -134,7 +143,7 @@ async fn actor_loop(
                 if let Err(e) = store
                     .writer()
                     .append_entry(oc_store::NewEntry {
-                        session_id: "main".into(),
+                        session_id: sid.clone(),
                         role: oc_store::Role::User,
                         content: text.clone(),
                         tokens_est: est,
@@ -153,9 +162,9 @@ async fn actor_loop(
                 };
                 match queue.submit(turn) {
                     SubmitResult::Started(t) => {
-                        let history = load_history(&store, &cfg).await;
+                        let history = load_history(&store, &cfg, &sid).await;
                         let boot = lane1_bootstrap(&store, &cfg, &t.text).await;
-                        active = Some(start_run(&cfg, &provider, &events, &self_tx, &store, t, history, boot));
+                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, t, history, boot));
                     }
                     SubmitResult::Queued => { /* 等活跃结束再起 */ }
                     SubmitResult::Rejected => {
@@ -184,9 +193,9 @@ async fn actor_loop(
                     active = None;
                     // 取下一个排队轮。
                     if let Some(next) = queue.complete_active() {
-                        let history = load_history(&store, &cfg).await;
+                        let history = load_history(&store, &cfg, &sid).await;
                         let boot = lane1_bootstrap(&store, &cfg, &next.text).await;
-                        active = Some(start_run(&cfg, &provider, &events, &self_tx, &store, next, history, boot));
+                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, next, history, boot));
                     }
                 }
             }
@@ -215,6 +224,7 @@ async fn actor_loop(
 
 /// 启动一个 run 任务（含 panic 隔离），返回可中止句柄。
 fn start_run(
+    session_id: &SessionId,
     cfg: &SessionConfig,
     provider: &Arc<dyn Provider>,
     events: &broadcast::Sender<Event>,
@@ -227,6 +237,7 @@ fn start_run(
     let cancel = CancellationToken::new();
     let run_id = RunId::new(turn.run_id.clone());
     let ctx = RunCtx {
+        session_id: session_id.clone(),
         run_id: run_id.clone(),
         user_text: turn.text,
         system_prompt: cfg.system_prompt.clone(),
@@ -286,10 +297,10 @@ fn estimate_tokens(s: &str) -> i64 {
 /// 从库加载主会话历史（reset 之后），转成 oc-llm 消息，用于喂给模型。
 ///
 /// 带 token 预算：从最近往前累计，超预算则截断（保留最近的）。
-async fn load_history(store: &oc_store::Store, cfg: &SessionConfig) -> Vec<oc_llm::Message> {
+async fn load_history(store: &oc_store::Store, cfg: &SessionConfig, session_id: &str) -> Vec<oc_llm::Message> {
     let entries = match store
         .writer()
-        .load_transcript("main".into(), cfg.max_history_entries)
+        .load_transcript(session_id.into(), cfg.max_history_entries)
         .await
     {
         Ok(e) => e,

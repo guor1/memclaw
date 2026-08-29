@@ -60,6 +60,16 @@ pub struct NewEntry {
     pub tokens_est: i64,
 }
 
+/// 已存储的一条会话记录（session.list 用）。
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub id: String,
+    pub kind: String,
+    pub created_at: i64,
+    /// 上下文起点（reset 推进），无则 0。
+    pub reset_at: i64,
+}
+
 /// 已存储的一条 transcript 记录。
 #[derive(Debug, Clone)]
 pub struct Entry {
