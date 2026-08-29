@@ -6,6 +6,7 @@
 pub mod codec;
 pub mod conn;
 pub mod dispatch;
+pub mod dreaming;
 pub mod error;
 pub mod ledger;
 pub mod run;
@@ -29,6 +30,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 const EVENT_CHANNEL_CAP: usize = 256;
+
+/// 每多少个心跳 tick 触发一轮 dreaming 巩固（稀疏，避免频繁重写）。
+const DREAM_EVERY_TICKS: u64 = 60;
 
 /// 启动服务端。
 ///
@@ -68,16 +72,26 @@ pub async fn serve_with(
     }
 
     let session = session::spawn(session_cfg, provider, event_tx.clone(), store.clone());
+    let dream_store = store.clone();
     let state = Arc::new(ServerState::new(event_tx, session, approvals, ledger, store));
 
-    // 心跳 tick：M4 挂卡死诊断扫描（M5 再挂 dreaming）。
+    // 心跳 tick：每 tick 做卡死诊断扫描；每 DREAM_EVERY_TICKS 触发一轮 dreaming 巩固。
     let shutdown = CancellationToken::new();
     let scan_session = state.session().clone();
     scheduler::Heartbeat::new(heartbeat_interval).spawn(shutdown.clone(), move |tick| {
         let session = scan_session.clone();
+        let store = dream_store.clone();
         async move {
             tracing::debug!(tick, "heartbeat：卡死诊断扫描");
             session.health_scan().await;
+            // dreaming 巩固：稀疏触发（设计 §7.4 夜间/空闲；M5 先按 tick 周期）。
+            if tick % DREAM_EVERY_TICKS == 0 {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                dreaming::scan(&store, now, &oc_core::dreaming::DreamCfg::default()).await;
+            }
         }
     });
 

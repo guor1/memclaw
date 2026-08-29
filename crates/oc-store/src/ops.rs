@@ -137,6 +137,87 @@ pub fn touch_memory(conn: &Connection, id: &str, at: i64) -> StoreResult<()> {
     Ok(())
 }
 
+/// 取 dreaming 待巩固候选：episodic tier 的记忆（双门判定在 oc-core）。
+///
+/// 返回字段含 use_count / created_at / last_used_at，供 core 算频次/时间窗门。
+/// 按 use_count 降序取前 `limit` 条（先看反复用到的）。
+pub fn dream_candidates(conn: &Connection, limit: i64) -> StoreResult<Vec<MemoryRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, tier, origin, text, importance, created_at, last_used_at, use_count, content_hash
+         FROM memory WHERE tier = 'episodic'
+         ORDER BY use_count DESC, created_at ASC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit], |r| {
+        Ok(MemoryRow {
+            id: r.get(0)?,
+            tier: Tier::from_str(&r.get::<_, String>(1)?),
+            origin: Origin::from_str(&r.get::<_, String>(2)?),
+            text: r.get(3)?,
+            importance: r.get(4)?,
+            created_at: r.get(5)?,
+            last_used_at: r.get(6)?,
+            use_count: r.get(7)?,
+            content_hash: r.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// 巩固一条记忆：episodic → curated（dreaming 双门通过后调用）。
+///
+/// 就地提升 tier 并抬升 importance（下限 0.6），使其进入 curated 自动注入池。
+pub fn promote_memory(conn: &Connection, id: &str) -> StoreResult<()> {
+    conn.execute(
+        "UPDATE memory SET tier = 'curated', importance = MAX(importance, 0.6)
+         WHERE id = ?1 AND tier = 'episodic'",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// 追加一条审计记录，维护哈希链（设计 §3.3 audit：hash_prev/hash_self）。
+///
+/// `hash_prev` = 上一条的 `hash_self`（无则空串）；
+/// `hash_self` = 链哈希(at, actor, action, payload, hash_prev)。
+/// 用非加密的 FNV-1a（tamper-evident 足够；单用户本地库不需抗碰撞）。
+pub fn write_audit(
+    conn: &Connection,
+    actor: &str,
+    action: &str,
+    payload: Option<&str>,
+) -> StoreResult<()> {
+    let at = now_millis();
+    let hash_prev: String = conn
+        .query_row(
+            "SELECT hash_self FROM audit ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+
+    let material = format!("{at}|{actor}|{action}|{}|{hash_prev}", payload.unwrap_or(""));
+    let hash_self = fnv1a_hex(&material);
+
+    conn.execute(
+        "INSERT INTO audit(at, actor, action, payload, hash_prev, hash_self)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        params![at, actor, action, payload, hash_prev, hash_self],
+    )?;
+    Ok(())
+}
+
+/// FNV-1a 64 位哈希，输出 16 位十六进制。非加密，仅用于审计链自洽校验。
+fn fnv1a_hex(s: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 /// 词法候选检索：用关键词 LIKE 粗筛，取候选集（精确排名在 oc-core）。
 ///
 /// M5：先用 LIKE；FTS5 索引在第 4 段接入以提升相关性。

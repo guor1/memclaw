@@ -50,6 +50,20 @@ pub enum WriteCmd {
         limit: i64,
         reply: oneshot::Sender<StoreResult<Vec<crate::types::MemoryRow>>>,
     },
+    DreamCandidates {
+        limit: i64,
+        reply: oneshot::Sender<StoreResult<Vec<crate::types::MemoryRow>>>,
+    },
+    PromoteMemory {
+        id: String,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    WriteAudit {
+        actor: String,
+        action: String,
+        payload: Option<String>,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     /// 用于优雅关停。
     Shutdown,
 }
@@ -146,6 +160,29 @@ impl Writer {
         self.send(WriteCmd::SearchCandidates { query_terms, tier_filter, limit, reply })?;
         rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
     }
+
+    pub async fn dream_candidates(&self, limit: i64) -> StoreResult<Vec<crate::types::MemoryRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::DreamCandidates { limit, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
+    pub async fn promote_memory(&self, id: String) -> StoreResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::PromoteMemory { id, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
+    pub async fn write_audit(
+        &self,
+        actor: String,
+        action: String,
+        payload: Option<String>,
+    ) -> StoreResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::WriteAudit { actor, action, payload, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
 }
 
 fn open_writer_conn(db: Option<PathBuf>) -> StoreResult<Connection> {
@@ -182,6 +219,15 @@ fn run_loop(conn: Connection, rx: &mut mpsc::UnboundedReceiver<WriteCmd>) {
             }
             WriteCmd::SearchCandidates { query_terms, tier_filter, limit, reply } => {
                 let _ = reply.send(ops::search_candidates(&conn, &query_terms, tier_filter, limit));
+            }
+            WriteCmd::DreamCandidates { limit, reply } => {
+                let _ = reply.send(ops::dream_candidates(&conn, limit));
+            }
+            WriteCmd::PromoteMemory { id, reply } => {
+                let _ = reply.send(ops::promote_memory(&conn, &id));
+            }
+            WriteCmd::WriteAudit { actor, action, payload, reply } => {
+                let _ = reply.send(ops::write_audit(&conn, &actor, &action, payload.as_deref()));
             }
             WriteCmd::Shutdown => break,
         }

@@ -142,6 +142,9 @@ async fn actor_loop(
                     warn!(error = %e, "落库用户消息失败");
                 }
 
+                // 显式"记住…"写入路径（设计 §4.1）：用户显式指令 → curated + Owner + 审计。
+                persist_explicit_memory(&store, &text).await;
+
                 let turn = QueuedTurn {
                     run_id: run_id.to_string(),
                     text,
@@ -342,6 +345,59 @@ fn tokenize(msg: &str) -> Vec<String> {
     terms.sort();
     terms.dedup();
     terms
+}
+
+/// 显式记忆写入（设计 §4.1）：识别"记住…"指令 → 写 curated 记忆 + 审计。
+///
+/// origin 走 core::classify_origin(UserExplicit) = Owner（唯一产生 Owner 的路径）。
+/// id/hash 用内容派生，天然去重（同内容多次"记住"upsert 同一行）。
+/// **失败仅告警，不阻塞回复**。
+async fn persist_explicit_memory(store: &oc_store::Store, user_msg: &str) {
+    use oc_core::memory::{classify_origin, detect_explicit_memory, WriteSource};
+
+    let Some(explicit) = detect_explicit_memory(user_msg) else {
+        return;
+    };
+    let origin = classify_origin(WriteSource::UserExplicit); // = Owner
+    let hash = content_hash(&explicit.content);
+    let id = format!("mem-{hash}");
+
+    let mem = oc_store::NewMemory {
+        id: id.clone(),
+        tier: oc_store::Tier::Curated,
+        origin: match origin {
+            oc_core::memory::Origin::Owner => oc_store::Origin::Owner,
+            oc_core::memory::Origin::Agent => oc_store::Origin::Agent,
+            oc_core::memory::Origin::Untrusted => oc_store::Origin::Untrusted,
+            oc_core::memory::Origin::System => oc_store::Origin::System,
+        },
+        text: explicit.content.clone(),
+        keywords: None,
+        importance: 0.8, // 用户显式指定 → 高重要度。
+        content_hash: hash,
+    };
+
+    if let Err(e) = store.writer().upsert_memory(mem).await {
+        warn!(error = %e, "显式记忆写入失败");
+        return;
+    }
+    if let Err(e) = store
+        .writer()
+        .write_audit("owner".into(), "remember".into(), Some(id))
+        .await
+    {
+        warn!(error = %e, "记忆写入审计失败");
+    }
+}
+
+/// 内容派生哈希（FNV-1a，16 位十六进制），用于记忆去重 id 与 content_hash。
+fn content_hash(s: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// Lane1 记忆检索（设计 §4.3）：取候选 → core trigger 预筛 → 命中的 curated

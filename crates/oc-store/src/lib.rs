@@ -162,4 +162,48 @@ mod tests {
         let none = w.search_candidates(vec!["登山".into()], None, 10).await.unwrap();
         assert!(none.is_empty());
     }
+
+    #[tokio::test]
+    async fn dream_promote_and_audit_chain() {
+        use crate::types::{NewMemory, Origin, Tier};
+        let store = Store::open_memory().expect("open");
+        let w = store.writer();
+
+        // 一条 episodic 沉淀候选。
+        w.upsert_memory(NewMemory {
+            id: "e1".into(),
+            tier: Tier::Episodic,
+            origin: Origin::Agent,
+            text: "用户常在周五复盘".into(),
+            keywords: None,
+            importance: 0.7,
+            content_hash: "h1".into(),
+        })
+        .await
+        .unwrap();
+
+        // dream_candidates 应取到 episodic。
+        let cands = w.dream_candidates(10).await.unwrap();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].tier, Tier::Episodic);
+
+        // 巩固 → curated；此后 curated 检索能命中。
+        w.promote_memory("e1".into()).await.unwrap();
+        let curated = w
+            .search_candidates(vec!["周五".into()], Some(Tier::Curated), 10)
+            .await
+            .unwrap();
+        assert_eq!(curated.len(), 1, "巩固后应进入 curated");
+        // episodic 池已空。
+        assert!(w.dream_candidates(10).await.unwrap().is_empty());
+
+        // 审计链：连写两条，第二条的 hash_prev = 第一条 hash_self。
+        w.write_audit("dreaming".into(), "promote".into(), Some("e1".into()))
+            .await
+            .unwrap();
+        w.write_audit("owner".into(), "remember".into(), None)
+            .await
+            .unwrap();
+        // 无直接读 API，此处只验证不报错即通过（链完整性属实现内不变量）。
+    }
 }

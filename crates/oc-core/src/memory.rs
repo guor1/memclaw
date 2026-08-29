@@ -230,6 +230,47 @@ pub fn intent_prefilter(msg: &str, intents: &[StandingIntent]) -> Vec<String> {
         .collect()
 }
 
+/// 显式记忆意图识别（设计 §4.1 写入路径）：用户说"记住…/别忘了…"等 → curated。
+///
+/// 纯词法：命中前缀触发词则剥离触发词、返回要记的正文。**保守**：只认明确的
+/// 显式指令，不猜；未命中返回 None（走沉淀路径，不是 curated）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitMemory {
+    /// 要记住的正文（已剥离触发词）。
+    pub content: String,
+}
+
+/// 显式"记住"触发前缀（中英）。命中且正文非空 → 用户显式 curated 写入。
+const REMEMBER_TRIGGERS: &[&str] = &[
+    "记住", "记一下", "记下", "别忘了", "帮我记", "请记住",
+    "remember that ", "remember ", "note that ", "please remember ",
+];
+
+/// 识别显式记忆意图（设计 §4.1）。命中返回剥离触发词后的正文。
+///
+/// 触发词只在**消息开头**（去除前导空白后）匹配，避免把"我记住了你说的"这类
+/// 陈述误判为写入指令。正文剥离后去除前导标点/空白；为空则视为未命中。
+pub fn detect_explicit_memory(msg: &str) -> Option<ExplicitMemory> {
+    let trimmed = msg.trim_start();
+    let lower = trimmed.to_lowercase();
+    for trig in REMEMBER_TRIGGERS {
+        if lower.starts_with(trig) {
+            // 用字符数切分，兼容中英（trig 是 ASCII 或纯中文，字节前缀等价）。
+            let rest = &trimmed[trig.len()..];
+            let content = rest
+                .trim_start_matches(|c: char| {
+                    c.is_whitespace() || c == '：' || c == ':' || c == ',' || c == '，'
+                })
+                .trim()
+                .to_string();
+            if !content.is_empty() {
+                return Some(ExplicitMemory { content });
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +367,29 @@ mod tests {
         let hits = intent_prefilter("帮我准备生日礼物", &intents);
         assert_eq!(hits, vec!["i2".to_string()]);
         assert!(intent_prefilter("今天写代码", &intents).is_empty());
+    }
+
+    #[test]
+    fn explicit_memory_detection() {
+        // 中文触发 + 剥离触发词/标点。
+        assert_eq!(
+            detect_explicit_memory("记住：我喜欢简洁的回复"),
+            Some(ExplicitMemory { content: "我喜欢简洁的回复".into() })
+        );
+        assert_eq!(
+            detect_explicit_memory("别忘了 我对花生过敏"),
+            Some(ExplicitMemory { content: "我对花生过敏".into() })
+        );
+        // 英文触发。
+        assert_eq!(
+            detect_explicit_memory("remember that I use vim"),
+            Some(ExplicitMemory { content: "I use vim".into() })
+        );
+        // 只在开头触发：陈述句不误判。
+        assert_eq!(detect_explicit_memory("我记住了你说的话"), None);
+        // 触发词后为空 → 未命中。
+        assert_eq!(detect_explicit_memory("记住"), None);
+        // 普通消息。
+        assert_eq!(detect_explicit_memory("帮我搜索今日头条"), None);
     }
 }
