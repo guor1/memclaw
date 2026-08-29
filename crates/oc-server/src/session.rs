@@ -308,15 +308,24 @@ async fn load_history(store: &oc_store::Store, cfg: &SessionConfig) -> Vec<oc_ll
             break;
         }
         budget -= cost;
-        let role = match e.role {
-            oc_store::Role::Assistant => oc_llm::MsgRole::Assistant,
-            oc_store::Role::Tool => oc_llm::MsgRole::Tool,
-            oc_store::Role::System => oc_llm::MsgRole::System,
-            oc_store::Role::User => oc_llm::MsgRole::User,
+        // 历史重放降级：entry 表只存了扁平 role+content，没有工具调用的关联
+        // id。原生 `tool` 消息要求前面有带匹配 tool_calls 的 assistant，且自身
+        // 需 tool_call_id——这些库里都没有。因此把历史里的工具结果降级为普通
+        // 文本消息，保证重放序列对 provider 合法。实时那一轮的原生工具调用不走
+        // 这里（见 run.rs），不受影响。
+        let (role, content) = match e.role {
+            oc_store::Role::Assistant => (oc_llm::MsgRole::Assistant, e.content.clone()),
+            oc_store::Role::System => (oc_llm::MsgRole::System, e.content.clone()),
+            oc_store::Role::User => (oc_llm::MsgRole::User, e.content.clone()),
+            // 工具结果降级为 user 文本，避免产出缺 tool_call_id 的裸 tool 消息。
+            oc_store::Role::Tool => (
+                oc_llm::MsgRole::User,
+                format!("【历史工具结果】\n{}", e.content),
+            ),
         };
         kept.push(oc_llm::Message {
             role,
-            content: e.content.clone(),
+            content,
             tool_call_id: None,
             tool_calls: vec![],
         });

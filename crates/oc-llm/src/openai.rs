@@ -124,7 +124,12 @@ impl Provider for OpenAiProvider {
 
         let status = resp.status();
         if !status.is_success() {
-            return Err(classify_status(status.as_u16(), None));
+            let code = status.as_u16();
+            // 读出错误 body 带进诊断——否则 400 只剩 "HTTP 400"，无从排查。
+            let body = resp.text().await.unwrap_or_default();
+            let detail = body.trim();
+            tracing::warn!(status = code, body = %detail, "provider 返回非 2xx");
+            return Err(classify_status(code, None, detail));
         }
 
         let mut byte_stream = resp.bytes_stream();
@@ -203,12 +208,19 @@ fn parse_chunk(payload: &str) -> Option<Delta> {
     None
 }
 
-fn classify_status(status: u16, retry_after: Option<u64>) -> ProviderErr {
+fn classify_status(status: u16, retry_after: Option<u64>, detail: &str) -> ProviderErr {
+    // 截断过长 body，避免污染日志/错误链。
+    let d: String = detail.chars().take(500).collect();
+    let msg = if d.is_empty() {
+        format!("HTTP {status}")
+    } else {
+        format!("HTTP {status}: {d}")
+    };
     match status {
-        401 | 403 => ProviderErr::Auth(format!("HTTP {status}")),
+        401 | 403 => ProviderErr::Auth(msg),
         429 => ProviderErr::RateLimited { retry_after_secs: retry_after },
-        400..=499 => ProviderErr::Invalid(format!("HTTP {status}")),
-        _ => ProviderErr::Transient(format!("HTTP {status}")),
+        400..=499 => ProviderErr::Invalid(msg),
+        _ => ProviderErr::Transient(msg),
     }
 }
 
