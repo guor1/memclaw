@@ -49,6 +49,8 @@ pub struct RunCtx {
     pub soul: String,
     /// bootstrap 注入的 curated 记忆行（第 4/5 段填充；当前为空）。
     pub bootstrap: Vec<oc_core::prompt::MemLine>,
+    /// 上下文压缩配置（设计 §4）。
+    pub compact_cfg: oc_core::compaction::CompactCfg,
 }
 
 /// 驱动一个 run 到终态。
@@ -164,6 +166,54 @@ enum TurnResult {
 }
 
 /// 跑一次模型流，消费 Delta 直到该轮结束。
+/// 按 oc-core 的压缩计划裁剪消息列表（设计 §4 compaction）。
+///
+/// 优先剪枝旧工具结果，其次丢弃最早消息；最近若干条始终保留。
+fn apply_compaction(messages: &[Message], cfg: &oc_core::compaction::CompactCfg) -> Vec<Message> {
+    use oc_core::compaction::{plan_compaction, MsgMeta};
+
+    let metas: Vec<MsgMeta> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| MsgMeta {
+            index: i,
+            tokens: (m.content.chars().count() as i64 / 4).max(1),
+            is_tool_result: matches!(m.role, MsgRole::Tool),
+        })
+        .collect();
+
+    let plan = plan_compaction(&metas, cfg);
+    if plan.is_noop() {
+        return messages.to_vec();
+    }
+
+    let prune_chars = (plan.prune_to_tokens * 4).max(0) as usize;
+    let mut out = Vec::with_capacity(messages.len());
+    for (i, m) in messages.iter().enumerate() {
+        if plan.drop.contains(&i) {
+            continue;
+        }
+        if plan.prune_tool_results.contains(&i) && m.content.chars().count() > prune_chars {
+            let kept: String = m.content.chars().take(prune_chars).collect();
+            out.push(Message {
+                role: m.role,
+                content: format!("{kept}\n…[旧工具输出已剪枝]"),
+                tool_call_id: m.tool_call_id.clone(),
+            });
+        } else {
+            out.push(m.clone());
+        }
+    }
+    if !plan.drop.is_empty() {
+        tracing::debug!(
+            dropped = plan.drop.len(),
+            pruned = plan.prune_tool_results.len(),
+            "上下文压缩已应用"
+        );
+    }
+    out
+}
+
 async fn run_model_turn(
     ctx: &RunCtx,
     state: &mut RunState,
@@ -180,7 +230,8 @@ async fn run_model_turn(
         model: ctx.model.clone(),
         // 经 oc-core::prompt 确定性组装（人格 + 工具 + 记忆 + 时间）。
         system: Some(render_prompt(ctx)),
-        messages: messages.to_vec(),
+        // 超预算时按 oc-core 压缩计划裁剪（剪枝旧工具结果 → 丢弃最早消息）。
+        messages: apply_compaction(messages, &ctx.compact_cfg),
         tools: tool_specs,
         max_tokens: None,
         temperature: None,

@@ -230,6 +230,10 @@ fn start_run(
         soul: cfg.soul.clone(),
         // 第 4/5 段接入 Lane1 记忆注入；当前为空。
         bootstrap: Vec::new(),
+        compact_cfg: oc_core::compaction::CompactCfg {
+            budget: cfg.history_token_budget,
+            ..Default::default()
+        },
     };
 
     let self_tx = self_tx.clone();
