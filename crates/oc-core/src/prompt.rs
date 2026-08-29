@@ -28,6 +28,9 @@ pub struct SkillBrief {
 pub struct PromptInputs<'a> {
     /// SOUL.md 人格（原样置顶）。
     pub soul: &'a str,
+    /// 运行环境描述（OS + shell），进稳定前缀。空串则跳过该节。
+    /// 让模型知道 exec 工具的目标 shell，避免在 Windows 上写 Unix 语法。
+    pub platform: &'a str,
     /// curated 记忆注入（有预算，调用方已截断）。
     pub bootstrap: &'a [MemLine],
     pub skills: &'a [SkillBrief],
@@ -60,6 +63,13 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
     prefix.push_str("# 人格\n");
     prefix.push_str(inputs.soul.trim());
     prefix.push('\n');
+
+    // 1.5) 运行环境（稳定：OS + shell）。让模型据此选正确的命令语法。
+    if !inputs.platform.trim().is_empty() {
+        prefix.push_str("\n# 运行环境\n");
+        prefix.push_str(inputs.platform.trim());
+        prefix.push('\n');
+    }
 
     // 2) 工具：按名称字典序排序（确定性）。
     if !inputs.tools.is_empty() {
@@ -107,6 +117,7 @@ mod tests {
     fn inputs<'a>(now: &'a str, tools: &'a [ToolBrief], mem: &'a [MemLine]) -> PromptInputs<'a> {
         PromptInputs {
             soul: "你是 oc。",
+            platform: "",
             bootstrap: mem,
             skills: &[],
             tools,
@@ -135,6 +146,29 @@ mod tests {
         let p2 = render_system_prompt(&inputs("T2", &[], &[]));
         assert_eq!(p1.stable_prefix, p2.stable_prefix, "时间变化不应影响稳定前缀");
         assert_ne!(p1.volatile_suffix, p2.volatile_suffix);
+    }
+
+    #[test]
+    fn platform_in_stable_prefix() {
+        let with = PromptInputs {
+            soul: "你是 oc。",
+            platform: "OS: Windows；shell: cmd.exe（用 cmd 语法，勿用 Unix 语法）。",
+            bootstrap: &[],
+            skills: &[],
+            tools: &[],
+            now: "NOW",
+        };
+        let r = render_system_prompt(&with);
+        assert!(r.stable_prefix.contains("# 运行环境"));
+        assert!(r.stable_prefix.contains("cmd.exe"));
+        // 平台是稳定信息，不应进易变尾部。
+        assert!(!r.volatile_suffix.contains("cmd.exe"));
+    }
+
+    #[test]
+    fn empty_platform_skips_section() {
+        let r = render_system_prompt(&inputs("NOW", &[], &[]));
+        assert!(!r.stable_prefix.contains("# 运行环境"));
     }
 
     #[test]

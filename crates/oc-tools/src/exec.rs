@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use oc_core::tool::{approval_decision, classify_command, ApprovalMode, ApprovalOutcome};
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::error::{ToolError, ToolResult};
@@ -101,36 +101,48 @@ impl Tool for ExecTool {
     }
 }
 
-/// 实际跑命令：跨平台选 shell，流式收集 stdout+stderr。
+/// 实际跑命令：跨平台选 shell，收集 stdout+stderr。
+///
+/// 按**原始字节**读取，再 lossy 解码为 UTF-8——Windows `cmd` 的本地化输出
+/// 常是 GBK(cp936) 而非 UTF-8，若按行做严格 UTF-8 解码会直接 `InvalidData`
+/// 报错（表现为「命令输出有编码问题」）。lossy 让非法字节退化为 `�` 而非崩溃。
 async fn run_command(cmd: &str, cx: &ToolCtx) -> ToolResult<ToolOutput> {
     let mut command = shell_command(cmd);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command.spawn()?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
 
-    let mut collected = String::new();
-
-    // 逐行读 stdout 并流式 emit。
-    if let Some(out) = stdout {
-        let mut lines = BufReader::new(out).lines();
-        while let Some(line) = lines.next_line().await? {
-            cx.update(format!("{line}\n"));
-            collected.push_str(&line);
-            collected.push('\n');
+    // 并发读 stdout/stderr，避免任一管道写满导致子进程阻塞（死锁）。
+    let read_stdout = async {
+        let mut buf = Vec::new();
+        if let Some(out) = stdout.as_mut() {
+            let _ = out.read_to_end(&mut buf).await;
         }
-    }
-    // stderr 追加。
-    if let Some(err) = stderr {
-        let mut lines = BufReader::new(err).lines();
-        while let Some(line) = lines.next_line().await? {
-            collected.push_str(&line);
-            collected.push('\n');
+        buf
+    };
+    let read_stderr = async {
+        let mut buf = Vec::new();
+        if let Some(err) = stderr.as_mut() {
+            let _ = err.read_to_end(&mut buf).await;
         }
-    }
+        buf
+    };
+    let (out_bytes, err_bytes) = tokio::join!(read_stdout, read_stderr);
 
     let status = child.wait().await?;
+
+    // lossy 解码：任何字节序列都不会让工具崩溃。
+    let mut collected = String::from_utf8_lossy(&out_bytes).into_owned();
+    if !err_bytes.is_empty() {
+        collected.push_str(&String::from_utf8_lossy(&err_bytes));
+    }
+    // 一次性 emit 给 client（不再逐行，因为不再按行解码）。
+    if !collected.is_empty() {
+        cx.update(collected.clone());
+    }
+
     let content = sanitize(&collected);
     Ok(ToolOutput {
         content: format!("{content}\n[退出码: {}]", status.code().unwrap_or(-1)),

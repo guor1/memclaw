@@ -39,15 +39,65 @@ impl OpenAiProvider {
                 MsgRole::Assistant => "assistant",
                 MsgRole::Tool => "tool",
             };
-            messages.push(json!({"role": role, "content": m.content}));
+            let mut msg = json!({"role": role});
+            match m.role {
+                // tool 结果消息：必带 tool_call_id 关联到发起的调用。
+                MsgRole::Tool => {
+                    msg["content"] = json!(m.content);
+                    if let Some(id) = &m.tool_call_id {
+                        msg["tool_call_id"] = json!(id);
+                    }
+                }
+                // assistant 若发起工具调用：序列化 tool_calls；content 为空时置 null。
+                MsgRole::Assistant if !m.tool_calls.is_empty() => {
+                    msg["content"] = if m.content.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        json!(m.content)
+                    };
+                    msg["tool_calls"] = json!(m
+                        .tool_calls
+                        .iter()
+                        .map(|tc| json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.args,
+                            },
+                        }))
+                        .collect::<Vec<_>>());
+                }
+                _ => {
+                    msg["content"] = json!(m.content);
+                }
+            }
+            messages.push(msg);
         }
-        json!({
+        let mut body = json!({
             "model": req.model,
             "messages": messages,
             "stream": true,
             "max_tokens": req.max_tokens,
             "temperature": req.temperature,
-        })
+        });
+        // 关键：把可用工具告知模型，否则模型只能把工具语法当纯文本吐出。
+        if !req.tools.is_empty() {
+            body["tools"] = json!(req
+                .tools
+                .iter()
+                .map(|t| json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    },
+                }))
+                .collect::<Vec<_>>());
+            body["tool_choice"] = json!("auto");
+        }
+        body
     }
 }
 
@@ -166,4 +216,83 @@ fn classify_status(status: u16, retry_after: Option<u64>) -> ProviderErr {
 #[allow(dead_code)]
 fn parse_usage(_v: &serde_json::Value) -> Option<Usage> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Message, ToolCallSpec, ToolSpec};
+
+    fn req_with(messages: Vec<Message>, tools: Vec<ToolSpec>) -> ModelRequest {
+        ModelRequest {
+            model: "deepseek-chat".into(),
+            system: Some("sys".into()),
+            messages,
+            tools,
+            max_tokens: None,
+            temperature: None,
+        }
+    }
+
+    fn user(text: &str) -> Message {
+        Message { role: MsgRole::User, content: text.into(), tool_call_id: None, tool_calls: vec![] }
+    }
+
+    #[test]
+    fn tools_serialized_into_body() {
+        let tools = vec![ToolSpec {
+            name: "exec".into(),
+            description: "运行命令".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let body = OpenAiProvider::body(&req_with(vec![user("现在几点")], tools));
+        let arr = body["tools"].as_array().expect("tools 应存在");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "function");
+        assert_eq!(arr[0]["function"]["name"], "exec");
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn no_tools_field_when_empty() {
+        let body = OpenAiProvider::body(&req_with(vec![user("hi")], vec![]));
+        assert!(body.get("tools").is_none(), "无工具时不应出现 tools 字段");
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn assistant_tool_call_and_result_roundtrip() {
+        let messages = vec![
+            user("现在几点"),
+            Message {
+                role: MsgRole::Assistant,
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![ToolCallSpec {
+                    id: "call_1".into(),
+                    name: "exec".into(),
+                    args: r#"{"cmd":"date"}"#.into(),
+                }],
+            },
+            Message {
+                role: MsgRole::Tool,
+                content: "2026-08-29".into(),
+                tool_call_id: Some("call_1".into()),
+                tool_calls: vec![],
+            },
+        ];
+        let body = OpenAiProvider::body(&req_with(messages, vec![]));
+        let msgs = body["messages"].as_array().unwrap();
+        // [0]=system, [1]=user, [2]=assistant(tool_calls), [3]=tool
+        let asst = &msgs[2];
+        assert_eq!(asst["role"], "assistant");
+        assert!(asst["content"].is_null(), "空 content 应为 null");
+        assert_eq!(asst["tool_calls"][0]["id"], "call_1");
+        assert_eq!(asst["tool_calls"][0]["function"]["name"], "exec");
+        assert_eq!(asst["tool_calls"][0]["function"]["arguments"], r#"{"cmd":"date"}"#);
+        let tool = &msgs[3];
+        assert_eq!(tool["role"], "tool");
+        assert_eq!(tool["tool_call_id"], "call_1");
+        assert_eq!(tool["content"], "2026-08-29");
+    }
 }

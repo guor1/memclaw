@@ -318,6 +318,7 @@ async fn load_history(store: &oc_store::Store, cfg: &SessionConfig) -> Vec<oc_ll
             role,
             content: e.content.clone(),
             tool_call_id: None,
+            tool_calls: vec![],
         });
     }
     kept.reverse(); // 变回正序

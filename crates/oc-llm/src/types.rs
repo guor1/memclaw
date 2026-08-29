@@ -21,6 +21,20 @@ pub struct Message {
     /// 若此消息是工具结果，关联的调用 id。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// 若此 assistant 消息发起了工具调用，携带调用规格。
+    /// OpenAI 协议要求 `tool` 结果消息前必须有一条带匹配 `tool_calls` 的
+    /// assistant 消息，否则回喂时报 400。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallSpec>,
+}
+
+/// assistant 发起的一次工具调用（已拼装完整，非流式分片）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCallSpec {
+    pub id: String,
+    pub name: String,
+    /// 参数 JSON 文本（原样，回喂时透传）。
+    pub args: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

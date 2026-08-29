@@ -80,6 +80,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
             role: MsgRole::User,
             content: ctx.user_text.clone(),
             tool_call_id: None,
+            tool_calls: vec![],
         }]
     } else {
         ctx.history.clone()
@@ -108,13 +109,20 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
             }
             TurnResult::Terminal(outcome) => return outcome,
             TurnResult::ToolCall { call_id, name, args } => {
-                // 记录本轮 assistant（可能含文本 + 工具调用）到历史。
+                // 记录本轮 assistant（可能含文本）+ 本次工具调用到历史。
+                // 必须携带 tool_calls：OpenAI 协议要求 tool 结果消息前有一条
+                // 带匹配 tool_calls 的 assistant 消息，否则回喂时 400。
+                messages.push(Message {
+                    role: MsgRole::Assistant,
+                    content: acc.clone(),
+                    tool_call_id: None,
+                    tool_calls: vec![oc_llm::ToolCallSpec {
+                        id: call_id.clone(),
+                        name: name.clone(),
+                        args: args.clone(),
+                    }],
+                });
                 if !acc.is_empty() {
-                    messages.push(Message {
-                        role: MsgRole::Assistant,
-                        content: acc.clone(),
-                        tool_call_id: None,
-                    });
                     persist(ctx, oc_store::Role::Assistant, &acc).await;
                 }
 
@@ -143,6 +151,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                     role: MsgRole::Tool,
                     content: output,
                     tool_call_id: Some(call_id.clone()),
+                    tool_calls: vec![],
                 });
                 let (next, effs) = step(
                     state.clone(),
@@ -201,6 +210,7 @@ fn apply_compaction(messages: &[Message], cfg: &oc_core::compaction::CompactCfg)
                 role: m.role,
                 content: format!("{kept}\n…[旧工具输出已剪枝]"),
                 tool_call_id: m.tool_call_id.clone(),
+                tool_calls: m.tool_calls.clone(),
             });
         } else {
             out.push(m.clone());
@@ -430,6 +440,7 @@ fn render_prompt(ctx: &RunCtx) -> String {
     let now = now_rfc3339();
     let rendered = render_system_prompt(&PromptInputs {
         soul,
+        platform: PLATFORM_HINT,
         bootstrap: &ctx.bootstrap,
         skills: &ctx.skills,
         tools: &tools,
@@ -437,6 +448,16 @@ fn render_prompt(ctx: &RunCtx) -> String {
     });
     rendered.full()
 }
+
+/// 运行环境提示：告诉模型 exec 工具的目标 OS / shell，避免写错命令语法。
+/// 编译期按目标平台确定。
+#[cfg(windows)]
+const PLATFORM_HINT: &str = "操作系统：Windows。exec 工具通过 `cmd.exe /C` 执行命令，\
+请使用 Windows/cmd 命令语法，不要使用 Unix/bash 语法（例如取当前时间用 `date /T & time /T`，\
+不要用 `date '+%Y-%m-%d'`）。";
+#[cfg(not(windows))]
+const PLATFORM_HINT: &str = "操作系统：类 Unix（Linux/macOS）。exec 工具通过 `sh -c` 执行命令，\
+请使用 POSIX shell 语法。";
 
 /// 缺少 SOUL.md 时的默认人格。
 const DEFAULT_SOUL: &str = "你是 oc，一个长期陪伴用户的个人助手。\
