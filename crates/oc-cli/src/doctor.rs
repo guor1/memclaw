@@ -31,10 +31,19 @@ pub fn run(dump_schema: bool) -> Result<()> {
     );
     drop(conn);
 
-    // 3) 配置校验（当前用默认配置演示；M2+ 从 config.toml 加载）
-    let cfg = oc_core::Config::default_local();
+    // 3) 配置校验：存在 config.toml 则解析+校验真实配置，否则校验默认配置。
+    let cfg_path = crate::paths::config_path()?;
+    let (cfg, source) = if cfg_path.exists() {
+        let text = fs::read_to_string(&cfg_path)
+            .with_context(|| format!("读取 {} 失败", cfg_path.display()))?;
+        let cfg: oc_core::Config = toml::from_str(&text)
+            .with_context(|| format!("解析 {} 失败（TOML 格式错误）", cfg_path.display()))?;
+        (cfg, format!("{}", cfg_path.display()))
+    } else {
+        (oc_core::Config::default_local(), "默认配置".to_string())
+    };
     match cfg.validate_shape() {
-        Ok(()) => println!("[ok] 配置校验通过（默认配置）"),
+        Ok(()) => println!("[ok] 配置校验通过（{source}）"),
         Err(report) => {
             println!("[err] 配置校验失败:\n{report}");
             anyhow::bail!("配置无效");
