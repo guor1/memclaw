@@ -64,13 +64,13 @@ async fn happy_multi_turn() {
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(2000), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     // 第一轮
-    let _run1 = handle.submit("你好".into()).await.expect("run1");
+    let _run1 = handle.submit("你好".into(), handle.broadcast_sink()).await.expect("run1");
     let evs = collect_until_terminal(&mut rx, Duration::from_secs(2)).await;
     assert!(has_assistant_containing(&evs, "回复A"), "应收到 assistant 文本");
     assert!(has_end(&evs), "应正常结束");
 
     // 第二轮（车道空闲后应能再次运行）
-    let _run2 = handle.submit("再来".into()).await.expect("run2");
+    let _run2 = handle.submit("再来".into(), handle.broadcast_sink()).await.expect("run2");
     let evs = collect_until_terminal(&mut rx, Duration::from_secs(2)).await;
     assert!(has_end(&evs), "第二轮应正常结束");
 }
@@ -82,7 +82,7 @@ async fn idle_watchdog_aborts_stalled_model() {
     let provider = Arc::new(MockProvider::stalls_for(Duration::from_secs(5)));
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(200), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    let _run = handle.submit("会卡住".into()).await.expect("run");
+    let _run = handle.submit("会卡住".into(), handle.broadcast_sink()).await.expect("run");
     let start = std::time::Instant::now();
     let evs = collect_until_terminal(&mut rx, Duration::from_secs(3)).await;
     let elapsed = start.elapsed();
@@ -104,7 +104,7 @@ async fn abort_stops_active_run() {
     let provider = Arc::new(MockProvider::scripted(script));
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(2000), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    let run_id = handle.submit("长回复".into()).await.expect("run");
+    let run_id = handle.submit("长回复".into(), handle.broadcast_sink()).await.expect("run");
 
     // 等一小会让 run 跑起来，然后中止。
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -138,7 +138,7 @@ async fn health_scan_aborts_stuck_run() {
     };
     let handle = session::spawn(oc_proto::SessionId::main(), cfg, provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    let _run = handle.submit("会卡死".into()).await.expect("run");
+    let _run = handle.submit("会卡死".into(), handle.broadcast_sink()).await.expect("run");
 
     // 模拟心跳：每 500ms 扫一次，累计触发卡死诊断。
     let scanner = handle.clone();

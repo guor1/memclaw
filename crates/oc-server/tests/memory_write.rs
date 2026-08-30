@@ -53,7 +53,7 @@ async fn explicit_remember_then_recall() {
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     // 第 1 轮：显式"记住…"，触发 curated 写入。
-    handle.submit("记住：我喜欢简洁直接的回复".into()).await.expect("run1");
+    handle.submit("记住：我喜欢简洁直接的回复".into(), handle.broadcast_sink()).await.expect("run1");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     // 该记忆应已落库为 curated + Owner。
@@ -66,7 +66,7 @@ async fn explicit_remember_then_recall() {
     assert_eq!(curated[0].origin, oc_store::Origin::Owner, "显式指令 origin=Owner");
 
     // 第 2 轮：相关消息 → Lane1 注入该记忆。
-    handle.submit("你平时怎么组织回复的".into()).await.expect("run2");
+    handle.submit("你平时怎么组织回复的".into(), handle.broadcast_sink()).await.expect("run2");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     let reqs = captures.lock().unwrap();

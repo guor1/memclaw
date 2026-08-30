@@ -15,6 +15,7 @@ pub mod registry;
 pub mod run;
 pub mod scheduler;
 pub mod session;
+pub mod sink;
 pub mod state;
 pub mod summarize;
 pub mod tools_bridge;
@@ -50,19 +51,15 @@ pub async fn serve_with(
 ) -> ServerResult<()> {
     let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAP);
 
-    // 审批注册表：EventApprovalHandler 与 ServerState 共享。
+    // 审批注册表：ToolExecutor（发起审批）与 ServerState（回执唤醒）共享。
     let approvals: state::ApprovalRegistry = Arc::new(dashmap::DashMap::new());
 
     // 后台任务台账。
     let ledger = ledger::TaskLedger::new(event_tx.clone());
 
-    // 若配置了工具，注入交互式审批处理器 + 把后台移交接到台账。
+    // 若配置了工具，共享审批 registry（交互式审批走 per-run sink）+ 把后台移交接到台账。
     let mut session_cfg = session_cfg;
     if let Some(tools) = session_cfg.tools.take() {
-        let handler = Arc::new(tools_bridge::EventApprovalHandler::new(
-            event_tx.clone(),
-            Arc::clone(&approvals),
-        ));
         // 后台移交 → 台账登记。
         if let Some(mut rx) = tools.take_handoff() {
             let ledger2 = ledger.clone();
@@ -72,7 +69,7 @@ pub async fn serve_with(
                 }
             });
         }
-        session_cfg.tools = Some(tools.with_approval(handler));
+        session_cfg.tools = Some(tools.with_approvals(Arc::clone(&approvals)));
     }
 
     // proactive 上下文：在 provider 被 session 接管前克隆出所需句柄。

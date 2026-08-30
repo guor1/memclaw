@@ -81,7 +81,7 @@ where
     while let Some(frame) = reader.read_frame().await? {
         match frame {
             Frame::Req(req) => {
-                let result = dispatch::handle_req(&req, state).await;
+                let result = dispatch::handle_req(&req, state, out_tx).await;
                 let res = Res {
                     id: req.id,
                     result,

@@ -96,7 +96,7 @@ async fn model_calls_tool_then_completes() {
     let provider = Arc::new(SequencedMock::new(scripts));
     let handle = session::spawn(oc_proto::SessionId::main(), cfg_with_tools(tool_executor()), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    let _run = handle.submit("帮我执行 echo".into()).await.expect("run");
+    let _run = handle.submit("帮我执行 echo".into(), handle.broadcast_sink()).await.expect("run");
     let evs = collect_until_terminal(&mut rx, Duration::from_secs(5)).await;
 
     // 应看到 tool start/update/end + 最终 assistant 文本 + End。
@@ -113,17 +113,15 @@ async fn model_calls_tool_then_completes() {
 
 #[tokio::test]
 async fn dangerous_command_triggers_approval_then_runs() {
-    use oc_server::tools_bridge::EventApprovalHandler;
     use std::sync::Arc as StdArc;
 
     let (tx, mut rx) = broadcast::channel(512);
 
-    // Prompt 模式 + 交互式审批处理器。
+    // Prompt 模式 + 共享审批 registry（审批事件经 per-run sink，回执经 registry）。
     let mut reg = ToolRegistry::new();
     reg.register(StdArc::new(ExecTool::new(ApprovalMode::Prompt, Duration::from_secs(10))));
     let registry: oc_server::state::ApprovalRegistry = StdArc::new(dashmap::DashMap::new());
-    let handler = StdArc::new(EventApprovalHandler::new(tx.clone(), StdArc::clone(&registry)));
-    let executor = ToolExecutor::new(StdArc::new(reg)).with_approval(handler);
+    let executor = ToolExecutor::new(StdArc::new(reg)).with_approvals(StdArc::clone(&registry));
 
     let cfg = SessionConfig {
         model: "mock".into(),
@@ -151,7 +149,7 @@ async fn dangerous_command_triggers_approval_then_runs() {
     let provider = StdArc::new(SequencedMock::new(scripts));
     let handle = session::spawn(oc_proto::SessionId::main(), cfg, provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    let _run = handle.submit("执行危险命令".into()).await.expect("run");
+    let _run = handle.submit("执行危险命令".into(), handle.broadcast_sink()).await.expect("run");
 
     // 后台监听 Approval 事件并放行。
     let reg2 = StdArc::clone(&registry);
@@ -186,7 +184,7 @@ async fn loop_detection_breaks_repeated_tool_calls() {
     let provider = Arc::new(SequencedMock::new(scripts));
     let handle = session::spawn(oc_proto::SessionId::main(), cfg_with_tools(tool_executor()), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    let _run = handle.submit("触发打转".into()).await.expect("run");
+    let _run = handle.submit("触发打转".into(), handle.broadcast_sink()).await.expect("run");
     let evs = collect_until_terminal(&mut rx, Duration::from_secs(5)).await;
 
     assert!(

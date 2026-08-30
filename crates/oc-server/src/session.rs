@@ -53,8 +53,11 @@ pub struct SessionConfig {
 /// 发给 session actor 的命令。
 pub enum SessionCmd {
     /// 提交一轮用户输入，返回分配的 run_id。
+    ///
+    /// `sink`：本轮内联事件的出口（发起连接的出站队列，背压不丢；测试用广播）。
     Submit {
         text: String,
+        sink: crate::sink::RunSink,
         reply: oneshot::Sender<RunId>,
     },
     /// 中止：hard=先 drain 排队轮再中止活跃（M4 完整）；M3 中止活跃 run。
@@ -71,13 +74,23 @@ pub enum SessionCmd {
 #[derive(Clone)]
 pub struct SessionHandle {
     tx: mpsc::Sender<SessionCmd>,
+    /// 广播总线句柄：供 `broadcast_sink()` 构造沿用旧语义的 sink（测试/带外用）。
+    events: broadcast::Sender<Event>,
 }
 
 impl SessionHandle {
-    pub async fn submit(&self, text: String) -> Option<RunId> {
+    pub async fn submit(&self, text: String, sink: crate::sink::RunSink) -> Option<RunId> {
         let (reply, rx) = oneshot::channel();
-        self.tx.send(SessionCmd::Submit { text, reply }).await.ok()?;
+        self.tx.send(SessionCmd::Submit { text, sink, reply }).await.ok()?;
         rx.await.ok()
+    }
+
+    /// 构造一个广播 sink（run 事件走广播，沿用旧语义）。
+    ///
+    /// 生产路径用 `RunSink::Conn` 定向背压回连接；此助手主要给单测直接
+    /// `subscribe()` 断言事件序列时用，或无连接归属的带外提交场景。
+    pub fn broadcast_sink(&self) -> crate::sink::RunSink {
+        crate::sink::RunSink::Broadcast(self.events.clone())
     }
 
     pub async fn abort(&self, run_id: RunId, hard: bool) {
@@ -107,7 +120,7 @@ pub fn spawn(
     diag: crate::diag::SessionDiag,
 ) -> SessionHandle {
     let (tx, rx) = mpsc::channel(64);
-    let handle = SessionHandle { tx: tx.clone() };
+    let handle = SessionHandle { tx: tx.clone(), events: events.clone() };
     tokio::spawn(actor_loop(session_id, cfg, provider, events, tx, rx, store, diag));
     handle
 }
@@ -132,6 +145,10 @@ async fn actor_loop(
 ) {
     let mut queue = RunQueue::new(cfg.queue_cap);
     let mut active: Option<ActiveRun> = None;
+    // run_id → 本轮内联事件出口。submit 时存入，run 起步时取用，run 结束时清理。
+    // 排队轮的 sink 也在此暂存，直到车道空出、该轮起步。
+    let mut sinks: std::collections::HashMap<String, crate::sink::RunSink> =
+        std::collections::HashMap::new();
     let sid = session_id.to_string();
 
     // 确保本会话存在。kind 统一记为 "main"（用户会话）；cron/dreaming 等隔离
@@ -146,9 +163,11 @@ async fn actor_loop(
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
-            SessionCmd::Submit { text, reply } => {
+            SessionCmd::Submit { text, sink, reply } => {
                 let run_id = RunId::new(uuid_v7());
                 info!(session = %sid, run_id = %run_id, chars = text.chars().count(), "submit 受理");
+                // 暂存本轮 sink（起步或排队后起步时取用）。
+                sinks.insert(run_id.to_string(), sink);
                 let _ = reply.send(run_id.clone());
 
                 // 落库用户消息（重启不失忆）。
@@ -189,7 +208,8 @@ async fn actor_loop(
                         );
                         let boot = lane1_bootstrap(&store, &cfg, &t.text).await;
                         info!(session = %sid, run_id = %run_id, "run 起步");
-                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, &diag, t, history, boot));
+                        let sink = sinks.remove(&t.run_id).unwrap_or_else(|| default_sink(&events));
+                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, &diag, t, history, boot, sink));
                     }
                     SubmitResult::Queued => {
                         diag.set_queue_depth(queue.pending_len());
@@ -198,6 +218,8 @@ async fn actor_loop(
                     SubmitResult::Rejected => {
                         warn!(session = %sid, "队列已满，拒绝新轮");
                         diag.set_error("队列已满，拒绝新轮".to_string());
+                        // 该轮不会跑，清理其暂存 sink，避免泄漏。
+                        sinks.remove(run_id.as_str());
                     }
                 }
             }
@@ -235,6 +257,8 @@ async fn actor_loop(
                     }
                     diag.run_done(format!("{outcome:?}"));
                     active = None;
+                    // 完成轮的 sink 已随 run 结束失效，清理。
+                    sinks.remove(run_id.as_str());
                     // 取下一个排队轮。
                     if let Some(next) = queue.complete_active() {
                         diag.set_queue_depth(queue.pending_len());
@@ -242,7 +266,8 @@ async fn actor_loop(
                         info!(session = %sid, run_id = %next.run_id, "起下一排队轮");
                         let history = load_history(&store, &cfg, &sid).await;
                         let boot = lane1_bootstrap(&store, &cfg, &next.text).await;
-                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, &diag, next, history, boot));
+                        let sink = sinks.remove(&next.run_id).unwrap_or_else(|| default_sink(&events));
+                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, &diag, next, history, boot, sink));
                     }
                 }
             }
@@ -282,6 +307,7 @@ fn start_run(
     turn: QueuedTurn,
     history: Vec<oc_llm::Message>,
     bootstrap: Vec<oc_core::prompt::MemLine>,
+    sink: crate::sink::RunSink,
 ) -> ActiveRun {
     let cancel = CancellationToken::new();
     let run_id = RunId::new(turn.run_id.clone());
@@ -292,6 +318,7 @@ fn start_run(
         system_prompt: cfg.system_prompt.clone(),
         model: cfg.model.clone(),
         provider: Arc::clone(provider),
+        sink,
         events: events.clone(),
         cancel: cancel.clone(),
         idle_timeout: cfg.idle_timeout,
@@ -340,6 +367,12 @@ fn start_run(
 /// 简易 UUIDv7（避免为此引入额外依赖；server 已有 uuid）。
 fn uuid_v7() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+/// 兜底 sink：正常路径下每轮都有暂存 sink，此处仅防御性回退到广播，
+/// 保证即便映射意外缺失，事件也不至于凭空丢弃（会走旧广播语义）。
+fn default_sink(events: &broadcast::Sender<Event>) -> crate::sink::RunSink {
+    crate::sink::RunSink::Broadcast(events.clone())
 }
 
 /// 近似 token 估算（字符/4，设计 §7 tokenizer 近似）。

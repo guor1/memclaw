@@ -51,7 +51,7 @@ async fn custom_soul_reaches_model_request() {
     let store = oc_store::Store::open_memory().unwrap();
 
     let handle = session::spawn(oc_proto::SessionId::main(), cfg("我是测试人格 ZZZ。"), provider, tx, store, oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
-    handle.submit("你好".into()).await.expect("run");
+    handle.submit("你好".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     let reqs = captures.lock().unwrap();
@@ -73,7 +73,7 @@ async fn empty_soul_falls_back_to_default_persona() {
     let store = oc_store::Store::open_memory().unwrap();
 
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(""), provider, tx, store, oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
-    handle.submit("你好".into()).await.expect("run");
+    handle.submit("你好".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     let reqs = captures.lock().unwrap();
@@ -95,7 +95,7 @@ async fn skills_reach_model_request() {
     }];
 
     let handle = session::spawn(oc_proto::SessionId::main(), c, provider, tx, store, oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
-    handle.submit("你好".into()).await.expect("run");
+    handle.submit("你好".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     let reqs = captures.lock().unwrap();
@@ -111,12 +111,12 @@ async fn history_is_passed_as_messages() {
     let store = oc_store::Store::open_memory().unwrap();
 
     let handle = session::spawn(oc_proto::SessionId::main(), cfg("人格"), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
-    handle.submit("第一句".into()).await.expect("run");
+    handle.submit("第一句".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     // 第二轮：请求里应带上第一轮的历史。
     let mut rx2 = rx.resubscribe();
-    handle.submit("第二句".into()).await.expect("run");
+    handle.submit("第二句".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx2, Duration::from_secs(5)).await;
 
     let reqs = captures.lock().unwrap();

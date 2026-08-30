@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use oc_core::tool::ApprovalMode;
 use oc_proto::{Event, RunId, SessionId, ToolCallId};
+use oc_server::sink::RunSink;
 use oc_server::tools_bridge::ToolExecutor;
 use oc_tools::exec::ExecTool;
 use oc_tools::sys::SysTool;
@@ -23,6 +24,7 @@ fn executor(roots: Vec<std::path::PathBuf>) -> ToolExecutor {
 
 async fn call(ex: &ToolExecutor, name: &str, args: &str, session: &SessionId) -> String {
     let (tx, _rx) = broadcast::channel::<Event>(64);
+    let sink = RunSink::Broadcast(tx);
     let (_status, content) = ex
         .run(
             name,
@@ -31,7 +33,7 @@ async fn call(ex: &ToolExecutor, name: &str, args: &str, session: &SessionId) ->
             &RunId::new("r"),
             &ToolCallId::new("c"),
             CancellationToken::new(),
-            &tx,
+            &sink,
         )
         .await;
     content

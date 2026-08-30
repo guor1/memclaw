@@ -87,8 +87,8 @@ async fn events_are_attributed_to_correct_session() {
     // 两个会话各提交一轮（未知 id → 隐式创建）。
     let h_work = registry.get_or_spawn(&work);
     let h_personal = registry.get_or_spawn(&personal);
-    h_work.submit("工作会话的消息".into()).await.expect("work run");
-    h_personal.submit("私人会话的消息".into()).await.expect("personal run");
+    h_work.submit("工作会话的消息".into(), h_work.broadcast_sink()).await.expect("work run");
+    h_personal.submit("私人会话的消息".into(), h_personal.broadcast_sink()).await.expect("personal run");
 
     let evs = collect_until_ends(&mut rx, 2, Duration::from_secs(10)).await;
 
@@ -121,8 +121,10 @@ async fn transcripts_are_isolated_per_session() {
 
     let a = SessionId::new("alpha");
     let b = SessionId::new("beta");
-    registry.get_or_spawn(&a).submit("只属于 alpha 的话".into()).await.unwrap();
-    registry.get_or_spawn(&b).submit("只属于 beta 的话".into()).await.unwrap();
+    let ha = registry.get_or_spawn(&a);
+    ha.submit("只属于 alpha 的话".into(), ha.broadcast_sink()).await.unwrap();
+    let hb = registry.get_or_spawn(&b);
+    hb.submit("只属于 beta 的话".into(), hb.broadcast_sink()).await.unwrap();
     collect_until_ends(&mut rx, 2, Duration::from_secs(10)).await;
 
     // alpha 的 transcript 只含 alpha 的用户消息（+ assistant 回复），不含 beta 的。
@@ -163,6 +165,6 @@ async fn same_id_reuses_one_actor() {
     let _h2 = registry.get_or_spawn(&id);
     // 能连续 submit 说明句柄有效（同一 actor 串行处理）。
     let h = registry.get_or_spawn(&id);
-    h.submit("第一条".into()).await.expect("first");
-    h.submit("第二条".into()).await.expect("second");
+    h.submit("第一条".into(), h.broadcast_sink()).await.expect("first");
+    h.submit("第二条".into(), h.broadcast_sink()).await.expect("second");
 }

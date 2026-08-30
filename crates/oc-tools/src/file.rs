@@ -146,9 +146,21 @@ impl Tool for FileTool {
             }
             FileArgs::Grep { pattern, path } => {
                 let p = self.check(Path::new(&path), &cx.cwd)?;
-                grep(&pattern, &p)
+                // grep 用同步 walkdir/std::fs 遍历目录树：大目录会长时间占用
+                // 当前 tokio worker，饿死同线程上的其它会话/心跳。放到阻塞线程池，
+                // 让 async executor 不被同步循环霸占（工具级超时也才对它生效）。
+                tokio::task::spawn_blocking(move || grep(&pattern, &p))
+                    .await
+                    .map_err(|e| ToolError::Failed(format!("grep 任务失败: {e}")))?
             }
-            FileArgs::Glob { pattern } => glob_search(&pattern, &cx.cwd, &self.allowed_roots),
+            FileArgs::Glob { pattern } => {
+                // 同 grep：glob 展开 + canonicalize 是同步阻塞 IO，隔离到阻塞线程池。
+                let cwd = cx.cwd.clone();
+                let roots = self.allowed_roots.clone();
+                tokio::task::spawn_blocking(move || glob_search(&pattern, &cwd, &roots))
+                    .await
+                    .map_err(|e| ToolError::Failed(format!("glob 任务失败: {e}")))?
+            }
         }
     }
 }

@@ -44,7 +44,7 @@ async fn usage_delta_emits_usage_event() {
     let (tx, mut rx) = broadcast::channel(256);
     let handle = session::spawn(SessionId::main(), cfg(64_000), provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    handle.submit("你好".into()).await.expect("run");
+    handle.submit("你好".into(), handle.broadcast_sink()).await.expect("run");
 
     // 收集事件，找 Usage。
     let mut got: Option<(u32, u32)> = None;

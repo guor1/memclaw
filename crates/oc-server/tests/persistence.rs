@@ -53,7 +53,7 @@ async fn conversation_persists_and_reloads() {
         let provider = Arc::new(MockProvider::echo_text("我记住了"));
         let handle = session::spawn(oc_proto::SessionId::main(), cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-        handle.submit("我叫郭睿".into()).await.expect("run");
+        handle.submit("我叫郭睿".into(), handle.broadcast_sink()).await.expect("run");
         wait_terminal(&mut rx, Duration::from_secs(5)).await;
     }
 
@@ -75,7 +75,7 @@ async fn conversation_persists_and_reloads() {
         let provider = Arc::new(MockProvider::echo_text("你叫郭睿"));
         let handle = session::spawn(oc_proto::SessionId::main(), cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-        handle.submit("我叫什么".into()).await.expect("run");
+        handle.submit("我叫什么".into(), handle.broadcast_sink()).await.expect("run");
         wait_terminal(&mut rx, Duration::from_secs(5)).await;
     }
 
@@ -99,7 +99,7 @@ async fn reset_clears_context_but_keeps_transcript() {
     let (tx, mut rx) = broadcast::channel(256);
     let provider = Arc::new(MockProvider::echo_text("好"));
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
-    handle.submit("第一句".into()).await.expect("run");
+    handle.submit("第一句".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     assert_eq!(w.load_transcript("main".into(), 100).await.unwrap().len(), 2);
@@ -115,7 +115,7 @@ async fn reset_clears_context_but_keeps_transcript() {
     let (tx2, mut rx2) = broadcast::channel(256);
     let provider2 = Arc::new(MockProvider::echo_text("新的开始"));
     let handle2 = session::spawn(oc_proto::SessionId::main(), cfg(), provider2, tx2, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
-    handle2.submit("重新开始".into()).await.expect("run");
+    handle2.submit("重新开始".into(), handle2.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx2, Duration::from_secs(5)).await;
 
     let after = w.load_transcript("main".into(), 100).await.unwrap();

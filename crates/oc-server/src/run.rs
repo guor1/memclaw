@@ -21,6 +21,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use crate::sink::RunSink;
 use crate::tools_bridge::ToolExecutor;
 
 /// loop detection 阈值：同一工具调用重复达此次数判打转。
@@ -37,6 +38,9 @@ pub struct RunCtx {
     pub system_prompt: Option<String>,
     pub model: String,
     pub provider: Arc<dyn Provider>,
+    /// run 内联事件出口（Assistant/Lifecycle/Tool/Approval）——有界背压，不丢（P0-1）。
+    pub sink: RunSink,
+    /// 广播总线：仅 Usage（低频、有独立订阅者更新 state）经此推送。
     pub events: broadcast::Sender<Event>,
     pub cancel: CancellationToken,
     pub idle_timeout: Duration,
@@ -68,7 +72,7 @@ pub async fn drive(ctx: RunCtx) -> RunOutcome {
             Ok(outcome) => outcome,
             Err(_) => {
                 ctx.cancel.cancel();
-                emit_error(&ctx, RunErrorKind::Timeout, "run 超时");
+                emit_error(&ctx, RunErrorKind::Timeout, "run 超时").await;
                 RunOutcome::Aborted
             }
         },
@@ -151,13 +155,13 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                 });
                 if detect_loop(&fingerprints, LOOP_REPEAT_THRESHOLD) {
                     warn!(run_id = %ctx.run_id, "loop detection：工具重复调用，判打转");
-                    emit_error(ctx, RunErrorKind::LoopDetected, "检测到工具调用打转");
+                    emit_error(ctx, RunErrorKind::LoopDetected, "检测到工具调用打转").await;
                     return RunOutcome::LoopDetected;
                 }
                 tool_rounds += 1;
                 ctx.diag.set_tool_rounds(tool_rounds);
                 if tool_rounds > MAX_TOOL_ROUNDS {
-                    emit_error(ctx, RunErrorKind::LoopDetected, "超过最大工具轮数");
+                    emit_error(ctx, RunErrorKind::LoopDetected, "超过最大工具轮数").await;
                     return RunOutcome::LoopDetected;
                 }
 
@@ -372,7 +376,7 @@ async fn run_model_turn(
                 let (n, effs) = step(state.clone(), StepEvent::Abort, acc);
                 *state = n;
                 execute_effects(ctx, &effs, acc).await;
-                emit_error(ctx, RunErrorKind::Timeout, "空闲看门狗触发");
+                emit_error(ctx, RunErrorKind::Timeout, "空闲看门狗触发").await;
                 return TurnResult::Terminal(outcome_of(state));
             }
         };
@@ -443,7 +447,7 @@ async fn run_model_turn(
 /// 执行一个工具调用，返回净化后的结果文本（回喂模型）。
 async fn exec_tool(ctx: &RunCtx, call_id: &str, name: &str, args: &str) -> String {
     let cid = ToolCallId::new(call_id.to_string());
-    let _ = ctx.events.send(Event::Tool {
+    emit_inline(ctx, Event::Tool {
         session: ctx.session_id.clone(),
         run_id: ctx.run_id.clone(),
         call_id: cid.clone(),
@@ -451,56 +455,64 @@ async fn exec_tool(ctx: &RunCtx, call_id: &str, name: &str, args: &str) -> Strin
             name: name.to_string(),
             args_preview: truncate(args, 200),
         },
-    });
+    }).await;
 
     let Some(executor) = &ctx.tools else {
         return format!("工具 {name} 不可用（无工具执行器）");
     };
 
+    // 工具执行期间的 tool(update)/approval 事件也经 sink（保证与文本同序）。
     let (status, content) = executor
-        .run(name, args, &ctx.session_id, &ctx.run_id, &cid, ctx.cancel.clone(), &ctx.events)
+        .run(name, args, &ctx.session_id, &ctx.run_id, &cid, ctx.cancel.clone(), &ctx.sink)
         .await;
 
-    let _ = ctx.events.send(Event::Tool {
+    emit_inline(ctx, Event::Tool {
         session: ctx.session_id.clone(),
         run_id: ctx.run_id.clone(),
         call_id: cid,
         phase: ToolPhase::End { status },
-    });
+    }).await;
     let _ = status;
     content
 }
 
 /// 执行副作用。返回 false 表示已到终态无需继续。
+///
+/// 内联事件走 `ctx.sink`（背压，不丢）。sink 报下游不可达（连接断）时，
+/// 除停止继续外还触发 `cancel`，让 run 尽快收敛、释放车道（不被死连接拖住）。
 async fn execute_effects(ctx: &RunCtx, effects: &[Effect], acc: &mut String) -> bool {
     let mut keep_going = true;
     for eff in effects {
         match eff {
             Effect::EmitLifecycleStart => {
-                let _ = ctx.events.send(Event::Lifecycle {
+                if !emit_inline(ctx, Event::Lifecycle {
                     session: ctx.session_id.clone(),
                     run_id: ctx.run_id.clone(),
                     phase: LifecyclePhase::Start,
-                });
+                }).await {
+                    keep_going = false;
+                }
             }
             Effect::EmitAssistant(text) => {
                 acc.push_str(text);
-                let _ = ctx.events.send(Event::Assistant {
+                if !emit_inline(ctx, Event::Assistant {
                     session: ctx.session_id.clone(),
                     run_id: ctx.run_id.clone(),
                     delta: text.clone(),
-                });
+                }).await {
+                    keep_going = false;
+                }
             }
             Effect::EmitLifecycleEnd => {
-                let _ = ctx.events.send(Event::Lifecycle {
+                emit_inline(ctx, Event::Lifecycle {
                     session: ctx.session_id.clone(),
                     run_id: ctx.run_id.clone(),
                     phase: LifecyclePhase::End,
-                });
+                }).await;
                 keep_going = false;
             }
             Effect::EmitLifecycleError(msg) => {
-                emit_error(ctx, RunErrorKind::Failed, msg);
+                emit_error(ctx, RunErrorKind::Failed, msg).await;
                 keep_going = false;
             }
             Effect::PersistAssistant(_full) => { /* M5 落库 */ }
@@ -509,6 +521,17 @@ async fn execute_effects(ctx: &RunCtx, effects: &[Effect], acc: &mut String) -> 
         }
     }
     keep_going
+}
+
+/// 发一个内联事件到 sink。返回 `false` 表示下游断连——同时触发 cancel 收敛 run。
+async fn emit_inline(ctx: &RunCtx, ev: Event) -> bool {
+    if ctx.sink.send(ev).await {
+        true
+    } else {
+        // 连接已断：中止 run，避免后续 send 继续挂起、车道被锁。
+        ctx.cancel.cancel();
+        false
+    }
 }
 
 /// 用 oc-core::prompt 确定性组装系统提示词（设计 §4.4）。
@@ -596,15 +619,15 @@ async fn persist(ctx: &RunCtx, role: oc_store::Role, content: &str) {
     }
 }
 
-fn emit_error(ctx: &RunCtx, kind: RunErrorKind, msg: &str) {
-    let _ = ctx.events.send(Event::Lifecycle {
+async fn emit_error(ctx: &RunCtx, kind: RunErrorKind, msg: &str) {
+    emit_inline(ctx, Event::Lifecycle {
         session: ctx.session_id.clone(),
         run_id: ctx.run_id.clone(),
         phase: LifecyclePhase::Error {
             message: msg.to_string(),
             kind,
         },
-    });
+    }).await;
 }
 
 fn outcome_of(state: &RunState) -> RunOutcome {

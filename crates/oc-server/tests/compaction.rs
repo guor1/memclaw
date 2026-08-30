@@ -72,7 +72,7 @@ async fn long_history_gets_compacted_before_model() {
     let captures = provider.captures();
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(1000), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    handle.submit("最新一句".into()).await.expect("run");
+    handle.submit("最新一句".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     let reqs = captures.lock().unwrap();
@@ -101,7 +101,7 @@ async fn short_history_not_compacted() {
     // 大预算，短对话，不应压缩。
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(100_000), provider, tx, store, oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    handle.submit("就一句".into()).await.expect("run");
+    handle.submit("就一句".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     let reqs = captures.lock().unwrap();

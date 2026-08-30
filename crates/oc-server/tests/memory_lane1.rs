@@ -67,7 +67,7 @@ async fn curated_memory_injected_on_relevant_message() {
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     // 消息里含记忆的关键词"回复"。
-    handle.submit("你平时怎么组织回复的".into()).await.expect("run");
+    handle.submit("你平时怎么组织回复的".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     let reqs = captures.lock().unwrap();
@@ -100,7 +100,7 @@ async fn irrelevant_message_does_not_inject() {
     let captures = provider.captures();
     let handle = session::spawn(oc_proto::SessionId::main(), cfg(), provider, tx, store.clone(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
-    handle.submit("帮我写段代码".into()).await.expect("run");
+    handle.submit("帮我写段代码".into(), handle.broadcast_sink()).await.expect("run");
     wait_terminal(&mut rx, Duration::from_secs(5)).await;
 
     let reqs = captures.lock().unwrap();

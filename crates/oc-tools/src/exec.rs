@@ -76,7 +76,13 @@ impl Tool for ExecTool {
                     return Err(ToolError::Denied);
                 };
                 let summary = format!("请求执行命令（风险: {risk:?}）");
-                if gate.ask(summary, cmd.clone()).await == ApprovalReply::Deny {
+                // 等审批期间必须响应取消：否则用户 abort / 看门狗判卡死时，
+                // run 会永久卡在 ask().await 上，车道不释放（P0-2）。
+                let reply = tokio::select! {
+                    _ = cx.cancel.cancelled() => return Err(ToolError::Aborted),
+                    r = gate.ask(summary, cmd.clone()) => r,
+                };
+                if reply == ApprovalReply::Deny {
                     return Err(ToolError::Denied);
                 }
             }

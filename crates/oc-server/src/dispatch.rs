@@ -6,14 +6,19 @@
 use std::sync::Arc;
 
 use oc_proto::{
-    ChatAbortParams, ChatSendParams, ConnectParams, Features, Method, MethodOk, ProtoError, Req,
-    ResResult, SessionId, SessionResetParams, Snapshot, PROTO_VERSION,
+    ChatAbortParams, ChatSendParams, ConnectParams, Features, Frame, Method, MethodOk, ProtoError,
+    Req, ResResult, SessionId, SessionResetParams, Snapshot, PROTO_VERSION,
 };
+use tokio::sync::mpsc;
 
+use crate::sink::RunSink;
 use crate::state::{CachedRes, ServerState};
 
 /// 处理一个请求，返回应答载荷。副作用（事件广播）在此内部完成。
-pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
+///
+/// `out_tx`：本连接的出站帧队列——`chat.send` 用它构造 per-run sink，
+/// 让本轮内联事件（文本/工具/审批）背压式定向回发到这条连接（P0-1）。
+pub async fn handle_req(req: &Req, state: &Arc<ServerState>, out_tx: &mpsc::Sender<Frame>) -> ResResult {
     // 幂等：side-effecting 方法命中缓存直接返回首个结果。
     if let Some(key) = &req.idempotency_key {
         if let Some(cached) = state.idem_get(key) {
@@ -23,7 +28,7 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>) -> ResResult {
 
     let result = match &req.method {
         Method::Connect(p) => handle_connect(p, state),
-        Method::ChatSend(p) => handle_chat_send(p, state).await,
+        Method::ChatSend(p) => handle_chat_send(p, state, out_tx).await,
         Method::ChatAbort(p) => handle_chat_abort(p, state).await,
         Method::ApprovalReply(p) => {
             state.resolve_approval(&p.approval_id, p.allow);
@@ -109,15 +114,18 @@ fn handle_connect(p: &ConnectParams, state: &Arc<ServerState>) -> Result<MethodO
     })
 }
 
-/// M3：提交到主会话车道，返回分配的 run_id；实际处理经事件流推送。
+/// M3：提交到主会话车道，返回分配的 run_id；实际处理经 per-run sink 定向推送。
 async fn handle_chat_send(
     p: &ChatSendParams,
     state: &Arc<ServerState>,
+    out_tx: &mpsc::Sender<Frame>,
 ) -> Result<MethodOk, ProtoError> {
     // 缺省路由到 main；未知 id 由 registry 懒创建（隐式建会话）。
     let session = p.session.clone().unwrap_or_else(SessionId::main);
     let handle = state.registry().get_or_spawn(&session);
-    match handle.submit(p.text.clone()).await {
+    // 本轮内联事件定向回发到这条连接（背压不丢，P0-1）。
+    let sink = RunSink::Conn(out_tx.clone());
+    match handle.submit(p.text.clone(), sink).await {
         Some(run_id) => Ok(MethodOk::ChatSend { run_id }),
         None => Err(ProtoError {
             kind: oc_proto::ErrorKind::Internal,

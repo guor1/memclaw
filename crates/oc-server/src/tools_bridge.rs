@@ -9,54 +9,65 @@
 use std::sync::Arc;
 
 use oc_llm::ToolSpec as LlmToolSpec;
-use oc_proto::{Event, RunId, SessionId, ToolCallId, ToolPhase, ToolStatus};
+use oc_proto::{ApprovalId, Event, RunId, SessionId, ToolCallId, ToolPhase, ToolStatus};
 use oc_tools::types::{ApprovalGate, ApprovalReply, ToolCtx};
 use oc_tools::{ToolError, ToolRegistry};
-use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-/// 审批处理器：run driver 注入，把工具的审批请求转成 client 交互。
-#[async_trait::async_trait]
-pub trait ApprovalHandler: Send + Sync {
-    /// 请求用户审批一个命令。返回是否批准。
-    async fn request(&self, session: &SessionId, run_id: &RunId, summary: &str, command: &str) -> bool;
+use crate::sink::RunSink;
+use crate::state::ApprovalRegistry;
+
+/// 审批 registry entry 的 RAII 清理守卫（P0-3）。
+///
+/// 无论审批以何种方式退出（正常回执 / 超时 / abort / pump 被 abort），
+/// drop 时都从 registry 移除对应 entry，杜绝长期运行下的单调泄漏。
+struct ApprovalGuard {
+    registry: ApprovalRegistry,
+    id: ApprovalId,
 }
 
-/// 基于事件流的审批处理器：发 `Approval` 事件给 client，等 `approval.reply` 回执。
-pub struct EventApprovalHandler {
-    events: broadcast::Sender<Event>,
-    registry: crate::state::ApprovalRegistry,
-}
-
-impl EventApprovalHandler {
-    pub fn new(events: broadcast::Sender<Event>, registry: crate::state::ApprovalRegistry) -> Self {
-        Self { events, registry }
+impl Drop for ApprovalGuard {
+    fn drop(&mut self) {
+        self.registry.remove(&self.id);
     }
 }
 
-#[async_trait::async_trait]
-impl ApprovalHandler for EventApprovalHandler {
-    async fn request(&self, session: &SessionId, run_id: &RunId, summary: &str, command: &str) -> bool {
-        let approval_id = oc_proto::ApprovalId::new(uuid::Uuid::now_v7().to_string());
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.registry.insert(approval_id.clone(), tx);
+/// 发起一次审批：登记回执通道 → 发 `Approval` 事件到 sink → 等回执。
+///
+/// - 事件走 per-run `sink`（与工具/文本事件同序，P0-1）。
+/// - 等待 `select!` 叠加 `cancel`：abort/看门狗触发时立即返回拒绝，不卡住（P0-2 server 侧）。
+/// - `ApprovalGuard` 保证 registry entry 必被清理（P0-3）。
+/// - 通道断开（client 掉线）保守视为拒绝。
+async fn request_approval(
+    registry: &ApprovalRegistry,
+    sink: &RunSink,
+    session: &SessionId,
+    run_id: &RunId,
+    summary: &str,
+    command: &str,
+    cancel: &CancellationToken,
+) -> bool {
+    let approval_id = ApprovalId::new(uuid::Uuid::now_v7().to_string());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    registry.insert(approval_id.clone(), tx);
+    // 从此刻起，任何退出路径都经 guard 清理 registry。
+    let _guard = ApprovalGuard {
+        registry: registry.clone(),
+        id: approval_id.clone(),
+    };
 
-        let _ = self.events.send(Event::Approval {
-            session: session.clone(),
-            approval_id: approval_id.clone(),
-            run_id: run_id.clone(),
-            summary: summary.to_string(),
-            command: command.to_string(),
-        });
+    sink.send(Event::Approval {
+        session: session.clone(),
+        approval_id,
+        run_id: run_id.clone(),
+        summary: summary.to_string(),
+        command: command.to_string(),
+    })
+    .await;
 
-        // 等回执；通道断开（client 掉线）视为拒绝（保守）。
-        match rx.await {
-            Ok(allow) => allow,
-            Err(_) => {
-                self.registry.remove(&approval_id);
-                false
-            }
-        }
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        r = rx => r.unwrap_or(false),
     }
 }
 
@@ -68,7 +79,8 @@ pub type HandoffReceiver =
 #[derive(Clone)]
 pub struct ToolExecutor {
     registry: Arc<ToolRegistry>,
-    approval: Option<Arc<dyn ApprovalHandler>>,
+    /// 待处理审批注册表（与 ServerState 共享；None = 无交互式审批）。
+    approvals: Option<ApprovalRegistry>,
     /// process 工具的后台移交 receiver（serve_with 取出接台账）。
     handoff: Option<HandoffReceiver>,
     /// 每会话工作目录（cd 状态）。工具无状态，cwd 状态在此编排层。
@@ -82,7 +94,7 @@ impl ToolExecutor {
         let initial_cwd = std::env::current_dir().unwrap_or_default();
         Self {
             registry,
-            approval: None,
+            approvals: None,
             handoff: None,
             cwds: Arc::new(dashmap::DashMap::new()),
             initial_cwd,
@@ -106,9 +118,10 @@ impl ToolExecutor {
         h.try_lock().ok()?.take()
     }
 
-    /// 注入审批处理器（交互式审批）。
-    pub fn with_approval(mut self, handler: Arc<dyn ApprovalHandler>) -> Self {
-        self.approval = Some(handler);
+    /// 注入审批注册表（交互式审批）。与 ServerState 共享同一 registry，
+    /// `approval.reply` 经 state 唤醒等待方。
+    pub fn with_approvals(mut self, approvals: ApprovalRegistry) -> Self {
+        self.approvals = Some(approvals);
         self
     }
 
@@ -126,6 +139,7 @@ impl ToolExecutor {
     }
 
     /// 执行一个工具。返回 (状态, 净化后的结果文本)。
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         name: &str,
@@ -134,7 +148,7 @@ impl ToolExecutor {
         run_id: &RunId,
         call_id: &ToolCallId,
         cancel: CancellationToken,
-        events: &broadcast::Sender<Event>,
+        sink: &RunSink,
     ) -> (ToolStatus, String) {
         let Some(tool) = self.registry.get(name) else {
             return (ToolStatus::Error, format!("未知工具: {name}"));
@@ -145,35 +159,43 @@ impl ToolExecutor {
             Err(e) => return (ToolStatus::Error, format!("参数解析失败: {e}")),
         };
 
-        // 工具流式更新 → tool(update) 事件。
+        // 工具流式更新 → tool(update) 事件，经 per-run sink（背压，不丢）。
         let (emit_tx, mut emit_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let ev = events.clone();
+        let sink_pump = sink.clone();
         let sid = session.clone();
         let rid = run_id.clone();
         let cid = call_id.clone();
         let pump = tokio::spawn(async move {
             while let Some(chunk) = emit_rx.recv().await {
-                let _ = ev.send(Event::Tool {
-                    session: sid.clone(),
-                    run_id: rid.clone(),
-                    call_id: cid.clone(),
-                    phase: ToolPhase::Update { chunk },
-                });
+                sink_pump
+                    .send(Event::Tool {
+                        session: sid.clone(),
+                        run_id: rid.clone(),
+                        call_id: cid.clone(),
+                        phase: ToolPhase::Update { chunk },
+                    })
+                    .await;
             }
         });
 
         let policy = tool.policy();
 
-        // 审批门：若注入了 handler，建 ApprovalGate 并起后台任务把请求转给 handler。
-        let (approval_gate, approval_pump) = if let Some(handler) = &self.approval {
+        // 审批门：若共享了 registry，建 ApprovalGate 并起后台任务把请求转成
+        // 「发 Approval 事件到 sink → 等回执/取消」（P0-2 取消 + P0-3 清理内聚于此）。
+        let (approval_gate, approval_pump) = if let Some(approvals) = &self.approvals {
             let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel();
-            let handler = Arc::clone(handler);
+            let approvals = approvals.clone();
+            let sink_appr = sink.clone();
             let sid = session.clone();
             let rid = run_id.clone();
+            let cancel_appr = cancel.clone();
             let pump = tokio::spawn(async move {
                 while let Some(r) = req_rx.recv().await {
                     let oc_tools::types::ApprovalRequest { summary, command, reply } = r;
-                    let allow = handler.request(&sid, &rid, &summary, &command).await;
+                    let allow = request_approval(
+                        &approvals, &sink_appr, &sid, &rid, &summary, &command, &cancel_appr,
+                    )
+                    .await;
                     let _ = reply.send(if allow {
                         ApprovalReply::Allow
                     } else {
