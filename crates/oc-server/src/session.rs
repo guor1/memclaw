@@ -166,50 +166,29 @@ async fn actor_loop(
             SessionCmd::Submit { text, sink, reply } => {
                 let run_id = RunId::new(uuid_v7());
                 info!(session = %sid, run_id = %run_id, chars = text.chars().count(), "submit 受理");
-                // 暂存本轮 sink（起步或排队后起步时取用）。
+                // 暂存本轮 sink（起步时取用）。
                 sinks.insert(run_id.to_string(), sink);
                 let _ = reply.send(run_id.clone());
 
-                // 落库用户消息（重启不失忆）。
-                let t0 = std::time::Instant::now();
-                let est = estimate_tokens(&text);
-                if let Err(e) = store
-                    .writer()
-                    .append_entry(oc_store::NewEntry {
-                        session_id: sid.clone(),
-                        role: oc_store::Role::User,
-                        content: text.clone(),
-                        tokens_est: est,
-                    })
-                    .await
-                {
-                    warn!(error = %e, "落库用户消息失败");
-                    diag.set_error(format!("落库用户消息失败: {e}"));
-                }
-                debug!(session = %sid, run_id = %run_id, ms = t0.elapsed().as_millis(), "落库用户消息完成");
-
-                // 显式"记住…"写入路径（设计 §4.1）：用户显式指令 → curated + Owner + 审计。
-                persist_explicit_memory(&store, &text).await;
-
+                // 注意：**此处不落库用户消息**。落库推迟到该轮真正起步时（见 begin_run）。
+                // 原因：同一 session 并发提交时，排队轮若在 submit 时就落库，会被前一个
+                // 仍在跑的 run 后续追加的 assistant/tool 消息「插队」，导致历史顺序错乱
+                // （B 的 user 消息被 A 的回复埋在中间，序列非法 → provider 400）。
+                // 推迟到起步时落库，则用户消息落库顺序恒等于执行顺序。
                 let turn = QueuedTurn {
                     run_id: run_id.to_string(),
                     text,
                 };
                 match queue.submit(turn) {
                     SubmitResult::Started(t) => {
-                        // run 起步：登记诊断（phase=Starting，占用车道）。
-                        diag.run_start(t.run_id.as_str());
-                        let th = std::time::Instant::now();
-                        let history = load_history(&store, &cfg, &sid).await;
-                        debug!(
-                            session = %sid, run_id = %run_id,
-                            entries = history.len(), ms = th.elapsed().as_millis(),
-                            "历史加载完成"
-                        );
-                        let boot = lane1_bootstrap(&store, &cfg, &t.text).await;
                         info!(session = %sid, run_id = %run_id, "run 起步");
-                        let sink = sinks.remove(&t.run_id).unwrap_or_else(|| default_sink(&events));
-                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, &diag, t, history, boot, sink));
+                        active = Some(
+                            begin_run(
+                                &session_id, &cfg, &provider, &events, &self_tx, &store, &diag,
+                                t, &mut sinks,
+                            )
+                            .await,
+                        );
                     }
                     SubmitResult::Queued => {
                         diag.set_queue_depth(queue.pending_len());
@@ -259,15 +238,18 @@ async fn actor_loop(
                     active = None;
                     // 完成轮的 sink 已随 run 结束失效，清理。
                     sinks.remove(run_id.as_str());
-                    // 取下一个排队轮。
+                    // 取下一个排队轮。此刻前一轮已彻底完成（含其所有消息落库），
+                    // 现在才落库并加载历史，保证顺序正确。
                     if let Some(next) = queue.complete_active() {
                         diag.set_queue_depth(queue.pending_len());
-                        diag.run_start(next.run_id.as_str());
                         info!(session = %sid, run_id = %next.run_id, "起下一排队轮");
-                        let history = load_history(&store, &cfg, &sid).await;
-                        let boot = lane1_bootstrap(&store, &cfg, &next.text).await;
-                        let sink = sinks.remove(&next.run_id).unwrap_or_else(|| default_sink(&events));
-                        active = Some(start_run(&session_id, &cfg, &provider, &events, &self_tx, &store, &diag, next, history, boot, sink));
+                        active = Some(
+                            begin_run(
+                                &session_id, &cfg, &provider, &events, &self_tx, &store, &diag,
+                                next, &mut sinks,
+                            )
+                            .await,
+                        );
                     }
                 }
             }
@@ -292,6 +274,65 @@ async fn actor_loop(
             }
         }
     }
+}
+
+/// 让一个（刚出队、即将占道的）轮真正起步：**此刻**才落库其用户消息、
+/// 加载历史、Lane1 检索，然后 spawn run。
+///
+/// 关键不变式：用户消息的落库发生在「该轮拿到车道、前一轮已彻底完成」之后，
+/// 因此落库顺序恒等于执行顺序——并发提交同一 session 时不会出现「排队轮的
+/// 用户消息被前一轮后续追加的 assistant/tool 消息插队」的顺序错乱（否则历史
+/// 序列非法，provider 400）。
+#[allow(clippy::too_many_arguments)]
+async fn begin_run(
+    session_id: &SessionId,
+    cfg: &SessionConfig,
+    provider: &Arc<dyn Provider>,
+    events: &broadcast::Sender<Event>,
+    self_tx: &mpsc::Sender<SessionCmd>,
+    store: &oc_store::Store,
+    diag: &crate::diag::SessionDiag,
+    turn: QueuedTurn,
+    sinks: &mut std::collections::HashMap<String, crate::sink::RunSink>,
+) -> ActiveRun {
+    let sid = session_id.to_string();
+    diag.run_start(turn.run_id.as_str());
+
+    // 落库用户消息（重启不失忆）。失败仅告警，不阻断 run。
+    let t0 = std::time::Instant::now();
+    let est = estimate_tokens(&turn.text);
+    if let Err(e) = store
+        .writer()
+        .append_entry(oc_store::NewEntry {
+            session_id: sid.clone(),
+            role: oc_store::Role::User,
+            content: turn.text.clone(),
+            tokens_est: est,
+        })
+        .await
+    {
+        warn!(error = %e, "落库用户消息失败");
+        diag.set_error(format!("落库用户消息失败: {e}"));
+    }
+    debug!(session = %sid, run_id = %turn.run_id, ms = t0.elapsed().as_millis(), "落库用户消息完成");
+
+    // 显式"记住…"写入路径（设计 §4.1）：用户显式指令 → curated + Owner + 审计。
+    persist_explicit_memory(store, &turn.text).await;
+
+    // 加载历史（含刚落库的本轮用户消息）+ Lane1 记忆检索。
+    let th = std::time::Instant::now();
+    let history = load_history(store, cfg, &sid).await;
+    debug!(
+        session = %sid, run_id = %turn.run_id,
+        entries = history.len(), ms = th.elapsed().as_millis(),
+        "历史加载完成"
+    );
+    let boot = lane1_bootstrap(store, cfg, &turn.text).await;
+    let sink = sinks
+        .remove(&turn.run_id)
+        .unwrap_or_else(|| default_sink(events));
+
+    start_run(session_id, cfg, provider, events, self_tx, store, diag, turn, history, boot, sink)
 }
 
 /// 启动一个 run 任务（含 panic 隔离），返回可中止句柄。
