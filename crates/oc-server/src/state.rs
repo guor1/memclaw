@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use oc_proto::{ApprovalId, Event, IdemKey, MethodOk};
+use oc_proto::{ApprovalId, Event, IdemKey, InputId, MethodOk};
 use tokio::sync::{broadcast, oneshot};
 
 use crate::registry::SessionRegistry;
@@ -19,6 +19,10 @@ pub struct CachedRes {
 /// 待处理审批注册表（可与审批处理器共享）。
 pub type ApprovalRegistry = Arc<DashMap<ApprovalId, oneshot::Sender<bool>>>;
 
+/// 待处理用户输入注册表（ask_user 的自由文本回执）。
+/// 与 ToolExecutor 共享；`user.reply` 经 state 唤醒等待方。
+pub type InputRegistry = Arc<DashMap<InputId, oneshot::Sender<Option<String>>>>;
+
 pub struct ServerState {
     /// 事件广播源。每个连接 `subscribe()` 得到独立接收端。
     event_tx: broadcast::Sender<Event>,
@@ -28,6 +32,8 @@ pub struct ServerState {
     registry: SessionRegistry,
     /// 待处理审批注册表（与审批处理器共享）。
     approvals: ApprovalRegistry,
+    /// 待处理用户输入注册表（与 ToolExecutor 共享，ask_user 回执唤醒）。
+    inputs: InputRegistry,
     /// 后台任务台账。
     ledger: crate::ledger::TaskLedger,
     /// 持久化句柄（chat.history 查询用）。
@@ -41,10 +47,12 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         event_tx: broadcast::Sender<Event>,
         registry: SessionRegistry,
         approvals: ApprovalRegistry,
+        inputs: InputRegistry,
         ledger: crate::ledger::TaskLedger,
         store: oc_store::Store,
         context_window: u32,
@@ -55,6 +63,7 @@ impl ServerState {
             idem: DashMap::new(),
             registry,
             approvals,
+            inputs,
             ledger,
             store,
             usage: Arc::new(DashMap::new()),
@@ -97,6 +106,13 @@ impl ServerState {
     pub fn resolve_approval(&self, id: &ApprovalId, allow: bool) {
         if let Some((_, tx)) = self.approvals.remove(id) {
             let _ = tx.send(allow);
+        }
+    }
+
+    /// 收到用户输入回执，唤醒等待方（ask_user）。
+    pub fn resolve_input(&self, id: &InputId, text: Option<String>) {
+        if let Some((_, tx)) = self.inputs.remove(id) {
+            let _ = tx.send(text);
         }
     }
 

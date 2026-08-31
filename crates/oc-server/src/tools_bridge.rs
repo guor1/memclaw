@@ -9,13 +9,13 @@
 use std::sync::Arc;
 
 use oc_llm::ToolSpec as LlmToolSpec;
-use oc_proto::{ApprovalId, Event, RunId, SessionId, ToolCallId, ToolPhase, ToolStatus};
-use oc_tools::types::{ApprovalGate, ApprovalReply, ToolCtx};
+use oc_proto::{ApprovalId, Event, InputId, RunId, SessionId, ToolCallId, ToolPhase, ToolStatus};
+use oc_tools::types::{ApprovalGate, ApprovalReply, InputGate, ToolCtx};
 use oc_tools::{ToolError, ToolRegistry};
 use tokio_util::sync::CancellationToken;
 
 use crate::sink::RunSink;
-use crate::state::ApprovalRegistry;
+use crate::state::{ApprovalRegistry, InputRegistry};
 
 /// 审批 registry entry 的 RAII 清理守卫（P0-3）。
 ///
@@ -65,9 +65,67 @@ async fn request_approval(
     })
     .await;
 
+    // 静默等待期：既响应 cancel（abort/看门狗），也监听 client 断连（sink.closed）。
+    // 后者是必需的——审批期间不再 send，无法靠 send 失败探测断连，否则 client 掉线后
+    // run 会干等到空闲看门狗兜底才释放车道（见 conn.rs 收尾说明）。断连时主动 cancel
+    // 整个 run，令其立即收敛，避免拒绝后又在死连接上多打一轮模型。
     tokio::select! {
         _ = cancel.cancelled() => false,
+        _ = sink.closed() => { cancel.cancel(); false }
         r = rx => r.unwrap_or(false),
+    }
+}
+
+/// 输入 registry entry 的 RAII 清理守卫（与 [`ApprovalGuard`] 同源，P0-3）。
+struct InputGuard {
+    registry: InputRegistry,
+    id: InputId,
+}
+
+impl Drop for InputGuard {
+    fn drop(&mut self) {
+        self.registry.remove(&self.id);
+    }
+}
+
+/// 发起一次用户输入请求（ask_user）：登记回执通道 → 发 `UserInput` 事件到 sink → 等回执。
+///
+/// 语义与 [`request_approval`] 完全平行，只是回执是自由文本（`Option<String>`）：
+/// - 事件走 per-run `sink`（与工具/文本事件同序，P0-1）。
+/// - 等待 `select!` 叠加 `cancel`：abort/看门狗触发时立即返回 `None`（P0-2）。
+/// - `InputGuard` 保证 registry entry 必被清理（P0-3）。
+/// - 通道断开（client 掉线）→ `None`（视为未作答）。
+async fn request_input(
+    registry: &InputRegistry,
+    sink: &RunSink,
+    session: &SessionId,
+    run_id: &RunId,
+    prompt: &str,
+    cancel: &CancellationToken,
+) -> Option<String> {
+    let input_id = InputId::new(uuid::Uuid::now_v7().to_string());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    registry.insert(input_id.clone(), tx);
+    let _guard = InputGuard {
+        registry: registry.clone(),
+        id: input_id.clone(),
+    };
+
+    sink.send(Event::UserInput {
+        session: session.clone(),
+        input_id,
+        run_id: run_id.clone(),
+        prompt: prompt.to_string(),
+    })
+    .await;
+
+    // 静默等待期：响应 cancel + 监听 client 断连（sink.closed）。同 request_approval，
+    // ask_user 期间不再 send，断连必须靠 closed() 感知，否则干等到看门狗兜底。
+    // 断连时主动 cancel 整个 run，令其立即收敛。
+    tokio::select! {
+        _ = cancel.cancelled() => None,
+        _ = sink.closed() => { cancel.cancel(); None }
+        r = rx => r.unwrap_or(None),
     }
 }
 
@@ -81,6 +139,8 @@ pub struct ToolExecutor {
     registry: Arc<ToolRegistry>,
     /// 待处理审批注册表（与 ServerState 共享；None = 无交互式审批）。
     approvals: Option<ApprovalRegistry>,
+    /// 待处理用户输入注册表（与 ServerState 共享；None = 无交互式输入）。
+    inputs: Option<InputRegistry>,
     /// process 工具的后台移交 receiver（serve_with 取出接台账）。
     handoff: Option<HandoffReceiver>,
     /// 每会话工作目录（cd 状态）。工具无状态，cwd 状态在此编排层。
@@ -95,6 +155,7 @@ impl ToolExecutor {
         Self {
             registry,
             approvals: None,
+            inputs: None,
             handoff: None,
             cwds: Arc::new(dashmap::DashMap::new()),
             initial_cwd,
@@ -122,6 +183,13 @@ impl ToolExecutor {
     /// `approval.reply` 经 state 唤醒等待方。
     pub fn with_approvals(mut self, approvals: ApprovalRegistry) -> Self {
         self.approvals = Some(approvals);
+        self
+    }
+
+    /// 注入用户输入注册表（交互式 ask_user）。与 ServerState 共享同一 registry，
+    /// `user.reply` 经 state 唤醒等待方。
+    pub fn with_inputs(mut self, inputs: InputRegistry) -> Self {
+        self.inputs = Some(inputs);
         self
     }
 
@@ -208,6 +276,27 @@ impl ToolExecutor {
             (None, None)
         };
 
+        // 输入门：与审批门同构。ask_user 请求 → 发 UserInput 事件 → 等文本回执/取消。
+        let (input_gate, input_pump) = if let Some(inputs) = &self.inputs {
+            let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel();
+            let inputs = inputs.clone();
+            let sink_in = sink.clone();
+            let sid = session.clone();
+            let rid = run_id.clone();
+            let cancel_in = cancel.clone();
+            let pump = tokio::spawn(async move {
+                while let Some(r) = req_rx.recv().await {
+                    let oc_tools::types::InputRequest { prompt, reply } = r;
+                    let text =
+                        request_input(&inputs, &sink_in, &sid, &rid, &prompt, &cancel_in).await;
+                    let _ = reply.send(text);
+                }
+            });
+            (Some(InputGate { request: req_tx }), Some(pump))
+        } else {
+            (None, None)
+        };
+
         // 取该会话当前工作目录（缺省 = 初始目录）。
         let cwd = self
             .cwds
@@ -219,12 +308,16 @@ impl ToolExecutor {
             cancel: cancel.clone(),
             emit: emit_tx,
             approval: approval_gate,
+            input: input_gate,
             cwd,
         };
 
         let result = tokio::time::timeout(policy.timeout, tool.invoke(args_val, cx)).await;
         pump.abort();
         if let Some(p) = approval_pump {
+            p.abort();
+        }
+        if let Some(p) = input_pump {
             p.abort();
         }
 

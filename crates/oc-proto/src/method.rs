@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ApprovalId, CronId, MemoryId, RunId, SessionId, TaskId};
+use crate::ids::{ApprovalId, CronId, InputId, MemoryId, RunId, SessionId, TaskId};
 
 /// 请求方法。`tag = "method", content = "params"`。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -33,6 +33,8 @@ pub enum Method {
     MemorySearch(MemSearchParams),
     /// 审批回执：对 `Approval` 事件的应答。
     ApprovalReply(ApprovalReplyParams),
+    /// 用户输入回执：对 `UserInput` 事件（ask_user 工具）的自由文本应答。
+    UserReply(UserReplyParams),
     Status,
     Health,
     /// 整机诊断快照（`oc debug`）：会话表 + 活跃 run + 队列 + 写线程健康。
@@ -136,6 +138,14 @@ pub struct ApprovalReplyParams {
     pub approval_id: ApprovalId,
     /// true = 批准，false = 拒绝。
     pub allow: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UserReplyParams {
+    pub input_id: InputId,
+    /// 用户输入的自由文本；`None`/空 = 用户取消（未作答）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 // ── 返回体 ──────────────────────────────────────────────────────

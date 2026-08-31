@@ -66,6 +66,8 @@ pub struct ToolCtx {
     pub emit: mpsc::UnboundedSender<String>,
     /// 审批门：exec 用，向 server 请求审批并等回执。
     pub approval: Option<ApprovalGate>,
+    /// 输入门：ask_user 用，向 server 请求用户输入并等自由文本回执。
+    pub input: Option<InputGate>,
     /// 当前会话工作目录：file/sys 相对路径基准、exec 子进程 current_dir。
     /// 由 executor 按 session 注入（见 oc-server tools_bridge）。
     pub cwd: std::path::PathBuf,
@@ -76,7 +78,7 @@ impl ToolCtx {
     pub fn detached(cancel: CancellationToken) -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
         let cwd = std::env::current_dir().unwrap_or_default();
-        Self { cancel, emit: tx, approval: None, cwd }
+        Self { cancel, emit: tx, approval: None, input: None, cwd }
     }
 
     /// 发一条流式更新（失败静默——没人订阅不阻塞）。
@@ -111,5 +113,29 @@ impl ApprovalGate {
             return ApprovalReply::Deny;
         }
         rx.await.unwrap_or(ApprovalReply::Deny)
+    }
+}
+
+/// 输入门句柄：向 server 发起「向用户提问」请求，等用户自由文本回执。
+///
+/// 与 [`ApprovalGate`]（仅 y/n）平行，回执带任意文本；`None` = 用户取消/未作答。
+pub struct InputGate {
+    pub request: mpsc::UnboundedSender<InputRequest>,
+}
+
+/// 一次用户输入请求。
+pub struct InputRequest {
+    pub prompt: String,
+    pub reply: oneshot::Sender<Option<String>>,
+}
+
+impl InputGate {
+    /// 向用户提问并等待回执。通道断开 → `None`（视为未作答）。
+    pub async fn ask(&self, prompt: String) -> Option<String> {
+        let (reply, rx) = oneshot::channel();
+        if self.request.send(InputRequest { prompt, reply }).is_err() {
+            return None;
+        }
+        rx.await.unwrap_or(None)
     }
 }

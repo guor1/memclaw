@@ -53,6 +53,8 @@ pub async fn serve_with(
 
     // 审批注册表：ToolExecutor（发起审批）与 ServerState（回执唤醒）共享。
     let approvals: state::ApprovalRegistry = Arc::new(dashmap::DashMap::new());
+    // 用户输入注册表（ask_user）：同构，ToolExecutor 发起、ServerState 回执唤醒。
+    let inputs: state::InputRegistry = Arc::new(dashmap::DashMap::new());
 
     // 后台任务台账。
     let ledger = ledger::TaskLedger::new(event_tx.clone());
@@ -69,7 +71,8 @@ pub async fn serve_with(
                 }
             });
         }
-        session_cfg.tools = Some(tools.with_approvals(Arc::clone(&approvals)));
+        session_cfg.tools =
+            Some(tools.with_approvals(Arc::clone(&approvals)).with_inputs(Arc::clone(&inputs)));
     }
 
     // proactive 上下文：在 provider 被 session 接管前克隆出所需句柄。
@@ -96,6 +99,7 @@ pub async fn serve_with(
         event_tx,
         registry,
         approvals,
+        inputs,
         ledger,
         store,
         context_window,

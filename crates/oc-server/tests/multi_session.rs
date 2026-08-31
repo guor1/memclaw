@@ -70,7 +70,8 @@ fn ev_session(ev: &Event) -> &SessionId {
         | Event::Proactive { session, .. }
         | Event::Task { session, .. }
         | Event::Usage { session, .. }
-        | Event::Approval { session, .. } => session,
+        | Event::Approval { session, .. }
+        | Event::UserInput { session, .. } => session,
     }
 }
 

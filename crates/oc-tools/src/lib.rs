@@ -1,8 +1,9 @@
 //! oc 工具集（设计 §6）。
 //!
 //! `Tool` trait + 策略管道 + exec 审批门 + 结果净化。
-//! 工具：exec/file/process/web_fetch/web_search/message（ask_user 待协议补自由文本回传）。
+//! 工具：exec/file/process/web_fetch/web_search/message/ask_user。
 
+pub mod ask_user;
 pub mod error;
 pub mod exec;
 pub mod file;

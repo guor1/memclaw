@@ -63,9 +63,15 @@ pub async fn handle(conn: Conn, state: Arc<ServerState>) -> ServerResult<()> {
     // 读循环。
     let read_result = read_loop(&mut reader, &state, &out_tx).await;
 
-    // 收尾：关掉出站，等写任务排空。
+    // 收尾：关掉本连接持有的出站发送端。
     drop(out_tx);
     event_handle.abort();
+    // 关键：不能 `await` 写任务排空——活跃 run 可能仍持有 `out_tx` 的 clone
+    // （RunSink::Conn），只要 run 未收敛，`out_rx` 就不会关闭，写任务会永久挂在
+    // `recv().await` 上，这里的 await 也随之卡死（表现：断连后车道迟迟不释放，
+    // 直到空闲看门狗兜底）。改为主动 abort：写任务的 `write_half` 立即 drop，
+    // run 侧的 `out_tx.closed()` 随即完成 → 静默等待（ask_user/审批）立即收敛。
+    writer_handle.abort();
     let _ = writer_handle.await;
     read_result
 }

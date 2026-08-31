@@ -34,6 +34,10 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>, out_tx: &mpsc::Send
             state.resolve_approval(&p.approval_id, p.allow);
             Ok(MethodOk::Empty)
         }
+        Method::UserReply(p) => {
+            state.resolve_input(&p.input_id, p.text.clone());
+            Ok(MethodOk::Empty)
+        }
         Method::SessionReset(p) => handle_session_reset(p, state).await,
         Method::Compact(p) => handle_compact(p, state).await,
         Method::SessionsList => handle_sessions_list(state).await,

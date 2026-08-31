@@ -41,6 +41,8 @@ pub struct App {
     should_quit: bool,
     /// 待处理审批 id（非 None 时输入区进入 y/n 审批模式）。
     pending_approval: Option<oc_proto::ApprovalId>,
+    /// 待处理用户输入 id（ask_user，非 None 时输入区进入自由文本回答模式）。
+    pending_input: Option<oc_proto::InputId>,
     /// 最近一次 chat.send 分配的 run_id（用于 /stop）。
     active_run: Option<RunId>,
     /// 当前活跃会话（chat.send 归属；事件按此过滤显示）。
@@ -82,6 +84,7 @@ impl App {
             next_req: 1,
             should_quit: false,
             pending_approval: None,
+            pending_input: None,
             active_run: None,
             current_session: SessionId::main(),
             usage_hint: None,
@@ -177,6 +180,34 @@ impl App {
                 _ => return Ok(()), // 审批期间忽略其它输入
             }
         }
+        // 输入模式（ask_user）：自由文本回答。Enter 发送，Esc 取消，Ctrl-C 仍可退出。
+        if self.pending_input.is_some()
+            && !(matches!(code, KeyCode::Char('c')) && mods.contains(KeyModifiers::CONTROL))
+        {
+            match code {
+                KeyCode::Enter => {
+                    let text = self.input.trim().to_string();
+                    // 空 = 取消（未作答）；否则回传文本。
+                    self.reply_input(if text.is_empty() { None } else { Some(text) }).await?;
+                    self.input.clear();
+                    return Ok(());
+                }
+                KeyCode::Esc => {
+                    self.reply_input(None).await?; // 取消
+                    self.input.clear();
+                    return Ok(());
+                }
+                KeyCode::Backspace => {
+                    self.input.pop();
+                    return Ok(());
+                }
+                KeyCode::Char(c) => {
+                    self.input.push(c);
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
         match code {
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => {
                 self.should_quit = true;
@@ -260,6 +291,30 @@ impl App {
         self.msgs.push(Msg {
             who: "系统",
             text: if allow { "已批准".into() } else { "已拒绝".into() },
+        });
+        self.status = "已连接".to_string();
+        Ok(())
+    }
+
+    /// 回执 ask_user 的用户输入（`None` = 取消/未作答）。
+    async fn reply_input(&mut self, text: Option<String>) -> Result<()> {
+        let Some(id) = self.pending_input.take() else {
+            return Ok(());
+        };
+        let req_id = format!("uinput-{}", self.next_req);
+        self.next_req += 1;
+        let req = Req {
+            id: ReqId::new(req_id),
+            method: Method::UserReply(oc_proto::UserReplyParams {
+                input_id: id,
+                text: text.clone(),
+            }),
+            idempotency_key: None,
+        };
+        self.client.send(&Frame::Req(req)).await?;
+        self.msgs.push(Msg {
+            who: "你",
+            text: text.unwrap_or_else(|| "（已取消回答）".into()),
         });
         self.status = "已连接".to_string();
         Ok(())
@@ -412,6 +467,14 @@ impl App {
                 self.pending_approval = Some(approval_id);
                 self.status = "等待审批：按 y 批准 / n 拒绝".to_string();
             }
+            Event::UserInput { input_id, prompt, .. } => {
+                self.msgs.push(Msg {
+                    who: "提问",
+                    text: format!("{prompt}\n  （输入回答后回车；Esc 取消）"),
+                });
+                self.pending_input = Some(input_id);
+                self.status = "助手提问：输入回答后回车 / Esc 取消".to_string();
+            }
             Event::Task { .. } => {}
             Event::Usage { input_tokens, context_window, .. } => {
                 // 实时更新上下文用量提示（显示在状态栏）。
@@ -449,6 +512,7 @@ impl App {
                     "助手" => Color::Green,
                     "主动提醒" => Color::Yellow,
                     "审批" => Color::Red,
+                    "提问" => Color::Blue,
                     "工具" => Color::Magenta,
                     _ => Color::DarkGray,
                 };
@@ -518,7 +582,8 @@ fn event_session(ev: &Event) -> Option<&SessionId> {
         | Event::Proactive { session, .. }
         | Event::Task { session, .. }
         | Event::Usage { session, .. }
-        | Event::Approval { session, .. } => session,
+        | Event::Approval { session, .. }
+        | Event::UserInput { session, .. } => session,
     })
 }
 

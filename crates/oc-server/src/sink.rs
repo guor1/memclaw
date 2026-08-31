@@ -48,4 +48,17 @@ impl RunSink {
             }
         }
     }
+
+    /// 等待下游连接关闭。用于 run 的**静默等待期**（ask_user / 审批：卡在等回执，
+    /// 期间不 send，故无法靠 send 失败探测断连）——在等待的 `select!` 里叠这条，
+    /// client 掉线时立即感知并收敛 run，不必干等到空闲看门狗兜底。
+    ///
+    /// `Conn`：出站队列的接收端（写任务）drop 时完成。`Broadcast`：永久挂起
+    /// （广播无单一下游，测试路径不需要断连收敛）。
+    pub async fn closed(&self) {
+        match self {
+            RunSink::Conn(tx) => tx.closed().await,
+            RunSink::Broadcast(_) => std::future::pending().await,
+        }
+    }
 }

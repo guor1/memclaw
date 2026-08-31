@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ApprovalId, RunId, SessionId, TaskId, ToolCallId};
+use crate::ids::{ApprovalId, InputId, RunId, SessionId, TaskId, ToolCallId};
 use crate::method::TaskState;
 
 /// 服务端主动推送的事件。`tag = "event"`。
@@ -63,6 +63,15 @@ pub enum Event {
         run_id: RunId,
         summary: String,
         command: String,
+    },
+    /// ★用户输入请求（ask_user 工具）：模型主动提问，阻塞 run 等自由文本答复。
+    /// client 收到后应向用户展示 `prompt` 并进入输入态，用 `user.reply` 方法回执。
+    /// 与 `Approval`（仅 y/n）不同，回执带任意文本。
+    UserInput {
+        session: SessionId,
+        input_id: InputId,
+        run_id: RunId,
+        prompt: String,
     },
 }
 
@@ -128,7 +137,7 @@ pub struct TaskUpdate {
 mod tests {
     use super::*;
     use crate::frame::Frame;
-    use crate::ids::{ApprovalId, RunId, SessionId, TaskId, ToolCallId};
+    use crate::ids::{ApprovalId, InputId, RunId, SessionId, TaskId, ToolCallId};
     use crate::method::TaskState;
 
     /// 每个 Event 变体经 Frame 序列化后必须能反序列化回来。
@@ -165,6 +174,12 @@ mod tests {
                 run_id: RunId::new("r"),
                 summary: "s".into(),
                 command: "c".into(),
+            },
+            Event::UserInput {
+                session: s.clone(),
+                input_id: InputId::new("i"),
+                run_id: RunId::new("r"),
+                prompt: "你叫什么名字？".into(),
             },
         ];
         for ev in variants {
