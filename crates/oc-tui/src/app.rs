@@ -50,7 +50,14 @@ pub struct App {
     /// 消息区滚动：距底部的行数偏移。0 = 跟随底部（自动滚到最新消息）；
     /// >0 = 向上回滚查看历史。draw 时按可视高度夹紧。
     scroll_back: u16,
+    /// 「排队中」去抖：发送后若该轮迟迟未起步（未收到 Lifecycle::Start），
+    /// 到此时刻才显示「排队中…」。Some=有一个已提交但未起步的轮在等待此截止点；
+    /// 收到 Start 或该轮终态时清空。避免车道空闲时「排队中」一闪而过。
+    pending_queue_hint: Option<std::time::Instant>,
 }
+
+/// 「排队中…」去抖延迟：发送后超过此时长仍未起步才提示排队。
+const QUEUE_HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl App {
     pub async fn connect(to: &ConnectTo) -> Result<Self> {
@@ -79,6 +86,7 @@ impl App {
             current_session: SessionId::main(),
             usage_hint: None,
             scroll_back: 0,
+            pending_queue_hint: None,
         };
         // 等 hello。
         if let Some(Frame::Res(res)) = app.client.recv().await? {
@@ -111,14 +119,23 @@ impl App {
         while !self.should_quit {
             // 注：draw 需 &mut self（夹紧 scroll_back），下面两处 term.draw 同。
             tokio::select! {
-                // 键盘
-                maybe_key = keys.next() => {
-                    if let Some(Ok(CtEvent::Key(key))) = maybe_key {
-                        // Windows 控制台会同时上报 Press/Release（甚至 Repeat），
-                        // 只处理 Press，否则一次按键被处理多次（字符重复/多空格）。
-                        if key.kind == KeyEventKind::Press {
-                            self.on_key(key.code, key.modifiers).await?;
+                // 终端事件（键盘 / 缩放）
+                maybe_ev = keys.next() => {
+                    match maybe_ev {
+                        Some(Ok(CtEvent::Key(key))) => {
+                            // Windows 控制台会同时上报 Press/Release（甚至 Repeat），
+                            // 只处理 Press，否则一次按键被处理多次（字符重复/多空格）。
+                            if key.kind == KeyEventKind::Press {
+                                self.on_key(key.code, key.modifiers).await?;
+                            }
                         }
+                        // 缩放：强制整屏清屏再重绘，清掉旧尺寸残留（否则输入会串到
+                        // 边框横线上、状态行出现前后帧重影）。ratatui 差量渲染不会
+                        // 自动清除缩放后的陈旧单元格。
+                        Some(Ok(CtEvent::Resize(_, _))) => {
+                            term.clear()?;
+                        }
+                        _ => {}
                     }
                 }
                 // daemon 帧
@@ -130,6 +147,12 @@ impl App {
                             self.connected = false;
                         }
                     }
+                }
+                // 「排队中」去抖到点：截止时仍未起步 → 显示排队提示。
+                // 无待定提示时该分支永久挂起（不参与 select）。
+                _ = sleep_until_opt(self.pending_queue_hint) => {
+                    self.pending_queue_hint = None;
+                    self.status = "排队中…".to_string();
                 }
             }
             term.draw(|f| self.draw(f))?;
@@ -185,6 +208,10 @@ impl App {
                 } else if !text.is_empty() && self.connected {
                     self.msgs.push(Msg { who: "你", text: text.clone() });
                     self.send_chat(text).await?;
+                    // 去抖：不立即显示「排队中…」，只记一个截止点。若 150ms 内收到本轮
+                    // Lifecycle::Start（车道空、秒起步），直接进「助手思考中…」，排队提示
+                    // 从不出现；只有超时仍未起步（真在排队）才显示，避免一闪而过。
+                    self.pending_queue_hint = Some(std::time::Instant::now() + QUEUE_HINT_DELAY);
                 }
                 // 发送后回到底部跟随，确保看到自己的消息与后续回复。
                 self.scroll_back = 0;
@@ -330,9 +357,17 @@ impl App {
         }
         match ev {
             Event::Lifecycle { phase, .. } => match phase {
-                LifecyclePhase::Start => self.status = "助手思考中…".to_string(),
-                LifecyclePhase::End => self.status = "已连接".to_string(),
+                LifecyclePhase::Start => {
+                    // 本轮已起步：取消待定的排队提示，直接进思考态。
+                    self.pending_queue_hint = None;
+                    self.status = "助手思考中…".to_string();
+                }
+                LifecyclePhase::End => {
+                    self.pending_queue_hint = None;
+                    self.status = "已连接".to_string();
+                }
                 LifecyclePhase::Error { message, .. } => {
+                    self.pending_queue_hint = None;
                     self.status = format!("错误: {message}");
                 }
             },
@@ -490,4 +525,12 @@ fn event_session(ev: &Event) -> Option<&SessionId> {
 /// 简易唯一键（避免为 TUI 引入 uuid 依赖）。
 fn uuid_like(n: u64) -> String {
     format!("tui-{}-{}", std::process::id(), n)
+}
+
+/// select 辅助：到给定时刻醒来；`None` 则永久挂起（该 select 分支不参与）。
+async fn sleep_until_opt(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
+        None => std::future::pending().await,
+    }
 }
