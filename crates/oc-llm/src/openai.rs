@@ -5,7 +5,7 @@
 use futures_util::stream::{BoxStream, StreamExt};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::error::{LlmResult, ProviderErr};
 use crate::provider::Provider;
@@ -249,7 +249,33 @@ fn parse_chunk(payload: &str) -> Vec<Delta> {
     }
 
     if out.is_empty() {
-        debug!(payload = %payload, "跳过无法识别的 chunk");
+        // 空输出分三类，**多数是正常的协议噪声，不是错误**——分开打日志避免误导：
+        // ① 并行工具分片（tool_calls[0].index >= 1）：我们只执行 index=0，其余故意忽略
+        //    （见上方注释）。模型一次请求多个并行工具时每个分片都会来一条，量最大。
+        // ② 协议开场白：首个 chunk 常是 `{role:assistant, content:null}`（可能带空
+        //    reasoning_content），OpenAI SSE 标准起手式，无实际内容。
+        // ③ 其它：结构陌生或确实无法识别——这才值得关注。
+        let ignored_parallel_tool = v
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(|t| t.get(0))
+            .and_then(|tc| tc.get("index"))
+            .and_then(|i| i.as_u64())
+            .is_some_and(|idx| idx >= 1);
+        let is_role_preamble = v
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("delta"))
+            .is_some();
+        if ignored_parallel_tool {
+            trace!(payload = %payload, "忽略并行工具分片（index>=1，本轮只执行 index=0）");
+        } else if is_role_preamble {
+            trace!(payload = %payload, "跳过无内容 chunk（协议开场白 / 空分片）");
+        } else {
+            debug!(payload = %payload, "跳过无法识别的 chunk");
+        }
     }
     out
 }
