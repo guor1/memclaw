@@ -26,6 +26,7 @@ fn cfg() -> SessionConfig {
         trigger_threshold: 0.5,
         trigger_max_per_turn: 3,
         intent_defaults: Default::default(),
+        soul_dir: None,
         context_window: 65536,
     }
 }

@@ -98,6 +98,70 @@ pub fn dreaming_gate(cands: &[DreamCandidate], cfg: &DreamCfg) -> Vec<Consolidat
     passed
 }
 
+/// 巩固模型轮的系统提示词（设计 §11.4「巩固模型轮重写 MEMORY.md」）。
+///
+/// 要求模型**重写**而非追加：把零散记忆归并成条目清晰、无重复、无矛盾的清单。
+/// 明确禁止编造——只允许重组输入里已有的事实，否则夜间无人监督的重写会往
+/// 长期记忆里掺入幻觉，而 MEMORY.md 是每轮都注入的 curated 核心。
+pub const CONSOLIDATION_SYSTEM_PROMPT: &str = "\
+你在整理一份长期记忆清单（MEMORY.md）。把输入的零散记忆条目重写成一份干净的 Markdown 清单。
+
+规则：
+1. 只使用输入中已有的事实。**绝对不要**推断、扩写或编造任何未出现的信息。
+2. 合并重复或高度相似的条目；同一主题有矛盾时保留**更具体/更近期**的表述。
+3. 按主题分组，每组一个 `## 小标题`，组内用 `- ` 列出条目。
+4. 每条尽量短，一行一件事。不要加前言、结语、解释或元评论。
+5. 直接输出 Markdown 正文，不要包在代码块里。";
+
+/// 组装巩固模型轮的用户提示（纯函数：给定条目 → 确定性 prompt）。
+///
+/// `existing` 是当前 MEMORY.md 正文（可空）；`items` 是本轮双门通过的记忆文本。
+/// 既有内容一并交给模型，让它**合并**而不是只看新条目——否则重写会丢掉旧记忆。
+pub fn build_consolidation_prompt(existing: &str, items: &[&str]) -> String {
+    let mut s = String::new();
+    if !existing.trim().is_empty() {
+        s.push_str("## 当前 MEMORY.md 内容\n\n");
+        s.push_str(existing.trim());
+        s.push_str("\n\n");
+    }
+    s.push_str("## 本轮新巩固的记忆条目\n\n");
+    for it in items {
+        let t = it.trim();
+        if !t.is_empty() {
+            s.push_str("- ");
+            s.push_str(t);
+            s.push('\n');
+        }
+    }
+    s.push_str("\n请把以上内容重写成一份合并去重后的完整清单。");
+    s
+}
+
+/// MEMORY.md 的写入决策（设计 §11.4「写安全：乐观并发」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WritePlan {
+    /// 文件未被并发修改 → 可安全整体覆盖（原子 rename）。
+    Overwrite,
+    /// 文件在本轮生成期间被改动（用户手编 / 另一进程）→ **不覆盖**，
+    /// 退化为追加到文末，避免吞掉别人的修改。
+    AppendOnly,
+}
+
+/// 乐观并发判定（纯函数）：比对读取时与写入前的内容哈希。
+///
+/// 调用方在**生成前**读一次文件算 `hash_before`，模型生成完、落盘前**再读一次**算
+/// `hash_now`。两者相同说明期间无人动过，可以整体重写；不同则说明有并发写入，
+/// 此时覆盖会丢掉对方的改动，故退化为 append-only。
+///
+/// 纯函数不做 IO：哈希由调用方（server）算好传入。
+pub fn decide_write(hash_before: &str, hash_now: &str) -> WritePlan {
+    if hash_before == hash_now {
+        WritePlan::Overwrite
+    } else {
+        WritePlan::AppendOnly
+    }
+}
+
 /// 单候选双门检查：通过返回 `Ok(())`，否则返回**首个**未过的门（便于审计）。
 pub fn gate_check(c: &DreamCandidate, cfg: &DreamCfg) -> Result<(), GateReject> {
     // 只巩固 episodic 沉淀（curated 已在册）。
@@ -208,5 +272,45 @@ mod tests {
         let cfg = DreamCfg { max_age_secs: 0, ..DreamCfg::default() };
         let ancient = cand("old", Tier::Episodic, Origin::Owner, 0.8, 5, 3650 * 86400);
         assert!(gate_check(&ancient, &cfg).is_ok());
+    }
+
+    #[test]
+    fn decide_write_detects_concurrent_change() {
+        // 哈希未变 → 期间无人动过，可整体重写。
+        assert_eq!(decide_write("abc", "abc"), WritePlan::Overwrite);
+        // 哈希变了 → 有并发写入，覆盖会吞掉对方改动，退化为追加。
+        assert_eq!(decide_write("abc", "xyz"), WritePlan::AppendOnly);
+    }
+
+    #[test]
+    fn consolidation_prompt_includes_existing_and_new() {
+        let p = build_consolidation_prompt("## 旧\n- 老条目", &["新条目 A", "新条目 B"]);
+        // 既有内容必须带上，否则重写会丢掉旧记忆。
+        assert!(p.contains("老条目"), "应包含当前 MEMORY.md 内容: {p}");
+        assert!(p.contains("新条目 A") && p.contains("新条目 B"));
+        assert!(p.contains("重写"), "应给出重写指令");
+    }
+
+    #[test]
+    fn consolidation_prompt_handles_empty_existing() {
+        // 首次巩固（MEMORY.md 为空模板）不应出现空的"当前内容"节。
+        let p = build_consolidation_prompt("   \n  ", &["条目"]);
+        assert!(!p.contains("当前 MEMORY.md 内容"), "空既有内容应跳过该节: {p}");
+        assert!(p.contains("条目"));
+    }
+
+    #[test]
+    fn consolidation_prompt_is_deterministic() {
+        let a = build_consolidation_prompt("x", &["1", "2"]);
+        let b = build_consolidation_prompt("x", &["1", "2"]);
+        assert_eq!(a, b, "同输入必须得同 prompt（可重现）");
+    }
+
+    #[test]
+    fn consolidation_prompt_skips_blank_items() {
+        let p = build_consolidation_prompt("", &["有效", "   ", ""]);
+        assert!(p.contains("- 有效"));
+        // 空条目不该产生空的 "- " 行。
+        assert!(!p.contains("- \n"), "空白条目应被跳过: {p:?}");
     }
 }

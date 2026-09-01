@@ -60,6 +60,9 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         trigger_threshold: cfg.memory.trigger_threshold as f64,
         trigger_max_per_turn: cfg.memory.trigger_max_per_turn as usize,
         context_window: context_window as u32,
+        // soul 目录（设计 §13.1）：dreaming 巩固轮据此重写 MEMORY.md。
+        // 取不到 OC_HOME 时为 None——server 会跳过文件重写，只做 DB 内巩固。
+        soul_dir: crate::paths::oc_home().ok().map(|h| h.join("soul")),
         // standing intent anti-nagging（设计 §12.5）：配置驱动，接上此前的死键。
         intent_defaults: oc_server::IntentDefaults {
             cooldown_secs: cfg.proactive.intent_cooldown_secs as i64,

@@ -50,6 +50,11 @@ pub struct SessionConfig {
     pub context_window: u32,
     /// standing intent 的 anti-nagging 参数（设计 §12.5）。
     pub intent_defaults: IntentDefaults,
+    /// `~/.oc/soul/` 目录（SOUL/USER/MEMORY.md 所在）。
+    ///
+    /// `None` = 不落盘（测试/内存态）：dreaming 只做 DB 内 tier 提升，不重写 MEMORY.md。
+    /// 设计 §13.1；server 本身不解析 OC_HOME，由 CLI 传入。
+    pub soul_dir: Option<std::path::PathBuf>,
 }
 
 /// standing intent 的 anti-nagging 参数（设计 §12.5，源自 `ProactiveConfig`）。

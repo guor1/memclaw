@@ -87,11 +87,15 @@ pub async fn serve_with(
     let context_window = session_cfg.context_window;
     // standing intent 的 anti-nagging 默认值：供 `intent.add` 未指定时填充。
     let intent_defaults = session_cfg.intent_defaults.clone();
+    // dreaming 巩固模型轮要用的 soul 目录与模型名——须在 session_cfg/provider
+    // 被 registry 取走之前克隆出来。
+    let soul_dir = session_cfg.soul_dir.clone();
+    let dream_model = session_cfg.model.clone();
     // 诊断注册表：registry 派发会话级句柄给各 actor，state 侧供 diagnostics 采样。
     let diag = diag::DiagRegistry::new();
     let registry = registry::SessionRegistry::new(
         session_cfg,
-        provider,
+        Arc::clone(&provider),
         event_tx.clone(),
         store.clone(),
         diag.clone(),
@@ -128,10 +132,17 @@ pub async fn serve_with(
     // 心跳 tick：每 tick 卡死诊断扫描 + cron 到期扫描；每 DREAM_EVERY_TICKS 一轮 dreaming。
     let shutdown = CancellationToken::new();
     let scan_registry = state.registry().clone();
+    // 巩固模型轮上下文：仅当配了 soul_dir（有落盘位置）才启用重写 MEMORY.md。
+    let dream_ctx = soul_dir.map(|dir| dreaming::ConsolidateCtx {
+        provider: Arc::clone(&provider),
+        model: dream_model,
+        soul_dir: dir,
+    });
     scheduler::Heartbeat::new(heartbeat_interval).spawn(shutdown.clone(), move |tick| {
         let registry = scan_registry.clone();
         let store = dream_store.clone();
         let pctx = proactive_ctx.clone();
+        let dctx = dream_ctx.clone();
         async move {
             tracing::debug!(tick, "heartbeat：扫描");
             registry.health_scan_all().await;
@@ -142,8 +153,15 @@ pub async fn serve_with(
             // cron 到期触发（失败不阻塞）。
             proactive::cron_scan(&pctx, now).await;
             // dreaming 巩固：稀疏触发（设计 §7.4 夜间/空闲；M5 先按 tick 周期）。
+            // 配了 soul_dir 则额外跑巩固模型轮重写 MEMORY.md（§11.4）。
             if tick % DREAM_EVERY_TICKS == 0 {
-                dreaming::scan(&store, now, &oc_core::dreaming::DreamCfg::default()).await;
+                dreaming::scan_with(
+                    &store,
+                    now,
+                    &oc_core::dreaming::DreamCfg::default(),
+                    dctx.as_ref(),
+                )
+                .await;
             }
         }
     });

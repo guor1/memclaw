@@ -84,6 +84,7 @@ async fn connect_and_echo_roundtrip() {
             trigger_threshold: 0.72,
             trigger_max_per_turn: 3,
             intent_defaults: Default::default(),
+            soul_dir: None,
             context_window: 65536,
         };
         let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
@@ -181,6 +182,7 @@ async fn sessions_list_roundtrip() {
             trigger_threshold: 0.72,
             trigger_max_per_turn: 3,
             intent_defaults: Default::default(),
+            soul_dir: None,
             context_window: 65536,
         };
         let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
@@ -252,6 +254,7 @@ async fn diagnostics_roundtrip() {
             trigger_threshold: 0.72,
             trigger_max_per_turn: 3,
             intent_defaults: Default::default(),
+            soul_dir: None,
             context_window: 65536,
         };
         let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
