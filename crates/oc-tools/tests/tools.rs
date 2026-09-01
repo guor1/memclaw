@@ -34,6 +34,7 @@ async fn exec_dangerous_needs_approval_and_denied() {
         emit: mpsc::unbounded_channel().0,
         approval: Some(ApprovalGate { request: req_tx }),
         input: None,
+        cron: None,
         cwd: std::env::current_dir().unwrap(),
     };
     tokio::spawn(async move {
@@ -57,6 +58,7 @@ async fn exec_dangerous_approved_runs() {
         emit: mpsc::unbounded_channel().0,
         approval: Some(ApprovalGate { request: req_tx }),
         input: None,
+        cron: None,
         cwd: std::env::current_dir().unwrap(),
     };
     // 审批放行；命令本身用无害的 sudo 替身——这里用 echo 触发 needs-approval 的替代。

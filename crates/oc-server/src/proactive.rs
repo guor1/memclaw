@@ -5,6 +5,8 @@
 //!
 //! 判定纯在 core（next_fire / eval_due），起会话/推事件/读写在此。
 //! **失败绝不阻塞主会话**：本模块只告警，不向上传播错误。
+//!
+//! **P1-5 新增**：处理模型的 cron_add 工具调用（校验表达式 + 写库 + 回执）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -157,4 +159,50 @@ async fn run_isolated_turn(ctx: &ProactiveCtx, prompt: &str) -> String {
             String::new()
         }
     }
+}
+
+/// 处理模型的 cron_add 调用（P1-5）：校验表达式 → 写库 → 回执 cron_id 或错误。
+///
+/// 与 `cron_scan` 独立：前者是心跳定期扫描到期；后者是模型主动创建任务。
+/// 调用方：tools_bridge 的 cron gate pump，请求从工具 `cron_add` 发来。
+pub async fn handle_cron_add(
+    ctx: &ProactiveCtx,
+    expr: String,
+    prompt: String,
+    tz: String,
+) -> Result<String, String> {
+    // 校验表达式并算首次触发时间（委托 core，避免写入非法表达式）。
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let next_at = oc_core::proactive::next_fire(&expr, now)
+        .map_err(|e| format!("cron 表达式无效: {}", e))?;
+
+    // 写库。
+    let cron_id = uuid::Uuid::now_v7().to_string();
+    ctx.store
+        .writer()
+        .cron_add(oc_store::NewCron {
+            id: cron_id.clone(),
+            expr: expr.clone(),
+            prompt: prompt.clone(),
+            tz: tz.clone(),
+            next_at,
+        })
+        .await
+        .map_err(|e| format!("写入 cron 失败: {}", e))?;
+
+    // 审计。
+    if let Err(e) = ctx
+        .store
+        .writer()
+        .write_audit("agent".into(), "cron_add".into(), Some(cron_id.clone()))
+        .await
+    {
+        warn!(id = %cron_id, error = %e, "proactive：cron_add 审计失败");
+    }
+
+    info!(id = %cron_id, expr = %expr, tz = %tz, "proactive：cron 已创建");
+    Ok(cron_id)
 }

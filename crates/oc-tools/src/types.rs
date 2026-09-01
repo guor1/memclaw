@@ -56,6 +56,9 @@ impl ToolOutput {
     pub fn err(content: impl Into<String>) -> Self {
         Self { content: content.into(), success: false, background_task: None, new_cwd: None }
     }
+    pub fn text(content: impl Into<String>) -> Self {
+        Self::ok(content)
+    }
 }
 
 /// 工具执行上下文。
@@ -68,6 +71,8 @@ pub struct ToolCtx {
     pub approval: Option<ApprovalGate>,
     /// 输入门：ask_user 用，向 server 请求用户输入并等自由文本回执。
     pub input: Option<InputGate>,
+    /// cron 门：cron_add 用，向 server 创建定时任务（P1-5）。
+    pub cron: Option<CronGate>,
     /// 当前会话工作目录：file/sys 相对路径基准、exec 子进程 current_dir。
     /// 由 executor 按 session 注入（见 oc-server tools_bridge）。
     pub cwd: std::path::PathBuf,
@@ -78,7 +83,7 @@ impl ToolCtx {
     pub fn detached(cancel: CancellationToken) -> Self {
         let (tx, _rx) = mpsc::unbounded_channel();
         let cwd = std::env::current_dir().unwrap_or_default();
-        Self { cancel, emit: tx, approval: None, input: None, cwd }
+        Self { cancel, emit: tx, approval: None, input: None, cron: None, cwd }
     }
 
     /// 发一条流式更新（失败静默——没人订阅不阻塞）。
@@ -137,5 +142,32 @@ impl InputGate {
             return None;
         }
         rx.await.unwrap_or(None)
+    }
+}
+
+/// cron 门句柄：向 server 创建定时任务（P1-5）。
+///
+/// 解耦：工具层不依赖 store / proactive，由编排层（tools_bridge）桥接。
+pub struct CronGate {
+    pub request: mpsc::UnboundedSender<CronRequest>,
+}
+
+/// 一次 cron 创建请求。
+pub struct CronRequest {
+    pub expr: String,
+    pub prompt: String,
+    pub tz: String,
+    /// 回传创建的 cron_id（成功）或错误消息（失败）。
+    pub reply: oneshot::Sender<Result<String, String>>,
+}
+
+impl CronGate {
+    /// 创建定时任务并等待回执。通道断开视为失败。
+    pub async fn add(&self, expr: String, prompt: String, tz: String) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self.request.send(CronRequest { expr, prompt, tz, reply }).is_err() {
+            return Err("cron 请求通道断开".to_string());
+        }
+        rx.await.unwrap_or_else(|_| Err("cron 回执通道断开".to_string()))
     }
 }

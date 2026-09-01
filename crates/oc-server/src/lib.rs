@@ -55,6 +55,8 @@ pub async fn serve_with(
     let approvals: state::ApprovalRegistry = Arc::new(dashmap::DashMap::new());
     // 用户输入注册表（ask_user）：同构，ToolExecutor 发起、ServerState 回执唤醒。
     let inputs: state::InputRegistry = Arc::new(dashmap::DashMap::new());
+    // cron 创建请求通道（P1-5）：模型调 cron_add → 经此通道 → proactive 模块处理。
+    let (cron_tx, cron_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // 后台任务台账。
     let ledger = ledger::TaskLedger::new(event_tx.clone());
@@ -72,7 +74,7 @@ pub async fn serve_with(
             });
         }
         session_cfg.tools =
-            Some(tools.with_approvals(Arc::clone(&approvals)).with_inputs(Arc::clone(&inputs)));
+            Some(tools.with_approvals(Arc::clone(&approvals)).with_inputs(Arc::clone(&inputs)).with_cron(cron_tx.clone()));
     }
 
     // proactive 上下文：在 provider 被 session 接管前克隆出所需句柄。
@@ -112,6 +114,17 @@ pub async fn serve_with(
         diag,
         intent_defaults,
     ));
+
+    // P1-5：消费 cron_add 工具请求，委托 proactive 模块处理（校验 + 写库 + 回执）。
+    let cron_pctx = proactive_ctx.clone();
+    tokio::spawn(async move {
+        let mut rx = cron_rx;
+        while let Some(req) = rx.recv().await {
+            let oc_tools::types::CronRequest { expr, prompt, tz, reply } = req;
+            let result = proactive::handle_cron_add(&cron_pctx, expr, prompt, tz).await;
+            let _ = reply.send(result);
+        }
+    });
 
     // 订阅 Usage 事件，更新每会话最近用量（供 status 查询）。
     let usage_state = Arc::clone(&state);

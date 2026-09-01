@@ -79,10 +79,13 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
         for t in tools {
             prefix.push_str(&format!("- {}: {}\n", t.name, t.description));
         }
-        // 引导优先用结构化工具，减少退化去拼 shell 命令（跨平台易错、绕过校验）。
+        // P1-5：引导优先用结构化工具（特别是 cron_add），避免退化去拼 shell 命令（跨平台易错、绕过校验）。
+        // **定时/延时提醒用 cron_add**，不要用 shell 睡眠阻塞等待（会卡住整个 run、触发超时/loop detection）。
         prefix.push_str(
             "\n优先使用结构化工具完成任务：查看/切换目录用 sys（pwd/cd/now），\
              读写/检索文件用 file（read/write/list/stat/head/tail/grep/glob）。\
+             **定时/延时提醒用 cron_add**（如「12:50 提醒我喝水」），\
+             不要用 shell 睡眠（Start-Sleep / sleep / timeout）阻塞等待——那会卡住整个对话。\
              仅当这些工具都覆盖不到时才用 exec 执行 shell 命令。\n",
         );
     }

@@ -1,9 +1,10 @@
 //! oc 工具集（设计 §6）。
 //!
 //! `Tool` trait + 策略管道 + exec 审批门 + 结果净化。
-//! 工具：exec/file/process/web_fetch/web_search/message/ask_user。
+//! 工具：exec/file/process/web_fetch/web_search/message/ask_user/cron_add。
 
 pub mod ask_user;
+pub mod cron;
 pub mod error;
 pub mod exec;
 pub mod file;

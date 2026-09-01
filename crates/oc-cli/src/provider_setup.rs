@@ -133,6 +133,9 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
     // ask_user：主动向用户提问并阻塞等待回答（交互式输入门经 server 注入）。
     registry.register(Arc::new(oc_tools::ask_user::AskUserTool));
 
+    // cron_add：创建定时任务（P1-5；cron 门经 server 注入）。
+    registry.register(Arc::new(oc_tools::cron::CronTool));
+
     // web_fetch / web_search：联网（需 web-tools feature，默认开）。
     #[cfg(feature = "web-tools")]
     {

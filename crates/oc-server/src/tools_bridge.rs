@@ -141,6 +141,8 @@ pub struct ToolExecutor {
     approvals: Option<ApprovalRegistry>,
     /// 待处理用户输入注册表（与 ServerState 共享；None = 无交互式输入）。
     inputs: Option<InputRegistry>,
+    /// cron 创建请求通道（P1-5；与 ServerState 共享）。
+    cron_tx: Option<tokio::sync::mpsc::UnboundedSender<oc_tools::types::CronRequest>>,
     /// process 工具的后台移交 receiver（serve_with 取出接台账）。
     handoff: Option<HandoffReceiver>,
     /// 每会话工作目录（cd 状态）。工具无状态，cwd 状态在此编排层。
@@ -156,6 +158,7 @@ impl ToolExecutor {
             registry,
             approvals: None,
             inputs: None,
+            cron_tx: None,
             handoff: None,
             cwds: Arc::new(dashmap::DashMap::new()),
             initial_cwd,
@@ -190,6 +193,13 @@ impl ToolExecutor {
     /// `user.reply` 经 state 唤醒等待方。
     pub fn with_inputs(mut self, inputs: InputRegistry) -> Self {
         self.inputs = Some(inputs);
+        self
+    }
+
+    /// 注入 cron 创建请求通道（P1-5）。与 ServerState 共享同一 sender，
+    /// 工具的 `cron_add` 调用经此通道发给 server，由 proactive 调度器处理。
+    pub fn with_cron(mut self, tx: tokio::sync::mpsc::UnboundedSender<oc_tools::types::CronRequest>) -> Self {
+        self.cron_tx = Some(tx);
         self
     }
 
@@ -297,6 +307,11 @@ impl ToolExecutor {
             (None, None)
         };
 
+        // cron 门（P1-5）：模型调 cron_add → 请求进队列 → proactive 调度器落库/调度。
+        let cron_gate = self.cron_tx.as_ref().map(|tx| oc_tools::types::CronGate {
+            request: tx.clone(),
+        });
+
         // 取该会话当前工作目录（缺省 = 初始目录）。
         let cwd = self
             .cwds
@@ -309,6 +324,7 @@ impl ToolExecutor {
             emit: emit_tx,
             approval: approval_gate,
             input: input_gate,
+            cron: cron_gate,
             cwd,
         };
 
