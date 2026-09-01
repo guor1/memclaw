@@ -173,6 +173,38 @@ pub struct CronRow {
     pub enabled: bool,
 }
 
+/// 待写入的一条 standing intent（事件型待办）。
+///
+/// keywords 类型层用 `Vec<String>`，落库拼成空格分隔 TEXT（schema `keywords TEXT`）。
+/// cooldown/budget/expiry 为该条自己的 anti-nagging 参数；调用方（server）用全局
+/// 配置默认或用户指定填入。expiry_at 为绝对 unix 秒；None = 不过期。
+#[derive(Debug, Clone)]
+pub struct NewStandingIntent {
+    pub id: String,
+    /// 触发后注入的提醒正文。
+    pub text: String,
+    /// 词法触发关键词（命中任一即触发）。
+    pub keywords: Vec<String>,
+    pub cooldown_secs: i64,
+    pub budget: u32,
+    /// 过期时间点（unix 秒）；None = 不过期。
+    pub expiry_at: Option<i64>,
+}
+
+/// 已存储的一条 standing intent（含触发判定所需的运行时状态）。
+#[derive(Debug, Clone)]
+pub struct StandingIntentRow {
+    pub id: String,
+    pub text: String,
+    pub keywords: Vec<String>,
+    pub cooldown_secs: i64,
+    pub budget: u32,
+    pub fired_count: u32,
+    pub last_fired_at: Option<i64>,
+    pub expiry_at: Option<i64>,
+    pub created_at: i64,
+}
+
 /// 已存储的记忆（含检索所需字段）。
 #[derive(Debug, Clone)]
 pub struct MemoryRow {

@@ -236,6 +236,97 @@ pub fn cron_mark_fired(conn: &Connection, id: &str, fired_at: i64, next_at: Opti
     Ok(())
 }
 
+/// 当前 unix 秒。standing intent 的时间语义（created/last_fired/expiry）统一用秒，
+/// 与 `oc_core::proactive::allow_fire`（秒级）对齐；不用 `now_millis`（那是 entry 语义）。
+fn now_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// keywords 落库编码：**换行分隔**。空列表 → 空串。
+///
+/// 不用空格分隔：关键词本身可能含空格（`oc intent add "带插头" "business trip"` 里
+/// `business trip` 是**一个**关键词）。空格分隔会在取回时把它劈成两个，于是
+/// `intent_prefilter` 单命中 "trip" 就触发——比用户要求的宽得多。换行不会出现在
+/// 关键词里（编码时把内部空白归一为单空格兜底），故可安全作分隔符。
+fn encode_keywords(kws: &[String]) -> String {
+    kws.iter()
+        // 内部空白归一为单空格：顺手清掉可能混入的换行，保证分隔符唯一。
+        .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|k| !k.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// keywords 取回解码：按换行切分，去空。含空格的关键词整条保留。
+fn decode_keywords(s: Option<String>) -> Vec<String> {
+    s.map(|s| {
+        s.split('\n')
+            .map(|w| w.trim().to_string())
+            .filter(|w| !w.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// 新增一条 standing intent。created_at = now（秒）。
+pub fn intent_add(conn: &Connection, i: &crate::types::NewStandingIntent) -> StoreResult<()> {
+    conn.execute(
+        "INSERT INTO standing_intent(id, text, keywords, cooldown_secs, budget, fired_count, expiry_at, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)",
+        params![
+            i.id,
+            i.text,
+            encode_keywords(&i.keywords),
+            i.cooldown_secs,
+            i.budget,
+            i.expiry_at,
+            now_secs(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// 列出所有 standing intent，按 created_at 升序（早建的在前）。
+pub fn intent_list(conn: &Connection) -> StoreResult<Vec<crate::types::StandingIntentRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, text, keywords, cooldown_secs, budget, fired_count, last_fired_at, expiry_at, created_at
+         FROM standing_intent ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(crate::types::StandingIntentRow {
+            id: r.get(0)?,
+            text: r.get(1)?,
+            keywords: decode_keywords(r.get::<_, Option<String>>(2)?),
+            cooldown_secs: r.get(3)?,
+            budget: r.get::<_, i64>(4)? as u32,
+            fired_count: r.get::<_, i64>(5)? as u32,
+            last_fired_at: r.get(6)?,
+            expiry_at: r.get(7)?,
+            created_at: r.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// 删除一条 standing intent。返回是否删到行。
+pub fn intent_rm(conn: &Connection, id: &str) -> StoreResult<bool> {
+    let n = conn.execute("DELETE FROM standing_intent WHERE id = ?1", params![id])?;
+    Ok(n > 0)
+}
+
+/// 触发后更新：抬 fired_count + 记 last_fired_at（秒）。
+pub fn intent_mark_fired(conn: &Connection, id: &str, fired_at: i64) -> StoreResult<()> {
+    conn.execute(
+        "UPDATE standing_intent SET fired_count = fired_count + 1, last_fired_at = ?2 WHERE id = ?1",
+        params![id, fired_at],
+    )?;
+    Ok(())
+}
+
 /// 取 dreaming 待巩固候选：episodic tier 的记忆（双门判定在 oc-core）。
 ///
 /// 返回字段含 use_count / created_at / last_used_at，供 core 算频次/时间窗门。

@@ -44,6 +44,8 @@ pub struct ServerState {
     context_window: u32,
     /// 运行时诊断注册表（`oc debug` 采样）。
     diag: crate::diag::DiagRegistry,
+    /// standing intent 的 anti-nagging 默认值（`intent.add` 未指定时用）。
+    intent_defaults: crate::session::IntentDefaults,
 }
 
 impl ServerState {
@@ -57,6 +59,7 @@ impl ServerState {
         store: oc_store::Store,
         context_window: u32,
         diag: crate::diag::DiagRegistry,
+        intent_defaults: crate::session::IntentDefaults,
     ) -> Self {
         Self {
             event_tx,
@@ -69,7 +72,13 @@ impl ServerState {
             usage: Arc::new(DashMap::new()),
             context_window,
             diag,
+            intent_defaults,
         }
+    }
+
+    /// standing intent 的 anti-nagging 默认值（源自配置 `[proactive]`）。
+    pub fn intent_defaults(&self) -> &crate::session::IntentDefaults {
+        &self.intent_defaults
     }
 
     /// 模型上下文窗口（token）。

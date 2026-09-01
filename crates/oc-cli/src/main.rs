@@ -37,6 +37,9 @@ enum Command {
     /// 定时任务管理（主动性）。
     #[command(subcommand)]
     Cron(CronCmd),
+    /// 话题触发式待办管理（standing intent，主动性）。
+    #[command(subcommand)]
+    Intent(IntentCmd),
     /// 记忆检索（调试/自省）。
     Memory {
         #[command(subcommand)]
@@ -78,6 +81,37 @@ enum CronCmd {
 }
 
 #[derive(Subcommand)]
+enum IntentCmd {
+    /// 添加话题触发式待办：聊到 KEYWORDS 中任一关键词时，提醒 TEXT。
+    ///
+    /// 与 cron 的区别：cron 到点触发，intent 由**话题命中**触发。
+    /// 例：oc intent add "带转换插头" 出差 德国
+    Add {
+        /// 触发时注入的提醒正文，如 "带转换插头"。
+        text: String,
+        /// 触发关键词，可给多个，命中任一即触发。
+        #[arg(required = true, num_args = 1..)]
+        keywords: Vec<String>,
+        /// 两次提醒的最小间隔（秒）。省略取配置 [proactive] 默认。
+        #[arg(long)]
+        cooldown_secs: Option<i64>,
+        /// 最多提醒几次（用尽即静默）。省略取配置默认。
+        #[arg(long)]
+        budget: Option<u32>,
+        /// 多少天后过期；0 = 不过期。省略取配置默认。
+        #[arg(long)]
+        expiry_days: Option<u32>,
+    },
+    /// 列出所有话题待办（含已触发次数）。
+    List,
+    /// 删除一个话题待办。
+    Rm {
+        /// 待办 id（见 list）。
+        intent_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum MemoryCmd {
     /// 按词法检索记忆。
     Search {
@@ -99,6 +133,15 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Cron(CronCmd::List)) => cli_client::cron_list(),
         Some(Command::Cron(CronCmd::Rm { cron_id })) => cli_client::cron_rm(cron_id),
+        Some(Command::Intent(IntentCmd::Add {
+            text,
+            keywords,
+            cooldown_secs,
+            budget,
+            expiry_days,
+        })) => cli_client::intent_add(text, keywords, cooldown_secs, budget, expiry_days),
+        Some(Command::Intent(IntentCmd::List)) => cli_client::intent_list(),
+        Some(Command::Intent(IntentCmd::Rm { intent_id })) => cli_client::intent_rm(intent_id),
         Some(Command::Memory { cmd: MemoryCmd::Search { query, limit } }) => {
             cli_client::memory_search(query, limit)
         }

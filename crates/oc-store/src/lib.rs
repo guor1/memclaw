@@ -279,4 +279,97 @@ mod tests {
         // 删不存在的返回 false。
         assert!(!w.cron_rm("nope".into()).await.unwrap());
     }
+
+    #[tokio::test]
+    async fn intent_crud_roundtrip() {
+        use crate::types::NewStandingIntent;
+        let store = Store::open_memory().expect("open");
+        let w = store.writer();
+
+        w.intent_add(NewStandingIntent {
+            id: "i1".into(),
+            text: "带转换插头".into(),
+            keywords: vec!["出差".into(), "德国".into()],
+            cooldown_secs: 86_400,
+            budget: 3,
+            expiry_at: Some(999_999),
+        })
+        .await
+        .unwrap();
+
+        let list = w.intent_list().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].text, "带转换插头");
+        // keywords 经空格编码/解码往返不丢。
+        assert_eq!(list[0].keywords, vec!["出差".to_string(), "德国".to_string()]);
+        assert_eq!(list[0].cooldown_secs, 86_400);
+        assert_eq!(list[0].budget, 3);
+        assert_eq!(list[0].fired_count, 0, "新建未触发");
+        assert!(list[0].last_fired_at.is_none());
+        assert_eq!(list[0].expiry_at, Some(999_999));
+        assert!(list[0].created_at > 0, "created_at 应为 unix 秒");
+
+        // 触发一次：fired_count 抬升 + last_fired_at 记录。
+        w.intent_mark_fired("i1".into(), 12_345).await.unwrap();
+        let after = w.intent_list().await.unwrap();
+        assert_eq!(after[0].fired_count, 1);
+        assert_eq!(after[0].last_fired_at, Some(12_345));
+
+        // 再触发一次累加（budget 判定在 core，store 只记账）。
+        w.intent_mark_fired("i1".into(), 23_456).await.unwrap();
+        assert_eq!(w.intent_list().await.unwrap()[0].fired_count, 2);
+
+        // 删除。
+        assert!(w.intent_rm("i1".into()).await.unwrap());
+        assert!(w.intent_list().await.unwrap().is_empty());
+        assert!(!w.intent_rm("nope".into()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn intent_empty_keywords_roundtrip() {
+        use crate::types::NewStandingIntent;
+        let store = Store::open_memory().expect("open");
+        let w = store.writer();
+        // 空 keywords（编码为空串）+ 不过期（expiry_at=None）不应炸。
+        w.intent_add(NewStandingIntent {
+            id: "i2".into(),
+            text: "无关键词".into(),
+            keywords: vec![],
+            cooldown_secs: 0,
+            budget: 1,
+            expiry_at: None,
+        })
+        .await
+        .unwrap();
+        let list = w.intent_list().await.unwrap();
+        assert!(list[0].keywords.is_empty());
+        assert!(list[0].expiry_at.is_none());
+    }
+
+    /// 含空格的关键词必须整条往返，不能被劈开。
+    ///
+    /// 回归：keywords 曾用空格分隔落库，于是 `business trip` 取回时变成两条
+    /// （"business" / "trip"），单命中 "trip" 就触发——比用户指定的宽得多。
+    #[tokio::test]
+    async fn intent_keyword_with_space_survives_roundtrip() {
+        use crate::types::NewStandingIntent;
+        let store = Store::open_memory().expect("open");
+        let w = store.writer();
+        w.intent_add(NewStandingIntent {
+            id: "i3".into(),
+            text: "带转换插头".into(),
+            keywords: vec!["business trip".into(), "德国".into()],
+            cooldown_secs: 0,
+            budget: 1,
+            expiry_at: None,
+        })
+        .await
+        .unwrap();
+        let list = w.intent_list().await.unwrap();
+        assert_eq!(
+            list[0].keywords,
+            vec!["business trip".to_string(), "德国".to_string()],
+            "含空格的关键词应整条保留，不得被劈成两条"
+        );
+    }
 }

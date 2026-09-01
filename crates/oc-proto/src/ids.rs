@@ -45,6 +45,10 @@ string_id!(
 );
 string_id!(ToolCallId);
 string_id!(CronId);
+string_id!(
+    /// 一条 standing intent（事件型待办）的 id。
+    IntentId
+);
 string_id!(TaskId);
 string_id!(MemoryId);
 string_id!(

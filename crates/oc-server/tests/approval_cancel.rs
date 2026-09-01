@@ -58,6 +58,7 @@ async fn abort_interrupts_pending_approval_and_cleans_registry() {
         skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
+        intent_defaults: Default::default(),
         context_window: 65536,
     };
 

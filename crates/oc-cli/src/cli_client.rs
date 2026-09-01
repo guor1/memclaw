@@ -131,6 +131,77 @@ pub fn cron_rm(cron_id: String) -> Result<()> {
     })
 }
 
+pub fn intent_add(
+    text: String,
+    keywords: Vec<String>,
+    cooldown_secs: Option<i64>,
+    budget: Option<u32>,
+    expiry_days: Option<u32>,
+) -> Result<()> {
+    run_once(async move {
+        let mut c = connect().await?;
+        let ok = call(
+            &mut c,
+            Method::IntentAdd(oc_proto::IntentAddParams {
+                text,
+                keywords,
+                cooldown_secs,
+                budget,
+                expiry_days,
+            }),
+        )
+        .await?;
+        if let MethodOk::IntentAdd { intent_id } = ok {
+            println!("已添加话题待办：{}", intent_id.as_str());
+        }
+        Ok(())
+    })
+}
+
+pub fn intent_list() -> Result<()> {
+    run_once(async move {
+        let mut c = connect().await?;
+        let ok = call(&mut c, Method::IntentList).await?;
+        if let MethodOk::IntentList(list) = ok {
+            if list.is_empty() {
+                println!("（无话题待办）");
+            } else {
+                for i in list {
+                    let last = i
+                        .last_fired_at
+                        .map(|t| t.to_string())
+                        .unwrap_or_else(|| "从未".into());
+                    println!(
+                        "{}  触发词:[{}]  已提醒:{}/{}  上次:{}  «{}»",
+                        i.id.as_str(),
+                        i.keywords.join(" "),
+                        i.fired_count,
+                        i.budget,
+                        last,
+                        i.text
+                    );
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+pub fn intent_rm(intent_id: String) -> Result<()> {
+    run_once(async move {
+        let mut c = connect().await?;
+        call(
+            &mut c,
+            Method::IntentRm(oc_proto::IntentRmParams {
+                intent_id: oc_proto::IntentId::new(intent_id),
+            }),
+        )
+        .await?;
+        println!("已删除。");
+        Ok(())
+    })
+}
+
 pub fn memory_search(query: String, limit: Option<u32>) -> Result<()> {
     run_once(async move {
         let mut c = connect().await?;

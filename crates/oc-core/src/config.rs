@@ -149,6 +149,19 @@ pub struct ProactiveConfig {
     pub intent_budget: u32,
     #[garde(range(min = 1))]
     pub intent_expiry_days: u32,
+    /// standing intent 每轮最多注入条数（设计 §12.5 ≤3）。
+    ///
+    /// 与上面三项的分工：cooldown/budget/expiry 是**每条待办自己的**参数（落库在
+    /// standing_intent 行上，上面三项仅作新建时的默认值）；本项是**每轮全局**上限，
+    /// 防止一条消息同时命中多条待办时把上下文塞满。
+    #[garde(range(min = 1))]
+    #[serde(default = "default_intent_max_per_turn")]
+    pub intent_max_per_turn: u32,
+}
+
+/// `intent_max_per_turn` 的 serde 默认（老配置文件缺该键时用）。
+fn default_intent_max_per_turn() -> u32 {
+    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -242,6 +255,7 @@ impl Config {
                 intent_cooldown_secs: 86_400,
                 intent_budget: 3,
                 intent_expiry_days: 90,
+                intent_max_per_turn: 3,
             },
             tools: ToolsConfig {
                 exec_timeout_secs: 120,
@@ -304,5 +318,16 @@ mod tests {
         // 手填 → 优先。
         m.context_window = Some(100_000);
         assert_eq!(m.effective_context_window(), 100_000);
+    }
+
+    /// `intent_max_per_turn` 缺失时回落到默认 3（设计 §12.5 ≤3）。
+    ///
+    /// P1-2 新增了该键；已存在的 config.toml 里没有它，若无 serde default 会解析
+    /// 失败、daemon 起不来。TOML 层面的端到端回归在 oc-cli::config_loader（那里才
+    /// 有 toml 依赖与真实加载路径），此处只锁默认值本身。
+    #[test]
+    fn intent_max_per_turn_defaults_to_three() {
+        assert_eq!(default_intent_max_per_turn(), 3);
+        assert_eq!(Config::default_local().proactive.intent_max_per_turn, 3);
     }
 }

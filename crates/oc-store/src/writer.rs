@@ -90,6 +90,22 @@ pub enum WriteCmd {
         next_at: Option<i64>,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    IntentAdd {
+        intent: crate::types::NewStandingIntent,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    IntentList {
+        reply: oneshot::Sender<StoreResult<Vec<crate::types::StandingIntentRow>>>,
+    },
+    IntentRm {
+        id: String,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    IntentMarkFired {
+        id: String,
+        fired_at: i64,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     /// 用于优雅关停。
     Shutdown,
 }
@@ -255,6 +271,30 @@ impl Writer {
         self.send(WriteCmd::CronMarkFired { id, fired_at, next_at, reply })?;
         rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
     }
+
+    pub async fn intent_add(&self, intent: crate::types::NewStandingIntent) -> StoreResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::IntentAdd { intent, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
+    pub async fn intent_list(&self) -> StoreResult<Vec<crate::types::StandingIntentRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::IntentList { reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
+    pub async fn intent_rm(&self, id: String) -> StoreResult<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::IntentRm { id, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
+    pub async fn intent_mark_fired(&self, id: String, fired_at: i64) -> StoreResult<()> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::IntentMarkFired { id, fired_at, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
 }
 
 fn open_writer_conn(db: Option<PathBuf>) -> StoreResult<Connection> {
@@ -318,6 +358,18 @@ fn run_loop(conn: Connection, rx: &mut mpsc::UnboundedReceiver<WriteCmd>) {
             }
             WriteCmd::CronMarkFired { id, fired_at, next_at, reply } => {
                 let _ = reply.send(ops::cron_mark_fired(&conn, &id, fired_at, next_at));
+            }
+            WriteCmd::IntentAdd { intent, reply } => {
+                let _ = reply.send(ops::intent_add(&conn, &intent));
+            }
+            WriteCmd::IntentList { reply } => {
+                let _ = reply.send(ops::intent_list(&conn));
+            }
+            WriteCmd::IntentRm { id, reply } => {
+                let _ = reply.send(ops::intent_rm(&conn, &id));
+            }
+            WriteCmd::IntentMarkFired { id, fired_at, reply } => {
+                let _ = reply.send(ops::intent_mark_fired(&conn, &id, fired_at));
             }
             WriteCmd::Shutdown => break,
         }

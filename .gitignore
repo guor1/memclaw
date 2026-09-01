@@ -15,3 +15,4 @@ Cargo.lock.orig
 # 编辑器 / OS
 .DS_Store
 *.swp
+settings.yaml

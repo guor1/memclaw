@@ -38,6 +38,7 @@ heartbeat_secs = 60
 intent_cooldown_secs = 86400
 intent_budget = 3
 intent_expiry_days = 90
+intent_max_per_turn = 3
 
 [tools]
 exec_timeout_secs = 120
@@ -133,4 +134,44 @@ fn write_if_absent(path: &Path, content: &str, created: &mut Vec<String>) -> Res
             .unwrap_or_default(),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oc_core::Config;
+
+    /// `oc onboard` 生成的配置必须能被自己解析并通过校验。
+    ///
+    /// 这是新手第一步，模板一旦漂移（新增配置键忘了同步）就会「装完就起不来」。
+    #[test]
+    fn onboard_template_parses_and_validates() {
+        let cfg: Config =
+            toml::from_str(DEFAULT_CONFIG).expect("onboard 模板必须是合法且完整的 Config");
+        assert!(cfg.validate_shape().is_ok(), "onboard 模板必须通过校验");
+    }
+
+    /// 仓库根的 config.example.toml 同样必须可解析、可校验，且与 onboard 模板不漂移。
+    #[test]
+    fn example_config_parses_and_matches_onboard_defaults() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.example.toml");
+        let text = fs::read_to_string(path).expect("读取 config.example.toml");
+        let example: Config = toml::from_str(&text).expect("示例配置必须是合法 Config");
+        assert!(example.validate_shape().is_ok(), "示例配置必须通过校验");
+
+        // 两份模板的 [proactive] 应一致——避免用户按示例填了 onboard 不认的键（或反之）。
+        let onboard: Config = toml::from_str(DEFAULT_CONFIG).expect("onboard 模板");
+        assert_eq!(
+            example.proactive.intent_max_per_turn, onboard.proactive.intent_max_per_turn,
+            "示例配置与 onboard 模板的 intent_max_per_turn 不应漂移"
+        );
+        assert_eq!(
+            example.proactive.intent_cooldown_secs, onboard.proactive.intent_cooldown_secs,
+            "示例配置与 onboard 模板的 intent_cooldown_secs 不应漂移"
+        );
+        assert_eq!(
+            example.proactive.intent_budget, onboard.proactive.intent_budget,
+            "示例配置与 onboard 模板的 intent_budget 不应漂移"
+        );
+    }
 }

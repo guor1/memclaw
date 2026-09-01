@@ -26,6 +26,7 @@ fn cfg(soul: &str) -> SessionConfig {
         skills: Vec::new(),
         trigger_threshold: 0.72,
         trigger_max_per_turn: 3,
+        intent_defaults: Default::default(),
         context_window: 65536,
     }
 }

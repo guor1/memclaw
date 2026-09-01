@@ -22,7 +22,7 @@ pub mod tools_bridge;
 pub mod transport;
 
 pub use error::{ServerError, ServerResult};
-pub use session::SessionConfig;
+pub use session::{IntentDefaults, SessionConfig};
 pub use state::ServerState;
 pub use transport::TransportKind;
 
@@ -85,6 +85,8 @@ pub async fn serve_with(
     };
 
     let context_window = session_cfg.context_window;
+    // standing intent 的 anti-nagging 默认值：供 `intent.add` 未指定时填充。
+    let intent_defaults = session_cfg.intent_defaults.clone();
     // 诊断注册表：registry 派发会话级句柄给各 actor，state 侧供 diagnostics 采样。
     let diag = diag::DiagRegistry::new();
     let registry = registry::SessionRegistry::new(
@@ -104,6 +106,7 @@ pub async fn serve_with(
         store,
         context_window,
         diag,
+        intent_defaults,
     ));
 
     // 订阅 Usage 事件，更新每会话最近用量（供 status 查询）。

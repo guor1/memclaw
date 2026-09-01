@@ -82,6 +82,9 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>, out_tx: &mpsc::Send
         Method::CronAdd(p) => handle_cron_add(p, state).await,
         Method::CronList => handle_cron_list(state).await,
         Method::CronRm(p) => handle_cron_rm(p, state).await,
+        Method::IntentAdd(p) => handle_intent_add(p, state).await,
+        Method::IntentList => handle_intent_list(state).await,
+        Method::IntentRm(p) => handle_intent_rm(p, state).await,
         Method::MemorySearch(p) => handle_memory_search(p, state).await,
     };
 
@@ -281,6 +284,96 @@ async fn handle_cron_rm(
         .map_err(|e| ProtoError {
             kind: oc_proto::ErrorKind::Internal,
             message: format!("删除 cron 失败: {e}"),
+        })?;
+    Ok(MethodOk::Empty)
+}
+
+/// 新增 standing intent（话题触发式待办）：校验 → 算 expiry_at → 落库。
+///
+/// anti-nagging 三项未指定时取配置 `[proactive]` 的默认值（见 `ServerState::intent_defaults`）。
+async fn handle_intent_add(
+    p: &oc_proto::IntentAddParams,
+    state: &Arc<ServerState>,
+) -> Result<MethodOk, ProtoError> {
+    let text = p.text.trim();
+    if text.is_empty() {
+        return Err(ProtoError {
+            kind: oc_proto::ErrorKind::BadRequest,
+            message: "intent text 不能为空".into(),
+        });
+    }
+    let keywords: Vec<String> = p
+        .keywords
+        .iter()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect();
+    if keywords.is_empty() {
+        return Err(ProtoError {
+            kind: oc_proto::ErrorKind::BadRequest,
+            message: "至少需一个非空 keyword（话题触发靠关键词命中）".into(),
+        });
+    }
+
+    let defaults = state.intent_defaults();
+    let now = now_secs();
+    let expiry_days = p.expiry_days.unwrap_or(defaults.expiry_days);
+    // 0 天 = 不过期（expiry_at = None）。
+    let expiry_at = if expiry_days == 0 {
+        None
+    } else {
+        Some(now + expiry_days as i64 * 86_400)
+    };
+
+    let id = format!("intent-{}", uuid::Uuid::now_v7());
+    let intent = oc_store::NewStandingIntent {
+        id: id.clone(),
+        text: text.to_string(),
+        keywords,
+        cooldown_secs: p.cooldown_secs.unwrap_or(defaults.cooldown_secs),
+        budget: p.budget.unwrap_or(defaults.budget),
+        expiry_at,
+    };
+    state.store().writer().intent_add(intent).await.map_err(|e| ProtoError {
+        kind: oc_proto::ErrorKind::Internal,
+        message: format!("新增 standing intent 失败: {e}"),
+    })?;
+    Ok(MethodOk::IntentAdd { intent_id: oc_proto::IntentId::new(id) })
+}
+
+async fn handle_intent_list(state: &Arc<ServerState>) -> Result<MethodOk, ProtoError> {
+    let rows = state.store().writer().intent_list().await.map_err(|e| ProtoError {
+        kind: oc_proto::ErrorKind::Internal,
+        message: format!("列出 standing intent 失败: {e}"),
+    })?;
+    let out = rows
+        .into_iter()
+        .map(|r| oc_proto::IntentSpec {
+            id: oc_proto::IntentId::new(r.id),
+            text: r.text,
+            keywords: r.keywords,
+            cooldown_secs: r.cooldown_secs,
+            budget: r.budget,
+            fired_count: r.fired_count,
+            last_fired_at: r.last_fired_at,
+            expiry_at: r.expiry_at,
+        })
+        .collect();
+    Ok(MethodOk::IntentList(out))
+}
+
+async fn handle_intent_rm(
+    p: &oc_proto::IntentRmParams,
+    state: &Arc<ServerState>,
+) -> Result<MethodOk, ProtoError> {
+    state
+        .store()
+        .writer()
+        .intent_rm(p.intent_id.to_string())
+        .await
+        .map_err(|e| ProtoError {
+            kind: oc_proto::ErrorKind::Internal,
+            message: format!("删除 standing intent 失败: {e}"),
         })?;
     Ok(MethodOk::Empty)
 }

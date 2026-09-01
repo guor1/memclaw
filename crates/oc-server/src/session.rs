@@ -48,6 +48,36 @@ pub struct SessionConfig {
     pub trigger_max_per_turn: usize,
     /// 模型上下文窗口（token），随 Usage 事件推给 client 显示。
     pub context_window: u32,
+    /// standing intent 的 anti-nagging 参数（设计 §12.5）。
+    pub intent_defaults: IntentDefaults,
+}
+
+/// standing intent 的 anti-nagging 参数（设计 §12.5，源自 `ProactiveConfig`）。
+///
+/// 两类语义要分清：
+/// - `cooldown_secs` / `budget` / `expiry_days`：**每条待办自己的**参数，落库在
+///   `standing_intent` 行上、由 `allow_fire` 逐条判定。这里的值只是 `intent.add`
+///   未显式指定时的**默认值**。
+/// - `max_per_turn`：**每轮全局**注入上限，防一条消息命中多条待办时塞满上下文。
+#[derive(Debug, Clone)]
+pub struct IntentDefaults {
+    pub cooldown_secs: i64,
+    pub budget: u32,
+    /// 多少天后过期；0 = 不过期。
+    pub expiry_days: u32,
+    pub max_per_turn: usize,
+}
+
+impl Default for IntentDefaults {
+    /// 设计 §12.5 默认：cooldown 24h / budget 3 / 90 天过期 / ≤3 条每轮。
+    fn default() -> Self {
+        Self {
+            cooldown_secs: 24 * 3600,
+            budget: 3,
+            expiry_days: 90,
+            max_per_turn: 3,
+        }
+    }
 }
 
 /// 发给 session actor 的命令。
@@ -327,7 +357,10 @@ async fn begin_run(
         entries = history.len(), ms = th.elapsed().as_millis(),
         "历史加载完成"
     );
-    let boot = lane1_bootstrap(store, cfg, &turn.text).await;
+    let mut boot = lane1_bootstrap(store, cfg, &turn.text).await;
+    // standing intent 触发（设计 §12.3）：命中话题的待办注入隐藏上下文提醒模型。
+    // 与 Lane1 记忆共用 bootstrap 注入管线；失败绝不阻塞回复。
+    boot.extend(intent_scan(store, cfg, &turn.text).await);
     let sink = sinks
         .remove(&turn.run_id)
         .unwrap_or_else(|| default_sink(events));
@@ -707,4 +740,126 @@ async fn lane1_bootstrap(
             text: c.text.clone(),
         })
         .collect()
+}
+
+/// standing intent 触发扫描（设计 §4.5(f) / §12.3）。
+///
+/// 「话题触发式待办」：入站消息词法命中某条待办的关键词 → 套 anti-nagging
+/// （cooldown/budget/expiry，逐条用该行自己的参数）→ 允许则注入隐藏上下文提醒
+/// 模型、并抬 fired_count；拒绝则**静默跳过**（不打扰用户）。
+///
+/// 与 cron（到点触发）互补：cron 走隔离子会话（[crate::proactive]），本函数只在
+/// 主会话入站路径触发——天然避免 cron/dreaming 子会话误注入。
+///
+/// **失败绝不阻塞回复**：任何一步出错返回空、仅告警（同 [`lane1_bootstrap`] 规格）。
+async fn intent_scan(
+    store: &oc_store::Store,
+    cfg: &SessionConfig,
+    user_msg: &str,
+) -> Vec<oc_core::prompt::MemLine> {
+    use oc_core::memory::{intent_prefilter, StandingIntent};
+    use oc_core::proactive::{allow_fire, FireDecision, IntentState, NagCfg};
+
+    let rows = match store.writer().intent_list().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "standing intent：读取失败，跳过本轮触发");
+            return Vec::new();
+        }
+    };
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    // 词法预筛（纯函数）：命中任一关键词即候选。
+    let intents: Vec<StandingIntent> = rows
+        .iter()
+        .map(|r| StandingIntent { id: r.id.clone(), keywords: r.keywords.clone() })
+        .collect();
+    let hit_ids = intent_prefilter(user_msg, &intents);
+    if hit_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let now = now_secs();
+    let mut out = Vec::new();
+    for id in hit_ids {
+        // 每轮注入条数上限（anti-nagging，设计 §12.5 ≤3）。
+        let cap = cfg.intent_defaults.max_per_turn;
+        if out.len() >= cap {
+            debug!(cap, "standing intent：达每轮注入上限，其余顺延");
+            break;
+        }
+        let Some(row) = rows.iter().find(|r| r.id == id) else {
+            continue;
+        };
+
+        // anti-nagging 判定用**该行自己的**参数（各条可不同）。
+        //
+        // expiry 语义换算：store 存**绝对时间点** expiry_at，core 收**距创建的时长**
+        // expiry_secs。注意 `NagCfg::expiry_secs == 0` 表示「永不过期」，所以
+        // expiry_at ≤ created_at（创建即过期 / 已过期）**不能**夹成 0——那会把
+        // 「已过期」翻转成「永不过期」。这种退化情形直接判过期跳过。
+        // expiry_at > created_at 的正常情形交给 allow_fire 判（now-created > 时长）。
+        let expiry_secs = match row.expiry_at {
+            None => 0, // 不过期
+            Some(at) => {
+                let span = at - row.created_at;
+                if span <= 0 {
+                    debug!(intent = %row.id, "standing intent：已过期，跳过");
+                    continue;
+                }
+                span
+            }
+        };
+        let state = IntentState {
+            created_secs: row.created_at,
+            last_fired_secs: row.last_fired_at,
+            fired_count: row.fired_count,
+        };
+        let nag = NagCfg {
+            cooldown_secs: row.cooldown_secs,
+            budget: row.budget,
+            expiry_secs,
+        };
+
+        match allow_fire(&state, now, &nag) {
+            FireDecision::Allow => {}
+            FireDecision::Deny(reason) => {
+                // 静默跳过：这正是 anti-nagging 的目的，不向用户暴露。
+                debug!(intent = %row.id, ?reason, "standing intent：命中但拒绝触发");
+                continue;
+            }
+        }
+
+        // 注入隐藏上下文：标注「待办提醒」以与记忆区分，让模型自然提起。
+        out.push(oc_core::prompt::MemLine {
+            key: format!("intent-{}", row.id),
+            text: format!("待办提醒（用户此前交代，现因话题命中而唤起）：{}", row.text),
+        });
+        info!(intent = %row.id, fired = row.fired_count + 1, "standing intent：触发注入");
+
+        // 记账：抬 fired_count + 记 last_fired_at。失败仅告警——宁可多提醒一次，
+        // 也不因记账失败而丢掉这次提醒（已注入的不回滚）。
+        if let Err(e) = store.writer().intent_mark_fired(row.id.clone(), now).await {
+            warn!(intent = %row.id, error = %e, "standing intent：触发记账失败");
+        }
+        // 审计（与 cron 触发同规格）。
+        if let Err(e) = store
+            .writer()
+            .write_audit("intent".into(), "fire".into(), Some(row.id.clone()))
+            .await
+        {
+            warn!(intent = %row.id, error = %e, "standing intent：审计失败");
+        }
+    }
+    out
+}
+
+/// 当前 unix 秒（standing intent / anti-nagging 的时间语义）。
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

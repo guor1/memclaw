@@ -34,9 +34,12 @@ trigger_max_per_turn = 3
 
 [proactive]
 heartbeat_secs = 60
-intent_cooldown_secs = 86400
-intent_budget = 3
-intent_expiry_days = 90
+# 下面三项是「话题触发式待办」(standing intent) 新建时的默认 anti-nagging 参数，
+# 每条待办落库后各自独立生效（oc intent add 可逐条覆盖）。
+intent_cooldown_secs = 86400   # 同一条待办两次提醒的最小间隔
+intent_budget = 3              # 同一条待办最多提醒几次，用尽即静默
+intent_expiry_days = 90        # 多少天后过期；0 = 不过期
+intent_max_per_turn = 3        # 每轮最多注入几条待办（防一条消息命中多条塞满上下文）
 
 [tools]
 exec_timeout_secs = 120

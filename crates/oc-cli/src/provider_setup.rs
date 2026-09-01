@@ -60,6 +60,13 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         trigger_threshold: cfg.memory.trigger_threshold as f64,
         trigger_max_per_turn: cfg.memory.trigger_max_per_turn as usize,
         context_window: context_window as u32,
+        // standing intent anti-nagging（设计 §12.5）：配置驱动，接上此前的死键。
+        intent_defaults: oc_server::IntentDefaults {
+            cooldown_secs: cfg.proactive.intent_cooldown_secs as i64,
+            budget: cfg.proactive.intent_budget,
+            expiry_days: cfg.proactive.intent_expiry_days,
+            max_per_turn: cfg.proactive.intent_max_per_turn as usize,
+        },
     };
 
     // 解引用 api_key。

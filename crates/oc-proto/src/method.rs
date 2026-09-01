@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ApprovalId, CronId, InputId, MemoryId, RunId, SessionId, TaskId};
+use crate::ids::{ApprovalId, CronId, InputId, IntentId, MemoryId, RunId, SessionId, TaskId};
 
 /// 请求方法。`tag = "method", content = "params"`。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -27,6 +27,10 @@ pub enum Method {
     CronAdd(CronAddParams),
     CronList,
     CronRm(CronRmParams),
+    /// 添加 standing intent（话题触发式待办）。side-effecting。
+    IntentAdd(IntentAddParams),
+    IntentList,
+    IntentRm(IntentRmParams),
     TasksList,
     TasksCancel(TaskCancelParams),
     /// 记忆检索（调试/自省）。
@@ -55,6 +59,8 @@ pub enum MethodOk {
     History(Vec<Entry>),
     CronAdd { cron_id: CronId },
     CronList(Vec<CronSpec>),
+    IntentAdd { intent_id: IntentId },
+    IntentList(Vec<IntentSpec>),
     Tasks(Vec<TaskView>),
     MemorySearch(Vec<MemHit>),
     Sessions(Vec<SessionView>),
@@ -119,6 +125,32 @@ pub struct CronAddParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CronRmParams {
     pub cron_id: CronId,
+}
+
+/// 新增 standing intent 的参数。
+///
+/// anti-nagging 三项可省略：省略则用服务端全局默认（`ProactiveConfig`）。
+/// 与 cron 不同，standing intent 不带时间表达式——它由**话题命中**触发。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct IntentAddParams {
+    /// 触发后注入的提醒正文（如"带转换插头"）。
+    pub text: String,
+    /// 词法触发关键词，命中任一即触发（如 ["出差", "德国"]）。
+    pub keywords: Vec<String>,
+    /// 两次触发最小间隔（秒）；省略取服务端默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_secs: Option<i64>,
+    /// 触发次数上限；省略取服务端默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<u32>,
+    /// 多少天后过期；省略取服务端默认，0 = 不过期。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct IntentRmParams {
+    pub intent_id: IntentId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -213,6 +245,21 @@ pub struct CronSpec {
     pub tz: String,
     pub enabled: bool,
     pub next_at: Option<i64>,
+}
+
+/// 一条 standing intent 的对外视图（含触发记账，供 `oc intent list` 展示）。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct IntentSpec {
+    pub id: IntentId,
+    pub text: String,
+    pub keywords: Vec<String>,
+    pub cooldown_secs: i64,
+    pub budget: u32,
+    /// 已触发次数（budget 用尽即静默）。
+    pub fired_count: u32,
+    pub last_fired_at: Option<i64>,
+    /// 过期时间点（unix 秒）；None = 不过期。
+    pub expiry_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
