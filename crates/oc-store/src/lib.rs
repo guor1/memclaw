@@ -184,6 +184,7 @@ mod tests {
             keywords: Some("简洁 回复".into()),
             importance: 0.8,
             content_hash: "h1".into(),
+            pref_key: None,
         })
         .await
         .unwrap();
@@ -202,6 +203,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_pref_key_roundtrip_and_lookup() {
+        use crate::types::{NewMemory, Origin, Tier};
+        let store = Store::open_memory().expect("open");
+        let w = store.writer();
+
+        let mk = |id: &str, text: &str, key: Option<&str>| NewMemory {
+            id: id.into(),
+            tier: Tier::Curated,
+            origin: Origin::Owner,
+            text: text.into(),
+            keywords: None,
+            importance: 0.8,
+            content_hash: format!("h-{id}"),
+            pref_key: key.map(|k| k.to_string()),
+        };
+
+        w.upsert_memory(mk("p1", "我用 VS Code", Some("编辑器"))).await.unwrap();
+        w.upsert_memory(mk("p2", "我用 macOS", Some("操作系统"))).await.unwrap();
+        w.upsert_memory(mk("m1", "周三有例会", None)).await.unwrap();
+
+        // 按主题查只得该主题的条目。
+        let editors = w.memory_by_pref_key("编辑器".into()).await.unwrap();
+        assert_eq!(editors.len(), 1, "只应查到编辑器主题");
+        assert_eq!(editors[0].id, "p1");
+        assert_eq!(editors[0].pref_key.as_deref(), Some("编辑器"), "pref_key 应往返");
+
+        // 无此主题返回空。
+        assert!(w.memory_by_pref_key("编程语言".into()).await.unwrap().is_empty());
+
+        // pref_key=None 的普通记忆不会被任何主题查到。
+        let all_keys = ["编辑器", "操作系统", "编程语言"];
+        for k in all_keys {
+            let rows = w.memory_by_pref_key(k.into()).await.unwrap();
+            assert!(!rows.iter().any(|r| r.id == "m1"), "非偏好记忆不应出现在主题查询里");
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_memory_removes_row() {
+        use crate::types::{NewMemory, Origin, Tier};
+        let store = Store::open_memory().expect("open");
+        let w = store.writer();
+        w.upsert_memory(NewMemory {
+            id: "d1".into(),
+            tier: Tier::Curated,
+            origin: Origin::Owner,
+            text: "待删".into(),
+            keywords: None,
+            importance: 0.5,
+            content_hash: "hd".into(),
+            pref_key: Some("编辑器".into()),
+        })
+        .await
+        .unwrap();
+
+        assert!(w.delete_memory("d1".into()).await.unwrap(), "应删到行");
+        assert!(w.memory_by_pref_key("编辑器".into()).await.unwrap().is_empty());
+        assert!(!w.delete_memory("nope".into()).await.unwrap(), "删不存在应返回 false");
+    }
+
+    #[tokio::test]
     async fn dream_promote_and_audit_chain() {
         use crate::types::{NewMemory, Origin, Tier};
         let store = Store::open_memory().expect("open");
@@ -216,6 +278,7 @@ mod tests {
             keywords: None,
             importance: 0.7,
             content_hash: "h1".into(),
+            pref_key: None,
         })
         .await
         .unwrap();

@@ -626,13 +626,22 @@ fn tokenize(msg: &str) -> Vec<String> {
     terms
 }
 
-/// 显式记忆写入（设计 §4.1）：识别"记住…"指令 → 写 curated 记忆 + 审计。
+/// 显式记忆写入（设计 §4.1 + §4.5(e)）：识别"记住…"指令 → 写 curated 记忆 + 审计。
 ///
 /// origin 走 core::classify_origin(UserExplicit) = Owner（唯一产生 Owner 的路径）。
 /// id/hash 用内容派生，天然去重（同内容多次"记住"upsert 同一行）。
+///
+/// **两条路径**（P1-3）：
+/// - 内容能归到偏好主题（`extract_pref_key` 命中）→ 走 [`supersede`] 判定，
+///   同主题的新值**就地替换**旧值（"我改用 Neovim" 顶掉 "我用 VS Code"）。
+/// - 归不到主题 → 走原路径（upsert，靠内容哈希去重），行为不变。
+///
 /// **失败仅告警，不阻塞回复**。
 async fn persist_explicit_memory(store: &oc_store::Store, user_msg: &str) {
-    use oc_core::memory::{classify_origin, detect_explicit_memory, WriteSource};
+    use oc_core::memory::{
+        classify_origin, detect_explicit_memory, extract_pref_key, supersede, Pref, SupersedePlan,
+        WriteSource,
+    };
 
     let Some(explicit) = detect_explicit_memory(user_msg) else {
         return;
@@ -640,6 +649,46 @@ async fn persist_explicit_memory(store: &oc_store::Store, user_msg: &str) {
     let origin = classify_origin(WriteSource::UserExplicit); // = Owner
     let hash = content_hash(&explicit.content);
     let id = format!("mem-{hash}");
+
+    // 偏好主题判定（纯函数，保守：只认明确主题，未命中则 None）。
+    let pref_key = extract_pref_key(&explicit.content);
+
+    // 命中主题 → 查同主题既有偏好，让 core 判 replace/add/ignore。
+    // 查询失败不放弃写入：退化成 Add（宁可多留一条，也不因读失败丢掉用户的话）。
+    let mut to_delete: Option<String> = None;
+    if let Some(key) = &pref_key {
+        match store.writer().memory_by_pref_key(key.clone()).await {
+            Ok(rows) => {
+                let existing: Vec<Pref> = rows
+                    .iter()
+                    .map(|r| Pref {
+                        id: r.id.clone(),
+                        key: key.clone(),
+                        value: r.text.clone(),
+                    })
+                    .collect();
+                let incoming = Pref {
+                    id: id.clone(),
+                    key: key.clone(),
+                    value: explicit.content.clone(),
+                };
+                match supersede(&existing, &incoming) {
+                    SupersedePlan::Ignore => {
+                        debug!(key = %key, "偏好未变化，跳过写入");
+                        return;
+                    }
+                    SupersedePlan::Add => {}
+                    SupersedePlan::Replace { existing_id } => {
+                        // 同主题旧值待清理。注意**先写新、后删旧**（见下方顺序说明）。
+                        to_delete = Some(existing_id);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, key = %key, "偏好查询失败，退化为直接写入");
+            }
+        }
+    }
 
     let mem = oc_store::NewMemory {
         id: id.clone(),
@@ -654,12 +703,40 @@ async fn persist_explicit_memory(store: &oc_store::Store, user_msg: &str) {
         keywords: None,
         importance: 0.8, // 用户显式指定 → 高重要度。
         content_hash: hash,
+        pref_key: pref_key.clone(),
     };
 
     if let Err(e) = store.writer().upsert_memory(mem).await {
         warn!(error = %e, "显式记忆写入失败");
         return;
     }
+
+    // 删旧偏好（supersede Replace）。**顺序刻意是先写新、后删旧**：
+    // 反过来若中途失败会两头空（旧的删了、新的没写进去，用户的偏好凭空消失）。
+    // 当前顺序最坏情况是新旧短暂并存，下一轮 supersede 会收敛，不丢数据。
+    //
+    // 边界：新旧内容哈希相同时 id 也相同，upsert 已就地更新同一行，此时不能删
+    // （会把刚写的删掉）。同值本应被 Ignore 拦住，这里再挡一层。
+    if let Some(old_id) = to_delete {
+        if old_id == id {
+            debug!(id = %id, "新旧同 id，upsert 已覆盖，跳过删除");
+        } else {
+            match store.writer().delete_memory(old_id.clone()).await {
+                Ok(_) => {
+                    info!(old = %old_id, new = %id, key = ?pref_key, "偏好就地替换");
+                    if let Err(e) = store
+                        .writer()
+                        .write_audit("owner".into(), "supersede".into(), Some(old_id))
+                        .await
+                    {
+                        warn!(error = %e, "偏好替换审计失败");
+                    }
+                }
+                Err(e) => warn!(error = %e, old = %old_id, "旧偏好删除失败（新值已写入）"),
+            }
+        }
+    }
+
     if let Err(e) = store
         .writer()
         .write_audit("owner".into(), "remember".into(), Some(id))

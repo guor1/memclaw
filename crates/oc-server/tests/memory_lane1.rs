@@ -58,6 +58,7 @@ async fn curated_memory_injected_on_relevant_message() {
         keywords: Some("回复 简洁".into()),
         importance: 0.9,
         content_hash: "h".into(),
+        pref_key: None,
     })
     .await
     .unwrap();
@@ -92,6 +93,7 @@ async fn irrelevant_message_does_not_inject() {
         keywords: Some("登山".into()),
         importance: 0.9,
         content_hash: "h".into(),
+        pref_key: None,
     })
     .await
     .unwrap();

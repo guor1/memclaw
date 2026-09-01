@@ -91,6 +91,17 @@ CREATE TABLE kv (
 );
 "#;
 
+/// v2：偏好主题列（P1-3，设计 §4.5(e) User model supersede）。
+///
+/// `supersede` 要按主题查同类既有偏好（"编辑器" 下已记了什么），故加 `pref_key`。
+/// NULL = 非偏好类记忆（走原有的内容哈希去重路径），既有行升级后即为 NULL。
+///
+/// `ALTER TABLE ADD COLUMN` 是 SQLite 最安全的 DDL：不重建表、不动既有数据。
+pub const V2: &str = r#"
+ALTER TABLE memory ADD COLUMN pref_key TEXT;
+CREATE INDEX idx_memory_pref_key ON memory(pref_key);
+"#;
+
 /// sqlite-vec 虚表（feature `sqlite-vec`）。维度随 embedding 模型，暂定 768。
 #[cfg(feature = "sqlite-vec")]
 pub const V1_VEC: &str = r#"

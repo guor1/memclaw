@@ -67,6 +67,14 @@ pub enum WriteCmd {
         id: String,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    MemoryByPrefKey {
+        key: String,
+        reply: oneshot::Sender<StoreResult<Vec<crate::types::MemoryRow>>>,
+    },
+    DeleteMemory {
+        id: String,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
     WriteAudit {
         actor: String,
         action: String,
@@ -232,6 +240,20 @@ impl Writer {
         rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
     }
 
+    /// 按偏好主题取既有偏好（供 supersede 判冲突）。
+    pub async fn memory_by_pref_key(&self, key: String) -> StoreResult<Vec<crate::types::MemoryRow>> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::MemoryByPrefKey { key, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
+    /// 删除一条记忆（supersede 的 Replace 清旧偏好）。
+    pub async fn delete_memory(&self, id: String) -> StoreResult<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WriteCmd::DeleteMemory { id, reply })?;
+        rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
+    }
+
     pub async fn write_audit(
         &self,
         actor: String,
@@ -343,6 +365,12 @@ fn run_loop(conn: Connection, rx: &mut mpsc::UnboundedReceiver<WriteCmd>) {
             }
             WriteCmd::PromoteMemory { id, reply } => {
                 let _ = reply.send(ops::promote_memory(&conn, &id));
+            }
+            WriteCmd::MemoryByPrefKey { key, reply } => {
+                let _ = reply.send(ops::memory_by_pref_key(&conn, &key));
+            }
+            WriteCmd::DeleteMemory { id, reply } => {
+                let _ = reply.send(ops::delete_memory(&conn, &id));
             }
             WriteCmd::WriteAudit { actor, action, payload, reply } => {
                 let _ = reply.send(ops::write_audit(&conn, &actor, &action, payload.as_deref()));

@@ -210,6 +210,66 @@ pub fn supersede(existing: &[Pref], incoming: &Pref) -> SupersedePlan {
     SupersedePlan::Add
 }
 
+/// 偏好主题词表：`(归一化 key, 触发词)`。命中任一触发词即归入该主题。
+///
+/// 词表**刻意小而明确**。见 [`extract_pref_key`] 的保守性说明。
+/// 触发词一律小写（匹配前把输入也转小写）。
+const PREF_TOPICS: &[(&str, &[&str])] = &[
+    (
+        "编辑器",
+        &[
+            "vs code", "vscode", "neovim", "nvim", "vim", "emacs", "sublime",
+            "jetbrains", "intellij", "编辑器", "ide",
+        ],
+    ),
+    (
+        "操作系统",
+        &[
+            "windows", "macos", "mac os", "linux", "ubuntu", "debian",
+            "操作系统", "系统是", "系统用",
+        ],
+    ),
+    (
+        "编程语言",
+        &[
+            "rust", "python", "java", "golang", "go 语言", "typescript",
+            "javascript", "c++", "编程语言", "主力语言", "写代码用",
+        ],
+    ),
+    (
+        "回复风格",
+        &["简洁", "详细", "回复风格", "别啰嗦", "长话短说", "说重点"],
+    ),
+    (
+        "回复语言",
+        &["中文", "英文", "english", "回复语言", "用中文", "用英文"],
+    ),
+    ("称呼", &["叫我", "称呼我", "我的名字"]),
+];
+
+/// 从自由文本抽偏好主题 key（设计 §4.5(e) 的前置步骤）。
+///
+/// [`supersede`] 需要 key 才能判「同主题冲突」，但用户说的是自由文本
+/// （"我改用 Neovim 了"）。本函数把文本归到预置主题上，让
+/// "我用 VS Code" 与 "我改用 Neovim" 落到同一个 key（"编辑器"）从而互相替换。
+///
+/// **保守**：只认词表内的明确主题；未命中返回 `None`，调用方应退回普通记忆写入
+/// （append + 内容哈希去重），**不要**猜。因为 [`SupersedePlan::Replace`] 会删掉
+/// 旧条目——误判两条无关记忆为「同主题」会真的丢信息，代价远高于漏判
+/// （漏判只是多留一条冗余记忆）。
+///
+/// **纯词法**：不调模型。确定性（同输入必得同 key，可重现、可单测）、零延迟、
+/// 零 token。代价是覆盖面有限；漏判的主题后续扩词表即可，或等向量语义（P2）。
+///
+/// 多主题同时命中时，返回**词表中靠前**的那个（词表顺序即优先级），保证确定性。
+pub fn extract_pref_key(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    PREF_TOPICS
+        .iter()
+        .find(|(_, triggers)| triggers.iter().any(|t| lower.contains(t)))
+        .map(|(key, _)| key.to_string())
+}
+
 /// 一条 standing intent（事件型待办）。
 #[derive(Debug, Clone)]
 pub struct StandingIntent {
@@ -356,6 +416,37 @@ mod tests {
         // 新 key → 新增
         let novel = Pref { id: "new".into(), key: "语言".into(), value: "中文".into() };
         assert_eq!(supersede(&existing, &novel), SupersedePlan::Add);
+    }
+
+    #[test]
+    fn extract_pref_key_matches_known_topics() {
+        // 同主题的不同表述必须归到同一 key——这正是 supersede 能判冲突的前提。
+        assert_eq!(extract_pref_key("我用 VS Code 写代码").as_deref(), Some("编辑器"));
+        assert_eq!(extract_pref_key("我改用 Neovim 了").as_deref(), Some("编辑器"));
+        // 大小写不敏感。
+        assert_eq!(extract_pref_key("我用 VSCODE").as_deref(), Some("编辑器"));
+        assert_eq!(extract_pref_key("我现在用 macOS").as_deref(), Some("操作系统"));
+        assert_eq!(extract_pref_key("主力语言是 Rust").as_deref(), Some("编程语言"));
+        assert_eq!(extract_pref_key("回复简洁一点").as_deref(), Some("回复风格"));
+        assert_eq!(extract_pref_key("叫我老王").as_deref(), Some("称呼"));
+    }
+
+    #[test]
+    fn extract_pref_key_returns_none_for_non_pref() {
+        // 非偏好类内容不得误判——误判会让无关记忆互相覆盖而丢信息。
+        assert_eq!(extract_pref_key("周三下午有例会"), None);
+        assert_eq!(extract_pref_key("房东电话 138xxxx"), None);
+        assert_eq!(extract_pref_key("出差要带转换插头"), None);
+        assert_eq!(extract_pref_key(""), None);
+    }
+
+    #[test]
+    fn extract_pref_key_is_deterministic_on_multi_hit() {
+        // 多主题命中时按词表顺序取靠前的（编辑器 在 操作系统 之前），保证可重现。
+        let k = extract_pref_key("我在 Windows 上用 VS Code");
+        assert_eq!(k.as_deref(), Some("编辑器"));
+        // 重复调用结果稳定。
+        assert_eq!(extract_pref_key("我在 Windows 上用 VS Code"), k);
     }
 
     #[test]

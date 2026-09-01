@@ -9,7 +9,7 @@ use crate::error::{StoreError, StoreResult};
 use crate::schema;
 
 /// 当前目标 schema 版本。新增迁移时 +1 并在 [`step`] 中追加分支。
-pub const TARGET_VERSION: u32 = 1;
+pub const TARGET_VERSION: u32 = 2;
 
 /// 从当前 `user_version` 前向迁移到 [`TARGET_VERSION`]。
 pub fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
@@ -46,6 +46,11 @@ fn step(conn: &Connection, version: u32) -> StoreResult<()> {
             conn.execute_batch(schema::V1_VEC)?;
             Ok(())
         }
+        // P1-3：memory 加 pref_key（偏好主题），供 supersede 查同主题既有项。
+        2 => {
+            conn.execute_batch(schema::V2)?;
+            Ok(())
+        }
         other => Err(StoreError::Migration(format!(
             "no migration step defined for version {other}"
         ))),
@@ -74,5 +79,47 @@ mod tests {
         conn.pragma_update(None, "user_version", (TARGET_VERSION + 1) as i64)
             .unwrap();
         assert!(run_migrations(&mut conn).is_err());
+    }
+
+    /// v1 老库升到 v2：既有数据必须完好，新列为 NULL。
+    ///
+    /// 这是用户机上真实发生的路径（P1-3 之前建的库）。若 v2 迁移写坏，
+    /// 用户升级后会丢记忆——比功能不可用严重得多，故单独锁住。
+    #[test]
+    fn migration_v1_to_v2_preserves_existing_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+
+        // 造一个只到 v1 的库。
+        {
+            let tx = conn.transaction().unwrap();
+            step(&tx, 1).unwrap();
+            tx.pragma_update(None, "user_version", 1i64).unwrap();
+            tx.commit().unwrap();
+        }
+        // v1 时期写入的一条记忆（那时还没有 pref_key 列）。
+        conn.execute(
+            "INSERT INTO memory(id, tier, origin, text, importance, created_at, content_hash)
+             VALUES('old-1', 'curated', 'owner', '我用 VS Code', 0.8, 1000, 'h1')",
+            [],
+        )
+        .unwrap();
+
+        // 升级到最新。
+        run_migrations(&mut conn).unwrap();
+        let v: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v as u32, TARGET_VERSION, "应升到目标版本");
+
+        // 既有行仍在、内容未变、新列为 NULL。
+        let (text, pref): (String, Option<String>) = conn
+            .query_row(
+                "SELECT text, pref_key FROM memory WHERE id = 'old-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("v1 时期的行升级后必须还在");
+        assert_eq!(text, "我用 VS Code", "既有内容不得被迁移改动");
+        assert_eq!(pref, None, "新列对既有行应为 NULL（非偏好类，走原去重路径）");
     }
 }

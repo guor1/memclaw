@@ -148,6 +148,10 @@ pub struct NewMemory {
     pub keywords: Option<String>,
     pub importance: f64,
     pub content_hash: String,
+    /// 偏好主题（P1-3，设计 §4.5(e)）。`Some` = 该条是偏好，参与 supersede
+    /// （同主题的新值就地替换旧值）；`None` = 普通记忆，走内容哈希去重。
+    /// 由 `oc_core::memory::extract_pref_key` 判定，调用方填入。
+    pub pref_key: Option<String>,
 }
 
 /// 待写入的一条定时任务。
@@ -217,4 +221,6 @@ pub struct MemoryRow {
     pub last_used_at: Option<i64>,
     pub use_count: i64,
     pub content_hash: String,
+    /// 偏好主题；`None` = 非偏好类记忆。见 [`NewMemory::pref_key`]。
+    pub pref_key: Option<String>,
 }

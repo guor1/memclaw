@@ -164,11 +164,12 @@ pub fn compact_with_summary(
 /// upsert 一条记忆（按 id）。
 pub fn upsert_memory(conn: &Connection, m: &NewMemory) -> StoreResult<()> {
     conn.execute(
-        "INSERT INTO memory(id, tier, origin, text, keywords, importance, created_at, content_hash)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO memory(id, tier, origin, text, keywords, importance, created_at, content_hash, pref_key)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
            text=excluded.text, keywords=excluded.keywords,
-           importance=excluded.importance, content_hash=excluded.content_hash",
+           importance=excluded.importance, content_hash=excluded.content_hash,
+           pref_key=excluded.pref_key",
         params![
             m.id,
             m.tier.as_str(),
@@ -177,7 +178,8 @@ pub fn upsert_memory(conn: &Connection, m: &NewMemory) -> StoreResult<()> {
             m.keywords,
             m.importance,
             now_millis(),
-            m.content_hash
+            m.content_hash,
+            m.pref_key
         ],
     )?;
     Ok(())
@@ -333,7 +335,7 @@ pub fn intent_mark_fired(conn: &Connection, id: &str, fired_at: i64) -> StoreRes
 /// 按 use_count 降序取前 `limit` 条（先看反复用到的）。
 pub fn dream_candidates(conn: &Connection, limit: i64) -> StoreResult<Vec<MemoryRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, tier, origin, text, importance, created_at, last_used_at, use_count, content_hash
+        "SELECT id, tier, origin, text, importance, created_at, last_used_at, use_count, content_hash, pref_key
          FROM memory WHERE tier = 'episodic'
          ORDER BY use_count DESC, created_at ASC
          LIMIT ?1",
@@ -349,6 +351,7 @@ pub fn dream_candidates(conn: &Connection, limit: i64) -> StoreResult<Vec<Memory
             last_used_at: r.get(6)?,
             use_count: r.get(7)?,
             content_hash: r.get(8)?,
+            pref_key: r.get(9)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -418,8 +421,9 @@ pub fn search_candidates(
     limit: i64,
 ) -> StoreResult<Vec<MemoryRow>> {
     // 构造 OR LIKE 条件（词法粗筛）。无词则取最近的。
+    // 列顺序必须与下方 query_map 的取值下标一致（含 pref_key 在第 9 位）。
     let mut sql = String::from(
-        "SELECT id, tier, origin, text, importance, created_at, last_used_at, use_count, content_hash
+        "SELECT id, tier, origin, text, importance, created_at, last_used_at, use_count, content_hash, pref_key
          FROM memory WHERE 1=1",
     );
     if let Some(t) = tier_filter {
@@ -454,7 +458,43 @@ pub fn search_candidates(
             last_used_at: r.get(6)?,
             use_count: r.get(7)?,
             content_hash: r.get(8)?,
+            pref_key: r.get(9)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// 按偏好主题取既有偏好（P1-3，供 `supersede` 判同主题冲突）。
+///
+/// 只看 curated tier：偏好属于 curated（用户显式交代），episodic 的情节记忆
+/// 不参与 supersede。按 created_at 升序（早建的在前，替换时优先命中最早那条）。
+pub fn memory_by_pref_key(conn: &Connection, key: &str) -> StoreResult<Vec<MemoryRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, tier, origin, text, importance, created_at, last_used_at, use_count, content_hash, pref_key
+         FROM memory WHERE pref_key = ?1 AND tier = 'curated'
+         ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(params![key], |r| {
+        Ok(MemoryRow {
+            id: r.get(0)?,
+            tier: Tier::from_str(&r.get::<_, String>(1)?),
+            origin: Origin::from_str(&r.get::<_, String>(2)?),
+            text: r.get(3)?,
+            importance: r.get(4)?,
+            created_at: r.get(5)?,
+            last_used_at: r.get(6)?,
+            use_count: r.get(7)?,
+            content_hash: r.get(8)?,
+            pref_key: r.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// 删除一条记忆（P1-3：supersede 的 Replace 用来清掉被取代的旧偏好）。
+///
+/// 返回是否删到行。
+pub fn delete_memory(conn: &Connection, id: &str) -> StoreResult<bool> {
+    let n = conn.execute("DELETE FROM memory WHERE id = ?1", params![id])?;
+    Ok(n > 0)
 }
