@@ -1,7 +1,7 @@
 # 07 — P1-2 standing intent 触发链方案
 
-> 制定日期：2026-08-31。权威设计源：[04-详细设计文档.md](04-详细设计文档.md) §4.5/§12.3。
-> 计划出处：[05-下一阶段计划.md](05-下一阶段计划.md) P1-2。
+> 制定日期：2026-08-31。权威设计源：[04-详细设计文档.md](../design/04-详细设计文档.md) §4.5/§12.3。
+> 计划出处：[05-下一阶段计划.md](下一阶段计划.md) P1-2。
 > 本文记录 standing intent（长期待办 / 事件型提醒）触发链的落地方案 + 修改点。
 
 ## 1. 这个功能解决什么问题（大白话）
@@ -19,12 +19,12 @@
 判断逻辑（纯函数）早已就绪，但从未通电：
 
 - `oc_core::memory::intent_prefilter(msg, intents)` — 「这条消息命中了哪几条待办的关键词？」
-  （[memory.rs](../crates/oc-core/src/memory.rs) L224）
+  （[memory.rs](../../crates/oc-core/src/memory.rs) L224）
 - `oc_core::proactive::allow_fire(state, now, cfg)` — 「这条待办现在该提醒吗？」
-  anti-nagging：cooldown / budget / expiry（[proactive.rs](../crates/oc-core/src/proactive.rs) L67）
+  anti-nagging：cooldown / budget / expiry（[proactive.rs](../../crates/oc-core/src/proactive.rs) L67）
 
 缺口两处：
-1. `standing_intent` 表存在（[schema.rs](../crates/oc-store/src/schema.rs) L52）但**无任何 ops**——不能写、不能读。
+1. `standing_intent` 表存在（[schema.rs](../../crates/oc-store/src/schema.rs) L52）但**无任何 ops**——不能写、不能读。
 2. 入站消息路径**没人调用**那两个纯函数——没接 session 钩子。
 
 P1-2 = 把这根线接上，让功能真正跑起来。
@@ -64,7 +64,7 @@ intent_list()                                 // 读全部 standing intent
   └─ 允许的提醒文本 → 追加进 bootstrap（隐藏上下文注入）
 ```
 
-- **注入载体**：复用现有 `bootstrap: Vec<MemLine>` 管线（[session.rs](../crates/oc-server/src/session.rs) `lane1_bootstrap` 同款），文本标注「待办提醒：…」以与记忆区分。**不新开 prompt 段**，省掉动 `prompt.rs`/`PromptInputs`/`RunCtx` 的连锁改动。
+- **注入载体**：复用现有 `bootstrap: Vec<MemLine>` 管线（[session.rs](../../crates/oc-server/src/session.rs) `lane1_bootstrap` 同款），文本标注「待办提醒：…」以与记忆区分。**不新开 prompt 段**，省掉动 `prompt.rs`/`PromptInputs`/`RunCtx` 的连锁改动。
 - **失败绝不阻塞回复**：与 `lane1_bootstrap` 同规格，任何一步出错返回空、只告警。
 - **anti-nagging per-row**：cooldown/budget/expiry 从每条 `standing_intent` 行读（schema 已有列），非全局配置。全局配置只作新建时的默认值。
 
@@ -88,7 +88,7 @@ intent_list()                                 // 读全部 standing intent
 
 - `oc-proto/method.rs`：`IntentAdd(IntentAddParams)` / `IntentList` / `IntentRm(IntentRmParams)` + `MethodOk::IntentAdd{intent_id}` / `IntentList(Vec<IntentSpec>)` + `IntentId` 类型。
 - `oc-server/dispatch.rs`：3 个 handler（`handle_intent_add/list/rm`），expiry_days → expiry_at 换算。
-- `oc-cli`：`oc intent add/list/rm` 子命令（[main.rs](../crates/oc-cli/src/main.rs) + `cli_client.rs`），仿 `oc cron`。
+- `oc-cli`：`oc intent add/list/rm` 子命令（[main.rs](../../crates/oc-cli/src/main.rs) + `cli_client.rs`），仿 `oc cron`。
 
 > 模型可直接调用的 intent 工具（对标 `cron_add`）属 **P1-5**（cron/intent 一起工具化），不在本次范围。
 
@@ -109,11 +109,11 @@ intent_list()                                 // 读全部 standing intent
 
 **实际落地的测试**（全绿；全工作区 166 用例无回归）：
 
-- store 单测（[lib.rs](../crates/oc-store/src/lib.rs)）：
+- store 单测（[lib.rs](../../crates/oc-store/src/lib.rs)）：
   - `intent_crud_roundtrip`——增/查/记账/删往返，keywords 编解码不丢。
   - `intent_empty_keywords_roundtrip`——空 keywords + 不过期的退化输入不炸。
   - `intent_keyword_with_space_survives_roundtrip`——含空格关键词整条往返（回归第二个 bug）。
-- server 集成测试（[standing_intent.rs](../crates/oc-server/tests/standing_intent.rs)，6 项）：
+- server 集成测试（[standing_intent.rs](../../crates/oc-server/tests/standing_intent.rs)，6 项）：
   1. `matching_topic_injects_reminder_and_marks_fired`——命中注入 + 抬 `fired_count`；
   2. `unrelated_topic_does_not_inject`——无关话题不注入、不记账；
   3. `cooldown_suppresses_second_trigger`——cooldown 内二次命中静默跳过且不记账；
@@ -121,10 +121,10 @@ intent_list()                                 // 读全部 standing intent
   5. `expired_intent_does_not_trigger`——过期不触发；
   6. `per_turn_cap_limits_injection_count`——5 条同词待办只注入 3 条，未注入的不记账。
 - core 单测：`intent_max_per_turn_defaults_to_three`——锁默认值本身（core 无 toml 依赖）。
-- CLI 单测（[config_loader.rs](../crates/oc-cli/src/config_loader.rs)）：
+- CLI 单测（[config_loader.rs](../../crates/oc-cli/src/config_loader.rs)）：
   `old_config_without_intent_max_per_turn_still_loads`——老 config.toml 缺新键仍可解析+校验。
   放这里而非 core：TOML 解析与真实加载路径都在 oc-cli，core 是纯策略层不该引 `toml`。
-- CLI 单测（[onboard.rs](../crates/oc-cli/src/onboard.rs)）：onboard 模板与
+- CLI 单测（[onboard.rs](../../crates/oc-cli/src/onboard.rs)）：onboard 模板与
   `config.example.toml` 均可解析/校验，且两者 `[proactive]` 不漂移。
 
 ### 测试抓到的真 bug（已修）
@@ -183,11 +183,11 @@ intent_list()                                 // 读全部 standing intent
 
 `oc intent add` 造一条话题待办后，在相关对话里被自动唤起（注入隐藏上下文提醒模型），且
 cooldown/budget/expiry 生效防反复打扰——6 项集成测试逐条覆盖。对齐
-[05](05-下一阶段计划.md) P1-2 与 [04 §12.3](04-详细设计文档.md)。
+[05](下一阶段计划.md) P1-2 与 [04 §12.3](../design/04-详细设计文档.md)。
 
 **尚未做（明确留给后续）**：
 - 模型可直接调用的 intent 工具（对标 zeroclaw `cron_add`）→ P1-5 与 cron 工具化一起做。
-- 「时间型待办编译成 cron」（[04 §12.3](04-详细设计文档.md) 末行）→ 同 P1-5。
+- 「时间型待办编译成 cron」（[04 §12.3](../design/04-详细设计文档.md) 末行）→ 同 P1-5。
 - 向量预筛（`trigger_vec` 列已预留）→ 待 sqlite-vec 接入（P2「向量语义检索」）。
 - 真机验证：本次仅自动化测试通过，未做真机对话验证（P0/P1-1 都是真机才暴露出问题的，
   建议下轮真机跑一遍：`oc intent add "带转换插头" 出差` 后聊出差看是否自然提起）。

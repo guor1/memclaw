@@ -2,9 +2,10 @@
 
 一个用 Rust 写的**个人助手 daemon**。常驻后台、能自己动（定时/主动提醒）、会记事（分层记忆 + 睡眠巩固），通过终端 UI 与你对话，接 DeepSeek 等 OpenAI 兼容模型。
 
-设计以「纯核心 + 单向依赖 + 单写库」为骨架，把所有决策收进可确定性测试的领域层，把 IO / 并发 / 时钟隔离在外围。当前 110 个单元测试全绿。
+设计以「纯核心 + 单向依赖 + 单写库」为骨架，把所有决策收进可确定性测试的领域层，把 IO / 并发 / 时钟隔离在外围。当前 176 个测试全绿。
 
-> 状态：早期骨架（M1–M6 已落地主干闭环）。能跑，但仍有明确缺口，见 [docs/03-实现状态与缺口.md](docs/03-实现状态与缺口.md)。
+> 状态：早期骨架（M1–M6 主干闭环 + P0/P1-1~P1-3 已落地）。能跑，但仍有明确缺口，
+> 见 [docs/plan/下一阶段计划.md](docs/plan/下一阶段计划.md)。文档总索引：[docs/README.md](docs/README.md)。
 
 ---
 
@@ -61,7 +62,7 @@ oc-cli ──▶ oc-tui ──▶ oc-server ──▶ oc-core   (纯策略：不
 | `oc-tui` | 本地终端 UI，协议第一个 client，纯展示 |
 | `oc-cli` | CLI 入口，doctor / serve / onboard / cron / memory / status / debug |
 
-细节见 [docs/02-详细设计文档.md](docs/02-详细设计文档.md)。
+细节见 [docs/design/04-详细设计文档.md](docs/design/04-详细设计文档.md)。
 
 ---
 
@@ -145,7 +146,7 @@ oc debug --watch     # 每秒刷新，观察「不回复 / 卡住」时状态如
 
 ## 后续迭代方向与计划
 
-按优先级，详细清单与状态见 [docs/03-实现状态与缺口.md](docs/03-实现状态与缺口.md)。
+按优先级，详细清单与状态见 [docs/plan/下一阶段计划.md](docs/plan/下一阶段计划.md)。
 
 **近期（收口主动性与记忆闭环）**
 - Standing intent 触发链接线：纯策略已就绪，补 store ops + session Submit 钩子。

@@ -1,7 +1,7 @@
 # 09 — P1-2 standing intent 运行时测试用例
 
 > 编写日期：2026-08-31。对应改动：P1-2「standing intent 触发链」落地（见
-> [05-下一阶段计划.md](05-下一阶段计划.md) 变更记录 + [07-P1-2-standing-intent方案.md](07-P1-2-standing-intent方案.md)）。
+> [05-下一阶段计划.md](../plan/下一阶段计划.md) 变更记录 + [07-P1-2-standing-intent方案.md](../plan/P1-2-standing-intent方案.md)）。
 > 目的：给出**手动启动 daemon + TUI** 后，逐项验证 standing intent 的话题触发机制。
 > 自动化回归见 `crates/oc-server/tests/standing_intent.rs`（6 项集成测试）+
 > `crates/oc-store/src/lib.rs`（3 项 store 往返测试）；本文覆盖「真机跑起来」才能
@@ -10,7 +10,7 @@
 ## 0. 环境准备
 
 环境准备（OC_HOME 隔离目录、provider 模式、构建启动、日志抓手）与 P0/P1-1 用例**完全一致**，
-直接沿用 [07-P0运行时测试用例.md §0](07-P0运行时测试用例.md)，此处不重复。
+直接沿用 [07-P0运行时测试用例.md §0](P0-运行时测试用例.md)，此处不重复。
 
 > **本文特别要求**：standing intent 需**真实模型**——mock provider 不会看到隐藏上下文
 > 的注入效果（测试用 `CapturingMock` 断言 prompt，但真机要看模型能否自然提起）。
