@@ -22,8 +22,7 @@ impl SseBuffer {
         let mut out = Vec::new();
 
         // 按 \n 切；保留最后不完整的一段在 buf。
-        loop {
-            let Some(pos) = self.buf.find('\n') else { break };
+        while let Some(pos) = self.buf.find('\n') {
             let line = self.buf[..pos].trim_end_matches('\r').to_string();
             self.buf.drain(..=pos);
 

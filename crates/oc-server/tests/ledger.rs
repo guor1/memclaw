@@ -27,7 +27,8 @@ async fn process_tool_registers_and_completes() {
     });
 
     // 跑一个立即结束的后台命令。
-    let cmd = if cfg!(windows) { "echo bg-done" } else { "echo bg-done" };
+    // echo 在 cmd.exe 与 POSIX sh 下写法一致，无需按平台分支。
+    let cmd = "echo bg-done";
     let cx = ToolCtx::detached(CancellationToken::new());
     let out = tool
         .invoke(serde_json::json!({ "command": cmd }), cx)

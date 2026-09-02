@@ -6,7 +6,9 @@
 //! 注册表持有 spawn 一个 session actor 所需的全部依赖克隆（cfg/provider/
 //! events/store），`get_or_spawn` 首次遇到某会话 id 时建 actor 并登记。
 //!
-//! **不做空闲淘汰**：单用户短期无碍；长期可加 LRU/TTL（留 TODO）。
+//! **无空闲淘汰**：单用户场景下会话数可控，常驻 actor 的内存开销可接受。
+//! 生产化前需与 `IdempotencyCache` 一起加 TTL/LRU——两者是同类的无界增长，
+//! 分开做会漏一半（见 P2 计划 §3.1 idem 缓存 TTL、§3.2 会话 actor 空闲淘汰）。
 
 use std::sync::Arc;
 

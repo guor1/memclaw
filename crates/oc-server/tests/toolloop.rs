@@ -70,19 +70,15 @@ fn text_step(t: &str) -> Vec<ScriptStep> {
 async fn collect_until_terminal(rx: &mut broadcast::Receiver<Event>, timeout: Duration) -> Vec<Event> {
     let mut out = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match tokio::time::timeout_at(deadline, rx.recv()).await {
-            Ok(Ok(ev)) => {
-                let terminal = matches!(
-                    ev,
-                    Event::Lifecycle { phase: LifecyclePhase::End, .. }
-                        | Event::Lifecycle { phase: LifecyclePhase::Error { .. }, .. }
-                );
-                out.push(ev);
-                if terminal { break; }
-            }
-            _ => break,
-        }
+    // 超时或通道关闭（Err）都让 while let 自然退出。
+    while let Ok(Ok(ev)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        let terminal = matches!(
+            ev,
+            Event::Lifecycle { phase: LifecyclePhase::End, .. }
+                | Event::Lifecycle { phase: LifecyclePhase::Error { .. }, .. }
+        );
+        out.push(ev);
+        if terminal { break; }
     }
     out
 }

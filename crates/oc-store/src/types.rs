@@ -1,6 +1,33 @@
 //! store 数据类型（设计 §3.3）。持久化层的输入/输出 DTO。
 //!
 //! 这些是 store 与上层之间的数据契约，不含策略（策略在 oc-core）。
+//!
+//! **枚举与字符串的两条转换路径**：库表里 role/tier/origin 都是裸 TEXT（schema
+//! 无 CHECK 约束）。因此这里给每个枚举提供两种解析：
+//!
+//! - [`std::str::FromStr`]（`s.parse::<Tier>()`）：严格，未知值报错。用于校验
+//!   外部输入（配置、协议参数），错就该让调用方知道。
+//! - `from_db_str`：宽松，未知值退化到安全默认。**只给读库用**——单行的脏值
+//!   （老 schema 残留、手工改库）不该让整个查询失败；`origin` 更是必须退化到
+//!   `Untrusted` 而非报错，未知来源按最低信任处理才是抗投毒的正确方向。
+
+use std::str::FromStr;
+
+/// 枚举字符串解析失败（[`FromStr`]）。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown {kind}: {value:?}")]
+pub struct ParseEnumError {
+    /// 目标枚举名（如 `"role"`）。
+    pub kind: &'static str,
+    /// 原始输入。
+    pub value: String,
+}
+
+impl ParseEnumError {
+    fn new(kind: &'static str, value: &str) -> Self {
+        Self { kind, value: value.to_string() }
+    }
+}
 
 /// 会话种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,12 +68,22 @@ impl Role {
         }
     }
 
-    pub fn from_str(s: &str) -> Role {
+    /// 读库用的宽松解析：未知值退化为 [`Role::User`]。见模块头说明。
+    pub fn from_db_str(s: &str) -> Role {
+        s.parse().unwrap_or(Role::User)
+    }
+}
+
+impl FromStr for Role {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "assistant" => Role::Assistant,
-            "tool" => Role::Tool,
-            "system" => Role::System,
-            _ => Role::User,
+            "user" => Ok(Role::User),
+            "assistant" => Ok(Role::Assistant),
+            "tool" => Ok(Role::Tool),
+            "system" => Ok(Role::System),
+            _ => Err(ParseEnumError::new("role", s)),
         }
     }
 }
@@ -100,12 +137,22 @@ impl Tier {
             Tier::Review => "review",
         }
     }
-    pub fn from_str(s: &str) -> Tier {
+    /// 读库用的宽松解析：未知值退化为 [`Tier::Episodic`]。见模块头说明。
+    pub fn from_db_str(s: &str) -> Tier {
+        s.parse().unwrap_or(Tier::Episodic)
+    }
+}
+
+impl FromStr for Tier {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "curated" => Tier::Curated,
-            "prospective" => Tier::Prospective,
-            "review" => Tier::Review,
-            _ => Tier::Episodic,
+            "curated" => Ok(Tier::Curated),
+            "episodic" => Ok(Tier::Episodic),
+            "prospective" => Ok(Tier::Prospective),
+            "review" => Ok(Tier::Review),
+            _ => Err(ParseEnumError::new("tier", s)),
         }
     }
 }
@@ -128,12 +175,23 @@ impl Origin {
             Origin::System => "system",
         }
     }
-    pub fn from_str(s: &str) -> Origin {
+    /// 读库用的宽松解析：未知值退化为 [`Origin::Untrusted`]（最低信任）。
+    /// 见模块头说明——这里的退化是抗投毒的有意设计，不要改成报错。
+    pub fn from_db_str(s: &str) -> Origin {
+        s.parse().unwrap_or(Origin::Untrusted)
+    }
+}
+
+impl FromStr for Origin {
+    type Err = ParseEnumError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "owner" => Origin::Owner,
-            "agent" => Origin::Agent,
-            "system" => Origin::System,
-            _ => Origin::Untrusted,
+            "owner" => Ok(Origin::Owner),
+            "agent" => Ok(Origin::Agent),
+            "untrusted" => Ok(Origin::Untrusted),
+            "system" => Ok(Origin::System),
+            _ => Err(ParseEnumError::new("origin", s)),
         }
     }
 }

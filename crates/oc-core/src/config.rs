@@ -84,9 +84,15 @@ pub fn default_context_window(model: &str) -> u32 {
         65_536
     } else if m.contains("claude") {
         200_000
-    } else if m.contains("gpt-4o") || m.contains("gpt-4.1") || m.contains("o1") || m.contains("o3") {
-        128_000
-    } else if m.contains("gpt-4-turbo") || m.contains("gpt-4-1106") {
+    } else if m.contains("gpt-4o")
+        || m.contains("gpt-4.1")
+        || m.contains("o1")
+        || m.contains("o3")
+        || m.contains("gpt-4-turbo")
+        || m.contains("gpt-4-1106")
+    {
+        // 注意：本分支必须在下面的裸 "gpt-4" 之前——否则 gpt-4o / gpt-4-turbo
+        // 会被 "gpt-4" 抢先命中，错拿 8K 窗口。
         128_000
     } else if m.contains("gpt-4") {
         8_192

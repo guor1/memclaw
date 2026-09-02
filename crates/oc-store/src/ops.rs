@@ -113,7 +113,7 @@ pub fn load_transcript(conn: &Connection, session_id: &str, max_entries: i64) ->
             id: r.get(0)?,
             session_id: r.get(1)?,
             seq: r.get(2)?,
-            role: Role::from_str(&r.get::<_, String>(3)?),
+            role: Role::from_db_str(&r.get::<_, String>(3)?),
             content: r.get(4)?,
             tokens_est: r.get(5)?,
             created_at: r.get(6)?,
@@ -344,8 +344,8 @@ pub fn dream_candidates(conn: &Connection, limit: i64) -> StoreResult<Vec<Memory
     let rows = stmt.query_map(params![limit], |r| {
         Ok(MemoryRow {
             id: r.get(0)?,
-            tier: Tier::from_str(&r.get::<_, String>(1)?),
-            origin: Origin::from_str(&r.get::<_, String>(2)?),
+            tier: Tier::from_db_str(&r.get::<_, String>(1)?),
+            origin: Origin::from_db_str(&r.get::<_, String>(2)?),
             text: r.get(3)?,
             importance: r.get(4)?,
             created_at: r.get(5)?,
@@ -451,8 +451,8 @@ pub fn search_candidates(
     let rows = stmt.query_map(param_refs.as_slice(), |r| {
         Ok(MemoryRow {
             id: r.get(0)?,
-            tier: Tier::from_str(&r.get::<_, String>(1)?),
-            origin: Origin::from_str(&r.get::<_, String>(2)?),
+            tier: Tier::from_db_str(&r.get::<_, String>(1)?),
+            origin: Origin::from_db_str(&r.get::<_, String>(2)?),
             text: r.get(3)?,
             importance: r.get(4)?,
             created_at: r.get(5)?,
@@ -478,8 +478,8 @@ pub fn memory_by_pref_key(conn: &Connection, key: &str) -> StoreResult<Vec<Memor
     let rows = stmt.query_map(params![key], |r| {
         Ok(MemoryRow {
             id: r.get(0)?,
-            tier: Tier::from_str(&r.get::<_, String>(1)?),
-            origin: Origin::from_str(&r.get::<_, String>(2)?),
+            tier: Tier::from_db_str(&r.get::<_, String>(1)?),
+            origin: Origin::from_db_str(&r.get::<_, String>(2)?),
             text: r.get(3)?,
             importance: r.get(4)?,
             created_at: r.get(5)?,
