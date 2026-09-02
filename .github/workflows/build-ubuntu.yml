@@ -1,0 +1,72 @@
+name: Build Ubuntu Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev pkg-config
+
+      - name: Build release
+        run: |
+          cargo build --release --bin oc
+          strip target/release/oc
+
+      - name: Package
+        run: |
+          mkdir -p dist/oc-ubuntu
+          cp target/release/oc dist/oc-ubuntu/
+          cp config.example.toml dist/oc-ubuntu/
+          cp scripts/README.md dist/oc-ubuntu/INSTALL.txt
+
+          # 创建安装脚本
+          cat > dist/oc-ubuntu/install.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          echo "=== oc 快速安装 ==="
+          sudo apt-get update && sudo apt-get install -y libsqlite3-0
+          sudo cp oc /usr/local/bin/
+          sudo chmod +x /usr/local/bin/oc
+          mkdir -p ~/.oc
+          if [ ! -f ~/.oc/config.toml ]; then
+              cp config.example.toml ~/.oc/config.toml
+              sed -i 's/transport = "pipe"/transport = "unix"/' ~/.oc/config.toml
+          fi
+          echo "✅ 安装完成！运行 'oc doctor' 验证"
+          EOF
+          chmod +x dist/oc-ubuntu/install.sh
+
+          cd dist
+          tar -czf oc-ubuntu.tar.gz oc-ubuntu
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oc-ubuntu
+          path: dist/oc-ubuntu.tar.gz
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/oc-ubuntu.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
