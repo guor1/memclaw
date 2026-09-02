@@ -63,6 +63,8 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         // soul 目录（设计 §13.1）：dreaming 巩固轮据此重写 MEMORY.md。
         // 取不到 OC_HOME 时为 None——server 会跳过文件重写，只做 DB 内巩固。
         soul_dir: crate::paths::oc_home().ok().map(|h| h.join("soul")),
+        // 本机时区（P1-5）：cron 未指定 tz 时的默认值。
+        default_tz: crate::tz::local_tz(),
         // standing intent anti-nagging（设计 §12.5）：配置驱动，接上此前的死键。
         intent_defaults: oc_server::IntentDefaults {
             cooldown_secs: cfg.proactive.intent_cooldown_secs as i64,
@@ -133,7 +135,7 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
     // ask_user：主动向用户提问并阻塞等待回答（交互式输入门经 server 注入）。
     registry.register(Arc::new(oc_tools::ask_user::AskUserTool));
 
-    // cron_add：创建定时任务（P1-5；cron 门经 server 注入）。
+    // cron：定时/延时提醒的增删查（P1-5；cron 门经 server 注入）。
     registry.register(Arc::new(oc_tools::cron::CronTool));
 
     // web_fetch / web_search：联网（需 web-tools feature，默认开）。

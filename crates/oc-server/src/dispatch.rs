@@ -223,13 +223,15 @@ fn now_millis() -> i64 {
 }
 
 /// 新增 cron：校验表达式（core::next_fire）→ 算首次触发 → 落库。
+///
+/// 表达式按 `p.tz` 解释（P1-5）；tz 非法一并按 BadRequest 回绝，不静默按 UTC 落库。
 async fn handle_cron_add(
     p: &oc_proto::CronAddParams,
     state: &Arc<ServerState>,
 ) -> Result<MethodOk, ProtoError> {
     let now = now_secs();
     // 校验 + 算首次触发。
-    let next_at = match oc_core::proactive::next_fire(&p.expr, now) {
+    let next_at = match oc_core::proactive::next_fire(&p.expr, now, &p.tz) {
         Ok(n) => n,
         Err(e) => {
             return Err(ProtoError {

@@ -3,11 +3,13 @@
 //! **纯函数集合**：anti-nagging 判定（cooldown/budget/expiry）、到期筛选、cron 下次触发。
 //! tokio timer / spawn / 起子会话全在 server；本模块只出判定与时间计算。
 //!
-//! M6：cron 用自带 5 字段解析器（省外部依赖）；tz 简化为 UTC 语义（秒级 unix 时间）。
+//! cron 用自带 5 字段解析器（省外部依赖）。**表达式按给定 IANA 时区解释**
+//! （P1-5 修复；此前一律按 UTC，`tz` 字段存了没人读）。一次性延时任务用
+//! [`ONCE_EXPR`] 标记，`next_at` 直接存绝对秒、不参与表达式推算。
 
 mod cron;
 
-pub use cron::{next_fire, CronParseError};
+pub use cron::{fmt_in_tz, is_once, next_fire, CronParseError, ONCE_EXPR};
 
 /// anti-nagging 配置（设计 §12.5 默认：cooldown 24h / budget 3 / expiry 90d）。
 #[derive(Debug, Clone)]

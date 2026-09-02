@@ -74,16 +74,22 @@ where
 
 // ── 命令实现 ────────────────────────────────────────────────────
 
-pub fn cron_add(expr: String, prompt: String, tz: String) -> Result<()> {
+/// 新增定时任务。`tz=None` → 用本机时区（用户敲 `0 9 * * *` 想要的是本地 9 点）。
+pub fn cron_add(expr: String, prompt: String, tz: Option<String>) -> Result<()> {
+    let tz = tz
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(crate::tz::local_tz);
     run_once(async move {
         let mut c = connect().await?;
         let ok = call(
             &mut c,
-            Method::CronAdd(oc_proto::CronAddParams { expr, prompt, tz }),
+            Method::CronAdd(oc_proto::CronAddParams { expr, prompt, tz: tz.clone() }),
         )
         .await?;
         if let MethodOk::CronAdd { cron_id } = ok {
-            println!("已添加定时任务：{}", cron_id.as_str());
+            // 回显时区：省略 --tz 时用户需要看到实际生效的是哪个。
+            println!("已添加定时任务：{}（时区 {tz}）", cron_id.as_str());
         }
         Ok(())
     })
@@ -98,16 +104,26 @@ pub fn cron_list() -> Result<()> {
                 println!("（无定时任务）");
             } else {
                 for c in list {
-                    let next = c
-                        .next_at
-                        .map(|t| t.to_string())
-                        .unwrap_or_else(|| "-".into());
+                    // 下次触发按该行自己的 tz 渲染成墙上时间。
+                    // 原先只印 unix 秒，排查「提醒为什么没响」时根本看不出差了 8 小时
+                    // ——那正是 P1-5 时区 bug 迟迟未被发现的原因之一。
+                    let next = match c.next_at {
+                        Some(t) => oc_core::proactive::fmt_in_tz(t, &c.tz)
+                            .map(|s| format!("{s} [{}]", c.tz))
+                            .unwrap_or_else(|| format!("unix {t}")),
+                        None => "-".into(),
+                    };
+                    let kind = if oc_core::proactive::is_once(&c.expr) {
+                        "一次性".to_string()
+                    } else {
+                        c.expr.clone()
+                    };
                     let en = if c.enabled { "启用" } else { "停用" };
                     println!(
                         "{}  [{}]  {}  下次:{}  «{}»",
                         c.id.as_str(),
                         en,
-                        c.expr,
+                        kind,
                         next,
                         c.prompt
                     );

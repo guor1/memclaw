@@ -13,6 +13,7 @@ mod paths;
 mod provider_setup;
 mod skills_loader;
 mod tui_runner;
+mod tz;
 
 use clap::{Parser, Subcommand};
 
@@ -67,9 +68,11 @@ enum CronCmd {
         expr: String,
         /// 触发时执行的提示词。
         prompt: String,
-        /// 时区（当前按 UTC 语义处理）。
-        #[arg(long, default_value = "UTC")]
-        tz: String,
+        /// IANA 时区名，如 Asia/Shanghai。省略则用本机时区。
+        ///
+        /// 表达式里的时/分按此时区的**本地时间**解释。
+        #[arg(long)]
+        tz: Option<String>,
     },
     /// 列出所有定时任务。
     List,

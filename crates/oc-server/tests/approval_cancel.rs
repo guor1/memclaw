@@ -60,6 +60,7 @@ async fn abort_interrupts_pending_approval_and_cleans_registry() {
         trigger_max_per_turn: 3,
         intent_defaults: Default::default(),
         soul_dir: None,
+        default_tz: "UTC".into(),
         context_window: 65536,
     };
 

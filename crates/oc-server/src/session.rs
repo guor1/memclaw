@@ -55,6 +55,11 @@ pub struct SessionConfig {
     /// `None` = 不落盘（测试/内存态）：dreaming 只做 DB 内 tier 提升，不重写 MEMORY.md。
     /// 设计 §13.1；server 本身不解析 OC_HOME，由 CLI 传入。
     pub soul_dir: Option<std::path::PathBuf>,
+    /// 本机时区（IANA 名，如 `Asia/Shanghai`）。cron 未指定 tz 时的默认值（P1-5）。
+    ///
+    /// 由 CLI 探测传入（server 不碰系统时区：`time` crate 取本地偏移在多线程下不可靠）。
+    /// 空串 = 按 UTC。模型经常省略 tz，缺省按 UTC 会让「每天 9 点」在东八区变下午 5 点。
+    pub default_tz: String,
 }
 
 /// standing intent 的 anti-nagging 参数（设计 §12.5，源自 `ProactiveConfig`）。

@@ -294,6 +294,7 @@ impl Writer {
         rx.await.map_err(|_| StoreError::Migration("写线程无响应".into()))?
     }
 
+
     pub async fn intent_add(&self, intent: crate::types::NewStandingIntent) -> StoreResult<()> {
         let (reply, rx) = oneshot::channel();
         self.send(WriteCmd::IntentAdd { intent, reply })?;

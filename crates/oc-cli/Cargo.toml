@@ -31,6 +31,7 @@ crossterm = "0.28"
 tracing-appender = "0.2.5"
 time = { version = "0.3.55", features = ["formatting", "macros"] }
 tracing = "0.1.44"
+time-tz = { version = "2", features = ["system"] }
 
 [features]
 default = ["provider-openai", "provider-anthropic", "web-tools"]

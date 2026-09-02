@@ -29,6 +29,7 @@ fn cfg(idle_ms: u64) -> SessionConfig {
         trigger_max_per_turn: 3,
         intent_defaults: Default::default(),
         soul_dir: None,
+        default_tz: "UTC".into(),
         context_window: 65536,
     }
 }
@@ -138,6 +139,7 @@ async fn health_scan_aborts_stuck_run() {
         trigger_max_per_turn: 3,
         intent_defaults: Default::default(),
         soul_dir: None,
+        default_tz: "UTC".into(),
         context_window: 65536,
     };
     let handle = session::spawn(oc_proto::SessionId::main(), cfg, provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));

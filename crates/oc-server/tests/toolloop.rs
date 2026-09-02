@@ -41,6 +41,7 @@ fn cfg_with_tools(tools: ToolExecutor) -> SessionConfig {
         trigger_max_per_turn: 3,
         intent_defaults: Default::default(),
         soul_dir: None,
+        default_tz: "UTC".into(),
         context_window: 65536,
     }
 }
@@ -142,6 +143,7 @@ async fn dangerous_command_triggers_approval_then_runs() {
         trigger_max_per_turn: 3,
         intent_defaults: Default::default(),
         soul_dir: None,
+        default_tz: "UTC".into(),
         context_window: 65536,
     };
 

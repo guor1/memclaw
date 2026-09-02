@@ -238,6 +238,7 @@ pub fn cron_mark_fired(conn: &Connection, id: &str, fired_at: i64, next_at: Opti
     Ok(())
 }
 
+
 /// 当前 unix 秒。standing intent 的时间语义（created/last_fired/expiry）统一用秒，
 /// 与 `oc_core::proactive::allow_fire`（秒级）对齐；不用 `now_millis`（那是 entry 语义）。
 fn now_secs() -> i64 {

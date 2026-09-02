@@ -84,6 +84,7 @@ pub async fn serve_with(
         store: store.clone(),
         model: session_cfg.model.clone(),
         soul: session_cfg.soul.clone(),
+        default_tz: session_cfg.default_tz.clone(),
     };
 
     let context_window = session_cfg.context_window;
@@ -115,13 +116,16 @@ pub async fn serve_with(
         intent_defaults,
     ));
 
-    // P1-5：消费 cron_add 工具请求，委托 proactive 模块处理（校验 + 写库 + 回执）。
+    // P1-5：消费 cron 工具请求（add/delay/list/rm），委托 proactive 处理。
+    //
+    // 单独一个 task 顺序消费：cron 操作都是毫秒级本地库写，不必并发；串行还顺带
+    // 保证了「同一时刻只有一个 cron 写入」，与写线程的单写者语义一致。
     let cron_pctx = proactive_ctx.clone();
     tokio::spawn(async move {
         let mut rx = cron_rx;
         while let Some(req) = rx.recv().await {
-            let oc_tools::types::CronRequest { expr, prompt, tz, reply } = req;
-            let result = proactive::handle_cron_add(&cron_pctx, expr, prompt, tz).await;
+            let oc_tools::types::CronRequest { op, reply } = req;
+            let result = proactive::handle_cron_op(&cron_pctx, op).await;
             let _ = reply.send(result);
         }
     });

@@ -79,14 +79,22 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
         for t in tools {
             prefix.push_str(&format!("- {}: {}\n", t.name, t.description));
         }
-        // P1-5：引导优先用结构化工具（特别是 cron_add），避免退化去拼 shell 命令（跨平台易错、绕过校验）。
-        // **定时/延时提醒用 cron_add**，不要用 shell 睡眠阻塞等待（会卡住整个 run、触发超时/loop detection）。
+        // 引导优先用结构化工具，减少退化去拼 shell 命令（跨平台易错、绕过校验）。
+        //
+        // 「等待未来某时刻」这条是 P1-5 真机缺陷的直接修法：模型原本会拿 `sys:now` +
+        // `Start-Sleep` 在一次 run 里硬等到点，撞 loop detection 且提醒根本没设上。
+        // 措辞刻意点明「不占用当前对话」，因为模型的错误前提是「必须自己等着才能提醒」。
         prefix.push_str(
             "\n优先使用结构化工具完成任务：查看/切换目录用 sys（pwd/cd/now），\
              读写/检索文件用 file（read/write/list/stat/head/tail/grep/glob）。\
-             **定时/延时提醒用 cron_add**（如「12:50 提醒我喝水」），\
-             不要用 shell 睡眠（Start-Sleep / sleep / timeout）阻塞等待——那会卡住整个对话。\
-             仅当这些工具都覆盖不到时才用 exec 执行 shell 命令。\n",
+             仅当这些工具都覆盖不到时才用 exec 执行 shell 命令。\n\
+             \n涉及「未来某个时刻」的请求（定时提醒、延时提醒、每天/每周重复提醒），\
+             一律用 cron 工具登记：op=delay 表示「N 秒后」，op=add 表示重复。\
+             登记后系统会在到点时主动推送给用户，**不占用当前对话**，你无需等待，\
+             应当立刻告知用户已设好并结束本轮。绝不要用 shell 睡眠\
+             （Start-Sleep / sleep / timeout / ping）或反复查时间来等待——\
+             那会卡住整个对话且提醒不会生效。用户问起已设的提醒时用 op=list 查证，\
+             不要凭猜测答复。\n",
         );
     }
 

@@ -37,7 +37,7 @@
 | [P1-2-开发环境测试指南](testing/P1-2-开发环境测试指南.md) | 未安装场景下用 target/release/oc.exe 跑 |
 | [P1-3-偏好supersede测试用例](testing/P1-3-偏好supersede测试用例.md) | 偏好就地替换（8 项，含老库升级） |
 | [P1-4-dreaming重写MEMORY测试用例](testing/P1-4-dreaming重写MEMORY测试用例.md) | MEMORY.md 巩固重写（9 项，含并发写安全） |
-| [P1-5-cron工具测试用例](testing/P1-5-cron工具测试用例.md) | cron 工具引导（5 项，防退化到 shell 睡眠） |
+| [P1-5-cron工具测试用例](testing/P1-5-cron工具测试用例.md) | cron 工具（7 项，核心是本地时刻正确 + 到点真响） |
 
 > 环境准备（OC_HOME 隔离、构建启动、日志抓手）统一维护在 P0 那份的 §0。
 

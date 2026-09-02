@@ -145,27 +145,46 @@ impl InputGate {
     }
 }
 
-/// cron 门句柄：向 server 创建定时任务（P1-5）。
+/// cron 门句柄：向 server 增删查定时任务（P1-5）。
 ///
 /// 解耦：工具层不依赖 store / proactive，由编排层（tools_bridge）桥接。
 pub struct CronGate {
     pub request: mpsc::UnboundedSender<CronRequest>,
 }
 
-/// 一次 cron 创建请求。
+/// 一次 cron 操作。
+///
+/// 四个 op 走同一条门：`list`/`rm` 与 `add` 一样重要——模型没有查询手段时，
+/// 用户说「没收到提醒」它只能猜原因，真机上就猜成了「本环境 cron 送不到」
+/// 并改用更不可靠的替代方案。
+pub enum CronOp {
+    /// 重复任务：5 字段 cron 表达式。
+    Add {
+        expr: String,
+        prompt: String,
+        /// IANA 时区名；`None` = 用服务端默认（本机时区）。
+        tz: Option<String>,
+    },
+    /// 一次性延时：N 秒后触发一次。cron 表达式最小粒度是分钟，故单开一条路径。
+    Delay { secs: i64, prompt: String },
+    /// 列出全部任务（含下次触发时间与剩余时长）。
+    List,
+    /// 按 id 删除。
+    Rm { id: String },
+}
+
+/// 一次 cron 请求：操作 + 回执通道。
 pub struct CronRequest {
-    pub expr: String,
-    pub prompt: String,
-    pub tz: String,
-    /// 回传创建的 cron_id（成功）或错误消息（失败）。
+    pub op: CronOp,
+    /// 回传给模型的结果文本（成功）或错误消息（失败）。
     pub reply: oneshot::Sender<Result<String, String>>,
 }
 
 impl CronGate {
-    /// 创建定时任务并等待回执。通道断开视为失败。
-    pub async fn add(&self, expr: String, prompt: String, tz: String) -> Result<String, String> {
+    /// 提交一次 cron 操作并等回执。通道断开视为失败。
+    pub async fn call(&self, op: CronOp) -> Result<String, String> {
         let (reply, rx) = oneshot::channel();
-        if self.request.send(CronRequest { expr, prompt, tz, reply }).is_err() {
+        if self.request.send(CronRequest { op, reply }).is_err() {
             return Err("cron 请求通道断开".to_string());
         }
         rx.await.unwrap_or_else(|_| Err("cron 回执通道断开".to_string()))
