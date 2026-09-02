@@ -123,7 +123,8 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
     registry.register(Arc::new(ExecTool::new(mode, exec_timeout)));
     registry.register(Arc::new(FileTool::new(roots.clone())));
     // sys：pwd/cd/now（cd 受同一组 allowed_roots 约束）。
-    registry.register(Arc::new(SysTool::new(roots)));
+    // 传本机时区：now 要与系统提示词的「当前时间」同口径，否则模型拿两个格式对账。
+    registry.register(Arc::new(SysTool::new(roots, crate::tz::local_tz())));
 
     // process 工具：后台移交 channel，接口另一端在 serve_with 接到台账。
     let (handoff_tx, handoff_rx) = tokio::sync::mpsc::unbounded_channel();

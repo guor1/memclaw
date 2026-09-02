@@ -61,6 +61,8 @@ pub struct RunCtx {
     pub compact_cfg: oc_core::compaction::CompactCfg,
     /// 模型上下文窗口（token），随 Usage 事件推给 client。
     pub context_window: u32,
+    /// 本机时区（IANA 名）：系统提示词里的「当前时间」按此渲染成本地墙上时间。
+    pub default_tz: String,
     /// 运行时诊断句柄：run 在阶段迁移点更新（`oc debug` 采样）。
     pub diag: crate::diag::SessionDiag,
 }
@@ -560,7 +562,7 @@ fn render_prompt(ctx: &RunCtx) -> String {
         ctx.soul.as_str()
     };
 
-    let now = now_rfc3339();
+    let now = now_local(&ctx.default_tz);
     let rendered = render_system_prompt(&PromptInputs {
         soul,
         platform: PLATFORM_HINT,
@@ -588,14 +590,20 @@ const DEFAULT_SOUL: &str = "你是 oc，一个长期陪伴用户的个人助手�
 危险操作会先请求用户审批。";
 
 /// 当前时间（RFC3339 近似，避免额外依赖格式化）。
-fn now_rfc3339() -> String {
+/// 系统提示词里的「当前时间」：本地墙上时间 + 星期 + 时区名。
+///
+/// 曾经这里给的是 `unix:1788310800`。模型读不出「现在几点」，于是每设一次提醒都要
+/// 先调 `sys:now`、再自己心算换算——多这一轮工具调用，就多一次撞上 provider
+/// 「宣布调工具却不发」抖动的机会（真机上连续三轮因此失败）。
+///
+/// 时区无法解析时退回 unix 秒：宁可难读，也不给一个偏移错误的时间。
+fn now_local(tz: &str) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    // 简易表示：unix 秒。人类可读格式化留待引入 time 格式化时再换。
-    format!("unix:{secs}")
+    oc_core::proactive::fmt_now_local(secs, tz).unwrap_or_else(|| format!("unix:{secs}"))
 }
 
 /// 落库一条消息（空文本跳过）。失败仅告警，不阻断 run。

@@ -419,6 +419,7 @@ fn start_run(
             ..Default::default()
         },
         context_window: cfg.context_window,
+        default_tz: cfg.default_tz.clone(),
         diag: diag.clone(),
     };
 

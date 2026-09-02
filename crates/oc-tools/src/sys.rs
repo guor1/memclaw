@@ -2,7 +2,7 @@
 //!
 //! - `pwd`：当前会话工作目录
 //! - `cd`：切换会话工作目录（受 allowed_roots 约束；成功经 ToolOutput.new_cwd 回传）
-//! - `now`：当前时间（unix 秒 + RFC3339 近似）
+//! - `now`：当前时间（本地墙上时间 + 星期 + 时区名，与系统提示词同一口径）
 //!
 //! cwd 状态不在工具里（工具是无状态 `Arc<dyn Tool>`）；`cd` 只回传新目录，
 //! 由 executor 写回每会话状态。
@@ -17,9 +17,11 @@ use crate::path_guard::resolve_dir_in_roots;
 use crate::types::{ToolCtx, ToolOutput, ToolPolicy, ToolSpec};
 use crate::Tool;
 
-/// sys 工具。持有允许根目录（cd 约束用）。
+/// sys 工具。持有允许根目录（cd 约束用）与本机时区（now 渲染用）。
 pub struct SysTool {
     allowed_roots: Vec<PathBuf>,
+    /// IANA 时区名。`now` 按此渲染本地时间，与系统提示词的「当前时间」同口径。
+    tz: String,
 }
 
 #[derive(Deserialize)]
@@ -34,8 +36,9 @@ enum SysArgs {
 }
 
 impl SysTool {
-    pub fn new(allowed_roots: Vec<PathBuf>) -> Self {
-        Self { allowed_roots }
+    /// `tz`：IANA 时区名（如 `Asia/Shanghai`）。空串 = UTC。
+    pub fn new(allowed_roots: Vec<PathBuf>, tz: impl Into<String>) -> Self {
+        Self { allowed_roots, tz: tz.into() }
     }
 }
 
@@ -77,11 +80,16 @@ impl Tool for SysTool {
                 Ok(out)
             }
             SysArgs::Now => {
+                // 与系统提示词的「当前时间」同一口径（本地墙上时间 + 星期 + 时区名）。
+                // 曾经这里只回 `unix秒: 1788310800`，模型得自己心算换算成几点，
+                // 且与提示词里的格式不一致，等于让它拿两个口径对账。
                 let secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
+                    .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                Ok(ToolOutput::ok(format!("unix秒: {secs}")))
+                let text = oc_core::proactive::fmt_now_local(secs, &self.tz)
+                    .unwrap_or_else(|| format!("unix秒: {secs}"));
+                Ok(ToolOutput::ok(text))
             }
         }
     }
@@ -101,7 +109,7 @@ mod tests {
     #[tokio::test]
     async fn pwd_returns_cwd() {
         let tmp = std::env::temp_dir();
-        let tool = SysTool::new(vec![]);
+        let tool = SysTool::new(vec![], "UTC");
         let out = tool
             .invoke(serde_json::json!({"op": "pwd"}), ctx_with_cwd(tmp.clone()))
             .await
@@ -116,7 +124,7 @@ mod tests {
         let sub = tmp.join(format!("oc-sys-test-{}", std::process::id()));
         std::fs::create_dir_all(&sub).unwrap();
 
-        let tool = SysTool::new(vec![tmp.clone()]);
+        let tool = SysTool::new(vec![tmp.clone()], "UTC");
         let out = tool
             .invoke(
                 serde_json::json!({"op": "cd", "path": sub.to_string_lossy()}),
@@ -136,7 +144,7 @@ mod tests {
         let root = tmp.join(format!("oc-sys-root-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
 
-        let tool = SysTool::new(vec![root.clone()]);
+        let tool = SysTool::new(vec![root.clone()], "UTC");
         let r = tool
             .invoke(
                 serde_json::json!({"op": "cd", "path": tmp.to_string_lossy()}),

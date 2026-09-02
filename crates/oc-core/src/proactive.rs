@@ -9,7 +9,7 @@
 
 mod cron;
 
-pub use cron::{fmt_in_tz, is_once, next_fire, CronParseError, ONCE_EXPR};
+pub use cron::{fmt_in_tz, fmt_now_local, is_once, next_fire, CronParseError, ONCE_EXPR};
 
 /// anti-nagging 配置（设计 §12.5 默认：cooldown 24h / budget 3 / expiry 90d）。
 #[derive(Debug, Clone)]

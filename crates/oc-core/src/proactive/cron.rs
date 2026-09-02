@@ -113,9 +113,7 @@ impl Schedule {
 /// 存在的理由：回执给模型/用户看的必须是**本地时间**。真机上模型只拿到 unix 秒，
 /// 没法向用户复述「几点触发」，于是也无从发现自己把时区算错了 8 小时。
 pub fn fmt_in_tz(ts: i64, tz: &str) -> Option<String> {
-    let zone = resolve_tz(tz).ok()?;
-    let t = OffsetDateTime::from_unix_timestamp(ts).ok()?;
-    let local = t.to_offset(zone.get_offset_utc(&t).to_utc());
+    let (local, _) = to_local(ts, tz)?;
     Some(format!(
         "{:04}-{:02}-{:02} {:02}:{:02}",
         local.year(),
@@ -124,6 +122,49 @@ pub fn fmt_in_tz(ts: i64, tz: &str) -> Option<String> {
         local.hour(),
         local.minute()
     ))
+}
+
+/// 完整的本地时间描述：`2026-09-02 08:56 周三 Asia/Shanghai`。未知时区返回 `None`。
+///
+/// **告知模型「现在几点」的唯一格式**，系统提示词与 `sys:now` 共用，两处必须一致
+/// （否则模型会拿两个不同口径的时间自行对账）。
+///
+/// 三个组成部分都是必需的：
+/// - 墙上时间：模型此前只拿到 unix 秒，被迫每设一次提醒都先调 `sys:now` 再心算换算，
+///   多一轮工具调用就多一次撞上 provider 抖动的机会。
+/// - **星期**：cron 第 5 个字段是 day-of-week，不知道今天周几就写不出「每周五」。
+/// - 时区名：让模型明白这已是本地时间，不必再做偏移换算。
+pub fn fmt_now_local(ts: i64, tz: &str) -> Option<String> {
+    let (local, zone_name) = to_local(ts, tz)?;
+    Some(format!(
+        "{:04}-{:02}-{:02} {:02}:{:02} {} {}",
+        local.year(),
+        local.month() as u8,
+        local.day(),
+        local.hour(),
+        local.minute(),
+        weekday_cn(local.weekday()),
+        zone_name,
+    ))
+}
+
+/// 投影到目标时区，返回（本地时间, 规范时区名）。
+fn to_local(ts: i64, tz: &str) -> Option<(OffsetDateTime, &'static str)> {
+    let zone = resolve_tz(tz).ok()?;
+    let t = OffsetDateTime::from_unix_timestamp(ts).ok()?;
+    Some((t.to_offset(zone.get_offset_utc(&t).to_utc()), zone.name()))
+}
+
+fn weekday_cn(w: time::Weekday) -> &'static str {
+    match w.number_days_from_sunday() {
+        0 => "周日",
+        1 => "周一",
+        2 => "周二",
+        3 => "周三",
+        4 => "周四",
+        5 => "周五",
+        _ => "周六",
+    }
 }
 
 /// 一次性延时任务的表达式标记（P1-5）。
