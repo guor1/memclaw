@@ -1,5 +1,89 @@
 # 构建脚本说明
 
+本目录提供多平台构建脚本：**Ubuntu**（服务器部署）、**Windows**（桌面使用）。
+
+---
+
+## Windows 构建脚本（新增）
+
+### 一键构建
+
+```powershell
+# 在 PowerShell 中执行
+cd C:\dev\workspace\memclaw
+.\scripts\build-windows.ps1
+```
+
+**输出**：
+- `dist-windows\oc-windows-YYYYMMDD-HHMMSS\` — 包含 oc.exe + 配置 + 安装脚本
+- `dist-windows\oc-windows-YYYYMMDD-HHMMSS.zip` — 压缩包
+
+**依赖**：
+- Rust 1.90+ (下载：https://win.rustup.rs/x86_64)
+- Windows 10/11
+
+### 安装使用
+
+#### 方式 1：自动安装（推荐）
+
+1. 解压 `oc-windows-*.zip`
+2. **右键点击 `install.bat`，选择"以管理员身份运行"**
+3. 脚本会自动：
+   - ✅ 复制 oc.exe 到 `C:\Windows\System32\`
+   - ✅ 创建 `C:\Users\你\.oc\config.toml`（自动设置 `transport="pipe"`）
+   - ✅ 运行 `oc doctor` 验证
+4. 设置 API Key（重要）：
+   ```powershell
+   # 打开新的 PowerShell 窗口
+   [Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY", "sk-xxxx", "User")
+   # 关闭并重新打开 PowerShell 生效
+   ```
+5. 启动：
+   ```powershell
+   oc daemon start
+   oc tui
+   ```
+
+#### 方式 2：手动安装
+
+```powershell
+# 1. 复制二进制（需管理员权限）
+Copy-Item oc.exe C:\Windows\System32\
+
+# 2. 创建配置
+$OcHome = "$env:USERPROFILE\.oc"
+New-Item -ItemType Directory -Path $OcHome -Force
+Copy-Item config.example.toml $OcHome\config.toml
+
+# 3. 设置 API Key
+[Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY", "sk-xxxx", "User")
+
+# 4. 验证（重新打开 PowerShell）
+oc doctor
+```
+
+### Windows 特殊说明
+
+**必须配置项**：
+```toml
+[server]
+transport = "pipe"  # Windows 必须用 pipe（不是 unix）
+```
+
+**环境变量生效**：
+- 设置环境变量后，**必须关闭所有 PowerShell/Terminal 窗口并重新打开**
+- 或用临时变量：`$env:DEEPSEEK_API_KEY="sk-xxxx"; oc daemon start`
+
+**防火墙/杀毒软件**：
+- 首次运行可能被 Windows Defender 拦截
+- 解决：设置 -> 病毒和威胁防护 -> 排除项 -> 添加 oc.exe
+
+**Windows 服务（可选）**：
+- 用 NSSM 注册为系统服务：https://nssm.cc/download
+- 详见 `INSTALL.txt`
+
+---
+
 ## Ubuntu 部署脚本
 
 本目录提供两种 Ubuntu 构建方式：
@@ -173,7 +257,7 @@ panic = "unwind"     # 保留 panic 堆栈（设计 §10.3 需要）
 
 ---
 
-## 高级：systemd 服务（可选）
+## 高级：systemd 服务（Ubuntu 可选）
 
 生产环境可用 systemd 管理守护进程：
 
@@ -202,3 +286,45 @@ sudo systemctl status oc-daemon
 ```
 
 **注意**：记得替换 `youruser` 和 `DEEPSEEK_API_KEY`。
+
+---
+
+## 平台对比
+
+| 特性 | Windows | Ubuntu |
+|------|---------|---------|
+| **构建脚本** | `build-windows.ps1` | `build-ubuntu.sh` |
+| **二进制名** | `oc.exe` | `oc` |
+| **配置目录** | `C:\Users\你\.oc\` | `~/.oc/` |
+| **transport** | `pipe` | `unix` |
+| **安装方式** | install.bat（管理员） | install.sh |
+| **环境变量** | 需重启 PowerShell 生效 | 立即生效（source） |
+| **依赖** | 无（静态链接） | libsqlite3-0 |
+| **系统服务** | NSSM | systemd |
+
+---
+
+## 快速参考
+
+### Windows
+```powershell
+# 构建
+.\scripts\build-windows.ps1
+
+# 安装（右键 install.bat "以管理员身份运行"）
+[Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY", "sk-xxxx", "User")
+oc doctor
+oc daemon start
+```
+
+### Ubuntu
+```bash
+# 构建
+./scripts/build-ubuntu.sh
+
+# 安装
+./install.sh
+export DEEPSEEK_API_KEY=sk-xxxx
+oc doctor
+oc daemon start
+```
