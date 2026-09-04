@@ -55,23 +55,48 @@ response 的 OutputItem 数组独立存起来，与 memclaw 的线性 transcript
 
 实际只需**复用那次请求所在的会话**：记住 `response_id → SessionId`，后续请求落回同一个
 session actor，历史由 daemon 自己拼。映射放在内存（`DashMap`），重启后失效——此时降级为
-新会话而不是报错，因为「继续对话」的意图用新会话仍能满足，报 404 反而更糟。
+默认会话而不是报错，因为「继续对话」的意图用默认会话仍能满足，报 404 反而更糟。降级时
+`user` 派生仍然生效：陈旧的 response id 不该把调用方的身份作用域一起丢掉。
 
-优先级：`previous_response_id` → `user` 派生 → 每请求独立。
+优先级：`x-openclaw-session-key` 头 → `previous_response_id` → `user` 派生 → `main`。
 
 ```rust
 // adapter.rs
-pub fn resolve_session(req: &CreateResponseReq, sessions: &ResponseSessions) -> SessionId {
+pub fn resolve_session(
+    req: &CreateResponseReq,
+    session_key: Option<SessionId>,   // 来自 x-openclaw-session-key
+    sessions: &ResponseSessions,
+) -> SessionId {
+    if let Some(sid) = session_key { return sid; }   // 显式路由优先于任何推断
     if let Some(prev) = &req.previous_response_id {
         if let Some(sid) = sessions.get(prev) { return sid.clone(); }
     }
     if let Some(user) = &req.user {
-        // 同一个 user 稳定映射到同一会话，跨请求共享上下文
+        // 同一个 user 稳定映射到同一会话，跨请求共享上下文（与 main 隔离）
         return SessionId::new(format!("http-user-{:x}", hash(user)));
     }
-    SessionId::new(format!("http-{}", uuid::Uuid::now_v7()))  // 默认无状态
+    SessionId::main()   // 默认与 TUI 同一条对话
 }
 ```
+
+`x-openclaw-session-key` 沿用 OpenClaw gateway 的头名，照它写的客户端不用改。保留前缀
+`subagent:` / `cron:` / `dreaming:` / `acp:` 一律 400；键还要求非空、≤128 字符、无控制字符。
+与其余解析路径不同，**非法 key 是硬错误**：调用方指名了会话，静默跑到别处比 400 更糟。
+
+#### 为什么默认是 `main` 而不是 OpenClaw 的「每请求独立」
+
+1. **无状态默认在本项目是泄漏。** `registry.rs` 明确「无空闲淘汰」，而 session actor 一起来就
+   `ensure_session` 落库。每请求一个新 session id 会永久留下一个常驻 actor + 一行 `session`
+   记录，无界增长。默认走 `main` 让最常见路径零新增。
+2. **memclaw 是单用户常驻伴侣，HTTP 网关只是另一个 client。** `oc http` 只绑 loopback 且无鉴权，
+   没有多租户语义；cron 也把事件归属 `SessionId::main()` 好让主视图显示 —— `main` 就是
+   「用户那一条对话」，这个意图已经在代码里。
+3. OpenClaw 默认无状态是因为它跨 agent / 跨认证主体路由（authSubject、agentId、scopes 都参与
+   会话作用域匹配），没有唯一显然的落点。那套约束在这里不存在，照搬默认值反而是错的。
+
+**代价**（选 `main` 就得接受）：一个会话是单车道，走 `main` 的 HTTP 请求与 TUI 抢同一条队列，
+队列满了直接 `Rejected`；两者也共享上下文预算，自动化流量会推着 `main` 提前 compact。高频
+自动化应显式传一个自己的 session key。
 
 ### 2.2 `instructions` → 追加而非替换
 
@@ -130,8 +155,8 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 |---|---|---|
 | `input` | ✅ | string，或 items 数组（取最后一条 user 消息为当轮） |
 | `instructions` | ✅ | 追加到系统提示 |
-| `previous_response_id` | ✅ | 复用会话；未知 id 降级为新会话 |
-| `user` | ✅ | 派生稳定会话 |
+| `previous_response_id` | ✅ | 复用会话；未知 id 降级为默认会话 |
+| `user` | ✅ | 派生稳定会话（与 `main` 隔离） |
 | `stream` | ✅ | SSE / JSON |
 | `temperature` | ✅ | best-effort，透传 |
 | `max_output_tokens` | ✅ | best-effort，透传 |
@@ -146,7 +171,15 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 **忽略与拒绝的区别**：忽略的参数不影响结果正确性（少一个旋钮）；会改变语义的参数一律拒绝，
 避免客户端以为生效了。
 
-### 4.2 输入类型
+### 4.2 请求头
+
+| 头 | 状态 | 说明 |
+|---|---|---|
+| `x-openclaw-session-key` | ✅ | 显式会话路由，见 §2.1。非法值 400 |
+| `x-openclaw-agent-id` `x-openclaw-model` | ❌ | 单 agent、模型由 daemon 定，无对应概念 |
+| `Authorization` | ⚠️ 忽略 | 当前无鉴权；`oc http` 只绑 loopback |
+
+### 4.3 输入类型
 
 | 类型 | 状态 |
 |---|---|
@@ -158,7 +191,7 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 
 历史 `assistant` 消息被忽略：daemon 的 transcript 已有，重复送入会让上下文出现两份。
 
-### 4.3 端点
+### 4.4 端点
 
 | 端点 | 状态 |
 |---|---|
@@ -244,14 +277,17 @@ oc-llm / oc-server / compaction 的 token 估算。改动面最大，且依赖�
 
 ## 9. 验证状态
 
-`cargo test -p oc-http`：22 个单元测试，覆盖
+`cargo test -p oc-http`：35 个单元测试，覆盖
 
-- **会话解析** — user 稳定性、无 user 时的独立性、`previous_response_id` 命中与未命中降级
+- **会话解析** — user 稳定性与 `main` 隔离、裸请求落 `main`、`previous_response_id` 命中与
+  未命中降级（降级仍保留 user 作用域）
+- **session key 校验** — 头优先于 user/`previous_response_id`、trim、空值/超长/控制字符/保留
+  前缀拒绝（且只匹配前缀不匹配子串）、非 UTF-8 头拒绝
 - **input 归一化** — 多条 user 取最后一条、system 进提示、空输入拒绝、`function_call_output` 单独成轮
 - **文件处理** — base64 各余数长度的解码、不可信边界包裹、url 源拒绝、非 function 工具拒绝
 - **SSE 状态机** — 跨 run 事件隔离、首 delta 开 item、序列号单调、三种终止路径（正常/无文本/错误）
 
-全量 `cargo test`：229 passed。`cargo clippy -p oc-http --all-targets`：无告警。
+全量 `cargo test`：255 passed。`cargo clippy -p oc-http --all-targets`：无告警。
 
 尚未做**真机端到端验证**（起 daemon + `oc http`，用真实 OpenAI SDK 打通）。
 按本仓历史，P0-1 / P1-1 的缺陷都是真机才暴露的，这一步不能省。

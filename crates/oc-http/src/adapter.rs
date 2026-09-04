@@ -1,9 +1,18 @@
 //! OpenAI ↔ oc-proto conversion logic.
 //!
-//! Key design decisions (following OpenClaw):
+//! Session routing, in priority order:
+//! - `x-openclaw-session-key` header → that session verbatim (explicit routing)
 //! - `previous_response_id` → session reuse via in-memory map
 //! - `user` → stable session derivation (hash)
-//! - No `user`/`previous_response_id` → per-request ephemeral session
+//! - Nothing → the `main` session
+//!
+//! The default differs from OpenClaw's gateway, which is stateless per request.
+//! OpenClaw routes across agents and auth subjects, so it has no single obvious
+//! session to fall into; memclaw is a single-user resident agent where `main` is
+//! *the* conversation (cron already reports into it, see `proactive.rs`). A
+//! stateless default here also leaks: the session registry has no idle eviction
+//! and each new session id persists an actor plus a `session` row, so one
+//! session per request grows without bound.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -17,36 +26,91 @@ use crate::types::*;
 
 /// Maps `response_id` → `SessionId` for `previous_response_id` continuity.
 ///
-/// In-memory only: a restart loses continuity, which degrades to a new session
-/// rather than failing the request. Persisting this would need a store migration;
-/// deferred until there is a concrete need.
+/// In-memory only: a restart loses continuity, which degrades to the default
+/// session rather than failing the request. Persisting this would need a store
+/// migration; deferred until there is a concrete need.
 pub type ResponseSessions = Arc<DashMap<String, SessionId>>;
+
+/// Header carrying an explicit session id. Name matches OpenClaw's gateway so
+/// clients written against it work unchanged.
+pub const SESSION_KEY_HEADER: &str = "x-openclaw-session-key";
+
+/// Prefixes callers may not route into. Nothing uses these as session ids today
+/// (cron/dreaming run isolated turns without a session actor), but reserving
+/// them keeps the namespace free for when they do, and matches OpenClaw.
+const RESERVED_PREFIXES: &[&str] = &["subagent:", "cron:", "dreaming:", "acp:"];
+
+/// Longest accepted session key. It becomes a `session.id` primary key, so this
+/// is about keeping rows sane rather than any hard storage limit.
+const MAX_SESSION_KEY_LEN: usize = 128;
+
+/// Validate an explicit session key from [`SESSION_KEY_HEADER`].
+///
+/// Unlike the rest of session resolution, a bad key is a hard error: the caller
+/// named a session, so silently running somewhere else would be worse than 400.
+pub fn validate_session_key(raw: &str) -> HttpResult<SessionId> {
+    let key = raw.trim();
+    if key.is_empty() {
+        return Err(HttpError::BadRequest(format!(
+            "{SESSION_KEY_HEADER} must not be empty"
+        )));
+    }
+    if key.chars().count() > MAX_SESSION_KEY_LEN {
+        return Err(HttpError::BadRequest(format!(
+            "{SESSION_KEY_HEADER} exceeds {MAX_SESSION_KEY_LEN} characters"
+        )));
+    }
+    if key.chars().any(|c| c.is_control()) {
+        return Err(HttpError::BadRequest(format!(
+            "{SESSION_KEY_HEADER} must not contain control characters"
+        )));
+    }
+    if let Some(p) = RESERVED_PREFIXES
+        .iter()
+        .find(|p| key.starts_with(**p))
+    {
+        return Err(HttpError::BadRequest(format!(
+            "{SESSION_KEY_HEADER} uses reserved namespace '{p}'"
+        )));
+    }
+    Ok(SessionId::new(key))
+}
 
 /// Resolve which session a request should run in.
 ///
-/// Priority: `previous_response_id` (reuse) → `user` (stable derive) → new ephemeral.
+/// Priority: explicit `session_key` → `previous_response_id` (reuse) →
+/// `user` (stable derive) → `main`.
 pub fn resolve_session(
     req: &CreateResponseReq,
+    session_key: Option<SessionId>,
     sessions: &ResponseSessions,
 ) -> SessionId {
-    // 1. previous_response_id: reuse that response's session
+    // 1. Explicit routing wins: the caller named the session, and that intent
+    //    outranks any continuity we might infer.
+    if let Some(sid) = session_key {
+        return sid;
+    }
+
+    // 2. previous_response_id: reuse that response's session
     if let Some(prev_id) = &req.previous_response_id {
         if let Some(sid) = sessions.get(prev_id) {
             return sid.clone();
         }
         // Unknown id: fall through rather than erroring — the caller's intent
-        // (continue a conversation) is better served by a fresh session than a 404.
+        // (continue a conversation) is better served by the default session
+        // than a 404.
     }
 
-    // 2. user: derive a stable session so repeated calls share context
+    // 3. user: derive a stable session so repeated calls share context, kept
+    //    apart from `main` so multi-caller setups do not collide.
     if let Some(user) = &req.user {
         let mut h = DefaultHasher::new();
         user.hash(&mut h);
         return SessionId::new(format!("http-user-{:x}", h.finish()));
     }
 
-    // 3. Stateless: new session per request
-    SessionId::new(format!("http-{}", uuid::Uuid::now_v7()))
+    // 4. Default: the resident main conversation, shared with the TUI.
+    SessionId::main()
 }
 
 /// Extracted parts of an OpenAI request that map onto a memclaw turn.
@@ -462,7 +526,10 @@ mod tests {
         a.user = Some("alice".into());
         let mut b = req(Input::Text("y".into()));
         b.user = Some("alice".into());
-        assert_eq!(resolve_session(&a, &sessions), resolve_session(&b, &sessions));
+        assert_eq!(
+            resolve_session(&a, None, &sessions),
+            resolve_session(&b, None, &sessions)
+        );
     }
 
     #[test]
@@ -472,19 +539,97 @@ mod tests {
         a.user = Some("alice".into());
         let mut b = req(Input::Text("y".into()));
         b.user = Some("bob".into());
-        assert_ne!(resolve_session(&a, &sessions), resolve_session(&b, &sessions));
+        assert_ne!(
+            resolve_session(&a, None, &sessions),
+            resolve_session(&b, None, &sessions)
+        );
     }
 
     #[test]
-    fn no_user_yields_fresh_session_each_call() {
+    fn user_derived_session_is_not_main() {
+        let sessions: ResponseSessions = Arc::new(DashMap::new());
+        let mut r = req(Input::Text("x".into()));
+        r.user = Some("alice".into());
+        assert_ne!(
+            resolve_session(&r, None, &sessions),
+            SessionId::main(),
+            "a named user gets its own session, not the shared main one"
+        );
+    }
+
+    #[test]
+    fn bare_request_defaults_to_main() {
         let sessions: ResponseSessions = Arc::new(DashMap::new());
         let a = req(Input::Text("x".into()));
         let b = req(Input::Text("x".into()));
-        assert_ne!(
-            resolve_session(&a, &sessions),
-            resolve_session(&b, &sessions),
-            "stateless by default"
+        assert_eq!(resolve_session(&a, None, &sessions), SessionId::main());
+        assert_eq!(
+            resolve_session(&a, None, &sessions),
+            resolve_session(&b, None, &sessions),
+            "repeated bare calls share one conversation"
         );
+    }
+
+    #[test]
+    fn session_key_header_wins_over_user_and_previous_response() {
+        let sessions: ResponseSessions = Arc::new(DashMap::new());
+        sessions.insert("resp_1".to_string(), SessionId::new("http-abc"));
+
+        let mut r = req(Input::Text("x".into()));
+        r.user = Some("alice".into());
+        r.previous_response_id = Some("resp_1".into());
+
+        let explicit = SessionId::new("notes");
+        assert_eq!(
+            resolve_session(&r, Some(explicit.clone()), &sessions),
+            explicit
+        );
+    }
+
+    #[test]
+    fn session_key_can_target_main_explicitly() {
+        let sessions: ResponseSessions = Arc::new(DashMap::new());
+        let key = validate_session_key("main").unwrap();
+        let r = req(Input::Text("x".into()));
+        assert_eq!(resolve_session(&r, Some(key), &sessions), SessionId::main());
+    }
+
+    #[test]
+    fn session_key_is_trimmed() {
+        assert_eq!(validate_session_key("  notes\t").unwrap().as_str(), "notes");
+    }
+
+    #[test]
+    fn empty_session_key_is_rejected() {
+        assert!(validate_session_key("").is_err());
+        assert!(validate_session_key("   ").is_err(), "whitespace-only too");
+    }
+
+    #[test]
+    fn reserved_session_key_namespaces_are_rejected() {
+        for key in ["subagent:1", "cron:abc", "dreaming:x", "acp:y"] {
+            assert!(validate_session_key(key).is_err(), "key={key}");
+        }
+    }
+
+    #[test]
+    fn reserved_prefix_check_is_not_substring_matching() {
+        // Only a leading prefix is reserved; the word elsewhere is fine.
+        assert!(validate_session_key("my-cron:notes").is_ok());
+    }
+
+    #[test]
+    fn overlong_session_key_is_rejected() {
+        let key = "a".repeat(MAX_SESSION_KEY_LEN + 1);
+        assert!(validate_session_key(&key).is_err());
+        let ok = "a".repeat(MAX_SESSION_KEY_LEN);
+        assert!(validate_session_key(&ok).is_ok(), "boundary is inclusive");
+    }
+
+    #[test]
+    fn control_characters_in_session_key_are_rejected() {
+        assert!(validate_session_key("no\nnewlines").is_err());
+        assert!(validate_session_key("no\0nulls").is_err());
     }
 
     #[test]
@@ -495,17 +640,29 @@ mod tests {
 
         let mut r = req(Input::Text("follow up".into()));
         r.previous_response_id = Some("resp_1".into());
-        assert_eq!(resolve_session(&r, &sessions), known);
+        assert_eq!(resolve_session(&r, None, &sessions), known);
     }
 
     #[test]
-    fn unknown_previous_response_id_degrades_to_new_session() {
+    fn unknown_previous_response_id_degrades_to_default() {
         let sessions: ResponseSessions = Arc::new(DashMap::new());
         let mut r = req(Input::Text("follow up".into()));
         r.previous_response_id = Some("resp_missing".into());
-        // Does not error; just gets a fresh session.
-        let sid = resolve_session(&r, &sessions);
-        assert!(sid.as_str().starts_with("http-"));
+        // Does not error; falls through to the default session.
+        assert_eq!(resolve_session(&r, None, &sessions), SessionId::main());
+    }
+
+    #[test]
+    fn unknown_previous_response_id_still_honors_user() {
+        let sessions: ResponseSessions = Arc::new(DashMap::new());
+        let mut r = req(Input::Text("follow up".into()));
+        r.previous_response_id = Some("resp_missing".into());
+        r.user = Some("alice".into());
+        let sid = resolve_session(&r, None, &sessions);
+        assert!(
+            sid.as_str().starts_with("http-user-"),
+            "a stale response id must not discard the user scope, got {sid}"
+        );
     }
 
     #[test]

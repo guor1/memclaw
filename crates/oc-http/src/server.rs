@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State as AxumState},
+    http::HeaderMap,
     response::{IntoResponse, Response as AxumResponse, Sse},
     routing::{get, post},
     Json, Router,
@@ -123,14 +124,34 @@ async fn await_res(conn: &mut NdjsonConn) -> HttpResult<MethodOk> {
     }
 }
 
+/// Read [`adapter::SESSION_KEY_HEADER`], if present.
+///
+/// A non-UTF8 header value is an error rather than being ignored: the caller
+/// meant to route somewhere specific, and guessing would put the turn in the
+/// wrong conversation.
+fn extract_session_key(headers: &HeaderMap) -> HttpResult<Option<SessionId>> {
+    let Some(raw) = headers.get(adapter::SESSION_KEY_HEADER) else {
+        return Ok(None);
+    };
+    let value = raw.to_str().map_err(|_| {
+        HttpError::BadRequest(format!(
+            "{} must be valid UTF-8",
+            adapter::SESSION_KEY_HEADER
+        ))
+    })?;
+    adapter::validate_session_key(value).map(Some)
+}
+
 async fn create_response(
     AxumState(state): AxumState<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateResponseReq>,
 ) -> HttpResult<AxumResponse> {
     adapter::reject_unsupported(&req)?;
     adapter::validate_tools(&req.tools)?;
 
-    let session_id = adapter::resolve_session(&req, &state.sessions);
+    let session_key = extract_session_key(&headers)?;
+    let session_id = adapter::resolve_session(&req, session_key, &state.sessions);
     let extracted = adapter::extract_input(&req)?;
 
     // Per-request instructions and file content ride along as a turn prefix.
@@ -335,11 +356,44 @@ async fn cancel_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
 
     #[test]
     fn token_estimate_is_zero_only_for_empty() {
         assert_eq!(estimate_tokens(""), 0);
         assert_eq!(estimate_tokens("a"), 1, "non-empty text is at least 1 token");
         assert_eq!(estimate_tokens("abcdefgh"), 2);
+    }
+
+    fn headers_with(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(adapter::SESSION_KEY_HEADER, HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    #[test]
+    fn missing_session_key_header_is_none() {
+        assert!(extract_session_key(&HeaderMap::new()).unwrap().is_none());
+    }
+
+    #[test]
+    fn session_key_header_is_read_and_validated() {
+        let got = extract_session_key(&headers_with("notes")).unwrap();
+        assert_eq!(got, Some(SessionId::new("notes")));
+
+        assert!(
+            extract_session_key(&headers_with("cron:x")).is_err(),
+            "reserved namespaces are rejected at the handler boundary too"
+        );
+    }
+
+    #[test]
+    fn non_utf8_session_key_header_is_rejected() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            adapter::SESSION_KEY_HEADER,
+            HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
+        );
+        assert!(extract_session_key(&h).is_err());
     }
 }

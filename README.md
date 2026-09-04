@@ -167,7 +167,31 @@ with client.responses.create(input="Count to 5", stream=True) as stream:
             print(event.delta, end="", flush=True)
 ```
 
-**会话延续**：传同一个 `user` 会派生出稳定会话，后续请求自动带上下文；也可以用上一次的响应 id。
+**会话路由**：默认落在 `main` —— 和 TUI 是同一条对话，HTTP 发的消息 TUI 里看得见，反之亦然。
+用 `x-openclaw-session-key` 头显式指定别的会话：
+
+```bash
+# 显式路由到一个独立会话（自动化脚本建议这样，别挤 main）
+curl -X POST http://127.0.0.1:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "x-openclaw-session-key: automation" \
+  -d '{"input": "汇总今天的构建结果", "stream": false}'
+```
+
+OpenAI SDK 走 `default_headers`：
+
+```python
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="dummy",
+                default_headers={"x-openclaw-session-key": "automation"})
+```
+
+优先级：`x-openclaw-session-key` → `previous_response_id` → `user` 派生 → `main`。
+`subagent:` / `cron:` / `dreaming:` / `acp:` 是保留前缀，用了会 400。
+
+一个会话是**单车道**：走 `main` 的 HTTP 请求会和 TUI 抢同一条队列（TUI 那轮没跑完就得排队），
+也会一起消耗 main 的上下文预算、推着它提前压缩。高频自动化请显式给一个自己的 session key。
+
+**会话延续**：传同一个 `user` 会派生出稳定会话（`http-user-<hash>`，与 `main` 隔离），后续请求自动带上下文；也可以用上一次的响应 id。
 
 ```python
 a = client.responses.create(input="My favorite color is blue", user="alice")
