@@ -33,6 +33,15 @@ enum Command {
     },
     /// 启动常驻进程。
     Serve,
+    /// 启动 OpenAI Responses API 兼容的 HTTP 服务器。
+    Http {
+        /// HTTP 监听端口。
+        #[arg(long, default_value = "8080")]
+        port: u16,
+        /// oc-server socket/pipe 路径（默认平台默认路径）。
+        #[arg(long)]
+        socket: Option<String>,
+    },
     /// 交互式初始化：生成 ~/.oc 骨架（config.toml + SOUL.md 等）。
     Onboard,
     /// 定时任务管理（主动性）。
@@ -130,6 +139,7 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Some(Command::Doctor { dump_schema }) => doctor::run(dump_schema),
         Some(Command::Serve) => run_serve(),
+        Some(Command::Http { port, socket }) => run_http(port, socket),
         Some(Command::Onboard) => onboard::run(),
         Some(Command::Cron(CronCmd::Add { expr, prompt, tz })) => {
             cli_client::cron_add(expr, prompt, tz)
@@ -155,6 +165,57 @@ fn main() -> anyhow::Result<()> {
         // 无子命令 → 连 daemon 进 TUI。
         None => tui_runner::run(),
     }
+}
+
+/// 启动 OpenAI Responses API 兼容层（阻塞）。
+///
+/// 独立于 `serve`：HTTP 层只做协议适配，连到已在跑的 daemon。两个进程分开，
+/// HTTP 侧崩溃不影响核心会话。
+fn run_http(port: u16, socket: Option<String>) -> anyhow::Result<()> {
+    let home = paths::oc_home()?;
+
+    use tracing_subscriber::prelude::*;
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "oc=info,oc_http=info".into());
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+
+    // socket 覆盖：显式给路径时按平台语义解释（Windows 管道名 / Unix 路径）。
+    let kind = match socket {
+        Some(s) => {
+            #[cfg(windows)]
+            {
+                oc_server::TransportKind::Pipe(s)
+            }
+            #[cfg(not(windows))]
+            {
+                oc_server::TransportKind::Unix(std::path::PathBuf::from(s))
+            }
+        }
+        None => oc_server::TransportKind::platform_default(&home),
+    };
+
+    // 模型名仅用于回填响应体的 `model` 字段（客户端常据此展示/记账）；
+    // 实际用哪个模型由 daemon 的配置决定，HTTP 侧无法覆盖。
+    let cfg = config_loader::load()?;
+    let (_, session_cfg, _) = provider_setup::build(&cfg)?;
+    let model = session_cfg.model.clone();
+
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(async move {
+        let pool = oc_http::conn_pool::ConnPool::new(kind, 4);
+        let app = oc_http::create_app(pool, model);
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        // 只绑 loopback：该端点等同于对 daemon 的完全访问权，且当前无鉴权，
+        // 不能暴露到网络。需要远程访问时应在前面放一个带认证的反向代理。
+        tracing::info!(%addr, "OpenAI Responses API 监听中（仅本机，无鉴权）");
+        axum::serve(listener, app).await?;
+        Ok::<_, anyhow::Error>(())
+    })?;
+    Ok(())
 }
 
 /// 启动常驻进程（阻塞直到收到关停信号）。

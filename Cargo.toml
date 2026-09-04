@@ -8,7 +8,7 @@ members = [
     "crates/oc-tools",
     "crates/oc-server",
     "crates/oc-tui",
-    "crates/oc-cli",
+    "crates/oc-cli", "crates/oc-http",
 ]
 
 [workspace.package]

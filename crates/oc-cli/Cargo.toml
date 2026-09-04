@@ -18,6 +18,8 @@ oc-server = { workspace = true }
 oc-llm    = { workspace = true }
 oc-tools  = { workspace = true }
 oc-tui    = { path = "../oc-tui" }
+oc-http   = { path = "../oc-http" }
+axum = "0.7"
 clap = { version = "4", features = ["derive"] }
 directories = "5"
 serde_json = "1"

@@ -2,7 +2,7 @@
 
 一个用 Rust 写的**个人助手 daemon**。常驻后台、能自己动（定时/主动提醒）、会记事（分层记忆 + 睡眠巩固），通过终端 UI 与你对话，接 DeepSeek 等 OpenAI 兼容模型。
 
-设计以「纯核心 + 单向依赖 + 单写库」为骨架，把所有决策收进可确定性测试的领域层，把 IO / 并发 / 时钟隔离在外围。当前 207 个测试全绿。
+设计以「纯核心 + 单向依赖 + 单写库」为骨架，把所有决策收进可确定性测试的领域层，把 IO / 并发 / 时钟隔离在外围。当前 229 个测试全绿。
 
 > 状态：早期骨架（M1–M6 主干闭环 + P0/P1-1~P1-5 已落地）。能跑，但仍有明确缺口，
 > 见 [docs/plan/下一阶段计划.md](docs/plan/下一阶段计划.md)。文档总索引：[docs/README.md](docs/README.md)。
@@ -33,6 +33,11 @@
 - Web 工具（`web` feature）：WebFetch（正文抽取）+ WebSearch（DuckDuckGo HTML 端点，无需 API key）。
 - 交互式审批门：敏感操作可要求确认（`prompt | allow | deny`）。
 
+**OpenAI API 兼容**
+- `oc http` 提供 OpenAI Responses API 兼容端点（`POST /v1/responses`），可直接对接 OpenAI SDK / LangChain。
+- 支持流式 SSE 与非流式、动态 `instructions`、`user` / `previous_response_id` 会话延续、base64 文件输入。
+- 独立进程：HTTP 层崩溃不影响核心会话。覆盖主流文本对话用例，边界见 [方案文档](docs/design/OpenAI-Responses-API-方案.md)。
+
 **可靠性与安全**
 - 单库 SQLite（WAL + 单写线程 + 前向迁移 + `user_version`）。
 - 审计哈希链（FNV-1a），来源分级 provenance（绝不默认 Owner）。
@@ -46,11 +51,12 @@
 单向、无环依赖。核心是纯的，外围才碰 IO。
 
 ```
-oc-cli ──▶ oc-tui ──▶ oc-server ──▶ oc-core   (纯策略：不 spawn / 不连接 / 不读时钟 / 不 rand)
-                          │      └─▶ oc-store  (单库 SQLite，单写线程)
-                          │      └─▶ oc-tools  (工具 trait + 审批门 + 结果净化)
-                          └────────▶ oc-llm    (Provider trait + 统一 Delta 流)
-                     oc-proto  (CLI/TUI ↔ daemon 线上契约，纯类型)
+oc-cli ──▶ oc-tui  ──▶ oc-server ──▶ oc-core   (纯策略：不 spawn / 不连接 / 不读时钟 / 不 rand)
+   │                      │      └─▶ oc-store  (单库 SQLite，单写线程)
+   │                      │      └─▶ oc-tools  (工具 trait + 审批门 + 结果净化)
+   │                      └────────▶ oc-llm    (Provider trait + 统一 Delta 流)
+   └─────▶ oc-http ─ ─ ─▶ (经 socket/pipe 连到独立进程的 oc-server)
+                     oc-proto  (client ↔ daemon 线上契约，纯类型)
 ```
 
 | crate | 职责 |
@@ -62,7 +68,8 @@ oc-cli ──▶ oc-tui ──▶ oc-server ──▶ oc-core   (纯策略：不
 | `oc-tools` | 工具集，Tool trait + 策略管道 + exec 审批门 |
 | `oc-server` | 常驻进程，agent 循环 / 看门狗 / 心跳 / 主动性 |
 | `oc-tui` | 本地终端 UI，协议第一个 client，纯展示 |
-| `oc-cli` | CLI 入口，doctor / serve / onboard / cron / memory / status / debug |
+| `oc-http` | OpenAI Responses API 兼容层，协议适配 + SSE（独立进程） |
+| `oc-cli` | CLI 入口，doctor / serve / http / onboard / cron / memory / status / debug |
 
 细节见 [docs/design/04-详细设计文档.md](docs/design/04-详细设计文档.md)。
 
@@ -116,6 +123,65 @@ oc cron add "0 9 * * 1-5" "早上好，汇总今天日程"   # 工作日 9 点�
 oc cron list
 oc cron rm <cron_id>
 ```
+
+### OpenAI API 兼容（HTTP 网关）
+
+启动 HTTP 网关（需先启动 daemon）：
+
+```bash
+oc http                    # 默认端口 8080，监听 127.0.0.1
+oc http --port 3000        # 自定义端口
+```
+
+**curl 测试**：
+
+```bash
+# 非流式
+curl -X POST http://127.0.0.1:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"input": "What is 2+2?", "stream": false}'
+
+# 流式
+curl -N -X POST http://127.0.0.1:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Count to 5", "stream": true}'
+```
+
+**OpenAI SDK 集成**（Python）：只实现了 Responses API，用 `client.responses`，不是 `client.chat.completions`（后者是另一个端点，未实现）。
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8080/v1",
+    api_key="dummy",  # 当前无鉴权，任意非空值
+)
+
+resp = client.responses.create(input="Hello!")
+print(resp.output[0].content[0].text)
+
+# 流式
+with client.responses.create(input="Count to 5", stream=True) as stream:
+    for event in stream:
+        if event.type == "response.output_text.delta":
+            print(event.delta, end="", flush=True)
+```
+
+**会话延续**：传同一个 `user` 会派生出稳定会话，后续请求自动带上下文；也可以用上一次的响应 id。
+
+```python
+a = client.responses.create(input="My favorite color is blue", user="alice")
+b = client.responses.create(input="What is my favorite color?", user="alice")
+print(b.output[0].content[0].text)  # 提到 blue
+
+# 或显式接续某个响应
+c = client.responses.create(input="And my second favorite?",
+                            previous_response_id=a.id)
+```
+
+`model` 参数会被忽略——实际用哪个模型由 daemon 的 `~/.oc/config.toml` 决定。完整参数支持情况、
+不支持的特性（多模态、动态 `tools`、`background`）见
+[OpenAI-Responses-API-方案.md](docs/design/OpenAI-Responses-API-方案.md)。
 
 ### 记忆检索（自省/调试）
 
@@ -229,7 +295,7 @@ run span 是否起步、卡在哪个 await、`finish_reason` 是什么。
 ### 测试与检查
 
 ```bash
-cargo test               # 全部测试（当前 207 个）
+cargo test               # 全部测试（当前 229 个）
 cargo test -p oc-core    # 单 crate
 cargo clippy --all-targets
 ```
