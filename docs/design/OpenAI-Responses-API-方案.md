@@ -138,7 +138,7 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 | `model` | ⚠️ 忽略 | 实际模型由 daemon 配置决定 |
 | `store` | ⚠️ 忽略 | 恒为持久化，无法关闭 |
 | `metadata` `reasoning` `truncation` | ⚠️ 忽略 | 接受但不起作用 |
-| `tools` `tool_choice` | ❌ 拒绝 | 返回 400，见 §5 |
+| `tools` `tool_choice` | ❌ 拒绝 | 返回 400；Phase 2 计划支持，见 §6 |
 | `background` | ❌ 拒绝 | 无异步任务模型 |
 | `top_p` `top_logprobs` | ❌ | `ModelRequest` 未暴露 |
 | `text.format` | ❌ | 无结构化输出 |
@@ -153,7 +153,7 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 | 纯文本 / `message`（system·developer·user） | ✅ |
 | `function_call_output` | ✅ 作为工具结果注入本轮 |
 | `input_file`（base64，文本类 MIME） | ✅ 上限 60k 字符 |
-| `input_file`（url） | ❌ 缺 SSRF 防护，见 §6 |
+| `input_file`（url） | ❌ 缺 SSRF 防护，见 §7 |
 | `input_image` / 音频 | ❌ 需改 Message 结构 |
 
 历史 `assistant` 消息被忽略：daemon 的 transcript 已有，重复送入会让上下文出现两份。
@@ -169,23 +169,62 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 
 ---
 
-## 5. 无法支持的部分
+## 5. 永久边界（不打算做）
 
-分两类。**架构级**的不打算做：
+这几项与架构冲突，不在计划内：
 
 - **`background: true`** — agent 循环是同步/流式的，没有任务队列与完成回调，无法「202 立即返回 + 轮询」。
 - **16 种内置工具**（`file_search` / `code_interpreter` / `computer` / `web_search` / `mcp` / …）— 协议各不相同，需逐个适配；memclaw 自己的 exec/file/web 工具语义也不一致。OpenClaw 同样只支持 function 一种。
 - **音频输入输出** — 无音频处理能力。
-
-**待实现**的是取舍问题，不是做不到：
-
-- **动态 `tools`（client-side function tools）** — 工具定义透传给模型，模型产出 `function_call` 后**不执行**，返回给客户端，客户端执行完用 `function_call_output` 回喂。`ModelRequest.tools` 已有字段，`function_call_output` 的解析也已就位，缺的是 `Delta::ToolCall` 不执行而直接出参的那条路径。
-- **`input_image`** — 需把 `Message.content` 从 `String` 改成 `ContentPart[]`，牵动 oc-llm/oc-server/compaction。
-- **`GET /v1/responses/:id`** — transcript 是扁平的 `(seq, role, content)`，要重建成嵌套 OutputItem。
+- **`logprobs` / `top_logprobs`** — `Delta` 流不携带 token 概率。
+- **`moderation`** — 无内容审查机制。
 
 ---
 
-## 6. 安全边界
+## 6. 待实现（Phase 2 / 3）
+
+以下都是取舍问题而非做不到，按优先级排。
+
+### Phase 2
+
+**动态 `tools`（client-side function tools）** — 最有价值的一项，能让 SDK 的 function
+calling 跑通。语义是：工具定义透传给模型，模型产出 `function_call` 后**不执行**，直接返回给
+客户端；客户端执行完用 `function_call_output` 回喂下一轮。
+
+已就位的部分：`ModelRequest.tools` 字段存在；`InputItem::FunctionCallOutput` 已能解析并注入
+本轮（见 `adapter.rs`）；`OutputItem::FunctionCall` 类型已定义。
+
+缺的是「不执行」这条路径：当前 `run.rs` 收到 `Delta::ToolCall` 后一律走 `exec_tool` 本地执行。
+需要区分「daemon 自己的工具」与「客户端声明的工具」，后者跳过执行、把参数原样带出，并在
+SSE 上补 `response.function_call.arguments.delta/done` 两个事件。这要改动 oc-server 的 run
+驱动，是本项主要成本。同时放开 `adapter.rs::reject_unsupported()` 里对 `tools` / `tool_choice`
+的 400。
+
+**`GET /v1/responses/:id`** — transcript 是扁平的 `(seq, role, content)`，要重建成嵌套的
+OutputItem 数组。另需持久化 `response_id → (session, seq 区间)`，否则无法定位某次响应的边界
+（与 §8 第一条技术债同源，一起做更省）。
+
+**`reasoning` 内容** — DeepSeek-reasoner 的 `Delta::Reasoning` 当前只用于工具轮回喂，未外发。
+映射到 `response.reasoning_text.delta/done` 即可，成本低。
+
+**`input_image`** — 需把 `Message.content` 从 `String` 改成 `ContentPart[]`，牵动
+oc-llm / oc-server / compaction 的 token 估算。改动面最大，且依赖模型侧视觉能力。
+
+### Phase 3
+
+- **`DELETE /v1/responses/:id`** — 需存储层支持软删除（`entry` 表加 `deleted_at`）。
+- **`text.format: json_object`** — 非 schema 校验的宽松模式，依赖模型配合。
+- **`include` 字段过滤** — 当前恒返回全部可用字段。
+
+### 生产化（与功能无关，部署前需要）
+
+- 持久化 `response_id → SessionId`（见 §8）。
+- Bearer token 鉴权 —— 当前完全无鉴权，见 §7。
+- 限流。
+
+---
+
+## 7. 安全边界
 
 - **仅监听 127.0.0.1，且无鉴权**。该端点等同于对 daemon 的完全操作权（含 exec 工具）。要远程访问，前面必须加带认证的反向代理，不要直接改绑 `0.0.0.0`。
 - **`input_file` 的 url 源被拒绝**。实现 URL 拉取需要 DNS 解析检查、私有网段拦截、重定向跳数限制、超时——缺一个就是 SSRF 通道。当前要求调用方自己读文件后传 base64，把这层攻击面整个去掉。
@@ -194,7 +233,7 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 
 ---
 
-## 7. 已知技术债
+## 8. 已知技术债
 
 - `response_id → SessionId` 在内存里，重启后 `previous_response_id` 失效。要持久化需加一张表并走 schema 迁移，暂未做。
 - 非流式路径下 `accumulate_response` 结束后连接才归还池；流式则由 SSE 持有到流结束。
@@ -203,7 +242,7 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 
 ---
 
-## 8. 验证状态
+## 9. 验证状态
 
 `cargo test -p oc-http`：22 个单元测试，覆盖
 
