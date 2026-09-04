@@ -484,3 +484,256 @@ mod tests {
         assert_eq!(detect_explicit_memory("帮我搜索今日头条"), None);
     }
 }
+
+/// 情节记忆提取（设计 §11.5）：从会话历史识别值得沉淀为 episodic tier 的候选。
+///
+/// 过滤掉：
+/// - 纯寒暄/空响应（无实质内容）
+/// - 过短的（用户提问 <10 字符 或 助手回复 <20 字符）
+/// - 显式触发词"记住"开头的（已走 persist_explicit_memory → curated，不重复入 episodic）
+///
+/// 保留：
+/// - 用户分享的事实/背景
+/// - 问题+解决方案的成对交互
+/// - 有上下文的多轮对话片段
+///
+/// **纯函数**：不读库、不调模型，确定性（同输入必得同候选）；IO 与编排在 server 侧。
+#[derive(Debug, Clone)]
+pub struct EpisodeCandidate {
+    /// 从历史 entry 拼成的正文（user + assistant 成对，或单条 user/assistant）。
+    pub content: String,
+    /// 估算重要度 0..1（启发式：长度、是否成对、是否含问号/感叹号等）。
+    pub importance: f64,
+}
+
+/// 一条历史记录的简化结构（只含提取所需字段）。
+#[derive(Debug, Clone)]
+pub struct ConversationEntry {
+    pub role: &'static str,  // "user" | "assistant" | "tool" | "system"
+    pub content: String,
+}
+
+/// 从会话历史提取 episodic 候选（设计 §11.5）。
+///
+/// 策略：用户提问 + 助手回复配对成一条候选（记住的是"我问了X，助手答了Y"这个情节）；
+/// 无配对时长度达标的单独保留。工具调用/系统消息忽略（它们不是"人际情节"）。
+pub fn extract_episode_candidates(entries: &[ConversationEntry]) -> Vec<EpisodeCandidate> {
+    let mut out = Vec::new();
+    let mut pending_user: Option<&ConversationEntry> = None;
+
+    // 刷出一条待配对的 user（没等到 assistant 就遇到下一个 user 或历史结束）。
+    let flush_lone_user = |out: &mut Vec<EpisodeCandidate>, u: &ConversationEntry| {
+        if u.content.chars().count() < MIN_LONE_USER_CHARS {
+            return;
+        }
+        // "记住…" 已由 persist_explicit_memory 写成 curated，不重复沉淀。
+        if detect_explicit_memory(&u.content).is_some() {
+            return;
+        }
+        out.push(EpisodeCandidate {
+            content: u.content.clone(),
+            importance: estimate_importance_single(&u.content, "user"),
+        });
+    };
+
+    for entry in entries {
+        match entry.role {
+            "user" => {
+                if let Some(u) = pending_user.take() {
+                    flush_lone_user(&mut out, u);
+                }
+                pending_user = Some(entry);
+            }
+            "assistant" => {
+                match pending_user.take() {
+                    Some(u) => {
+                        // 配对：记住的是「问了 X，答了 Y」这个完整情节。
+                        // 两条过滤与单条路径一致，否则寒暄与显式记忆会从这里漏进来。
+                        let combined =
+                            u.content.chars().count() + entry.content.chars().count();
+                        if combined >= MIN_PAIR_CHARS
+                            && detect_explicit_memory(&u.content).is_none()
+                        {
+                            out.push(EpisodeCandidate {
+                                content: format!("{}\n\n{}", u.content, entry.content),
+                                importance: estimate_importance_pair(&u.content, &entry.content),
+                            });
+                        }
+                    }
+                    // 无配对的 assistant（如主动消息）：够长才留。
+                    None if entry.content.chars().count() >= MIN_LONE_ASSISTANT_CHARS => {
+                        out.push(EpisodeCandidate {
+                            content: entry.content.clone(),
+                            importance: estimate_importance_single(&entry.content, "assistant"),
+                        });
+                    }
+                    None => {}
+                }
+            }
+            // 工具输出/系统注入不是「人际情节」，跳过；待配对的 user 保持挂起，
+            // 等工具轮结束后的那条 assistant 与它配对。
+            _ => {}
+        }
+    }
+
+    if let Some(u) = pending_user {
+        flush_lone_user(&mut out, u);
+    }
+
+    out
+}
+
+/// 成对候选的最小合计字数。寒暄天然短（「你好/你好！」5 字），用长度就能滤掉，
+/// 不必维护一张寒暄词表——词表永远漏，且会误伤「谢谢，那问题解决了吗」这类有内容的话。
+const MIN_PAIR_CHARS: usize = 12;
+/// 无配对 user 的最小字数：单方发言信息量低于成对，门槛相应提高。
+const MIN_LONE_USER_CHARS: usize = 15;
+/// 无配对 assistant 的最小字数。
+const MIN_LONE_ASSISTANT_CHARS: usize = 40;
+
+/// 单条消息的重要度估算（启发式）。
+fn estimate_importance_single(text: &str, role: &str) -> f64 {
+    let len = text.chars().count();
+    let mut score: f64 = 0.3; // 单条基准低
+
+    // 长度加分（上限 0.2）。
+    if len > 50 {
+        score += 0.1;
+    }
+    if len > 150 {
+        score += 0.1;
+    }
+
+    // user 提问（含"？"或"怎么/如何"）→ 有价值的情节。
+    if role == "user" && (text.contains('?') || text.contains('？') || text.contains("怎么") || text.contains("如何")) {
+        score += 0.15;
+    }
+
+    // 特定名词/动词（分享背景、报错、决策）→ 情节价值。
+    if text.contains("我的")
+        || text.contains("遇到")
+        || text.contains("出现")
+        || text.contains("报错")
+        || text.contains("问题")
+        || text.contains("决定")
+        || text.contains("选择")
+    {
+        score += 0.1;
+    }
+
+    score.min(0.7) // 单条最高 0.7（成对才能到 0.9）
+}
+
+/// 成对交互的重要度估算（user + assistant）。
+fn estimate_importance_pair(user: &str, assistant: &str) -> f64 {
+    let total_len = user.chars().count() + assistant.chars().count();
+    let mut score: f64 = 0.55; // 成对基准比单条高
+
+    // 总长度加分。
+    if total_len > 100 {
+        score += 0.15;
+    }
+    if total_len > 300 {
+        score += 0.1;
+    }
+
+    // user 提问 + assistant 回答 → 典型情节。
+    if (user.contains('?') || user.contains('？') || user.contains("怎么") || user.contains("如何"))
+        && assistant.chars().count() > 10
+    {
+        score += 0.15;
+    }
+
+    // 助手给了具体步骤/代码/清单（实质性回复）→ 有价值。
+    if assistant.contains("```") || assistant.contains("1. ") || assistant.contains("- ") {
+        score += 0.1;
+    }
+
+    score.min(0.9) // 成对上限 0.9
+}
+
+#[cfg(test)]
+mod episode_tests {
+    use super::*;
+
+    fn user(s: &str) -> ConversationEntry {
+        ConversationEntry { role: "user", content: s.into() }
+    }
+    fn asst(s: &str) -> ConversationEntry {
+        ConversationEntry { role: "assistant", content: s.into() }
+    }
+    fn tool(s: &str) -> ConversationEntry {
+        ConversationEntry { role: "tool", content: s.into() }
+    }
+
+    #[test]
+    fn extract_pairs_user_assistant() {
+        let entries = vec![user("怎么安装 Rust？"), asst("可以从官网下载 rustup，然后运行安装。")];
+        let cands = extract_episode_candidates(&entries);
+        assert_eq!(cands.len(), 1);
+        assert!(cands[0].content.contains("怎么安装"));
+        assert!(cands[0].content.contains("rustup"));
+        assert!(cands[0].importance > 0.5, "成对交互重要度应较高");
+    }
+
+    #[test]
+    fn unpaired_long_user_kept() {
+        // 长 user 单条，无对应 assistant → 单独保留。
+        let entries = vec![user("我遇到一个问题：编译时报错 cannot find type `Foo` in this scope")];
+        let cands = extract_episode_candidates(&entries);
+        assert_eq!(cands.len(), 1);
+        assert!(cands[0].importance < 0.7, "单条上限 0.7");
+    }
+
+    #[test]
+    fn short_messages_filtered() {
+        // 短寒暄不保留。
+        let entries = vec![user("你好"), asst("你好！"), user("谢谢"), asst("不客气")];
+        let cands = extract_episode_candidates(&entries);
+        assert!(cands.is_empty(), "短寒暄应被过滤：{:?}", cands);
+    }
+
+    #[test]
+    fn explicit_memory_not_duplicated() {
+        // "记住"开头的走了 persist_explicit_memory（curated），不该重复进 episodic。
+        let entries = vec![user("记住我喜欢简洁回复"), asst("好的，已记住。")];
+        let cands = extract_episode_candidates(&entries);
+        // user 被过滤（显式记忆），assistant 太短也被过滤。
+        assert!(cands.is_empty(), "显式记忆不应重复入 episodic：{:?}", cands);
+    }
+
+    #[test]
+    fn tool_messages_ignored() {
+        // 工具输出不是情节记忆。
+        let entries = vec![
+            user("查一下今天天气"),
+            tool("天气查询结果：晴天 22°C"),
+            asst("今天天气不错，晴天 22°C。"),
+        ];
+        let cands = extract_episode_candidates(&entries);
+        // user + assistant 成对保留，tool 被跳过。
+        assert_eq!(cands.len(), 1);
+        assert!(cands[0].content.contains("查一下今天天气"));
+        assert!(!cands[0].content.contains("天气查询结果"), "tool 内容不该进入情节");
+    }
+
+    #[test]
+    fn multiple_pairs_extracted() {
+        let entries = vec![
+            user("什么是 ownership？"),
+            asst("Rust 的所有权系统..."),
+            user("那 borrow 呢？"),
+            asst("借用是暂时获得引用..."),
+        ];
+        let cands = extract_episode_candidates(&entries);
+        assert_eq!(cands.len(), 2, "两对对话应产生两条候选");
+    }
+
+    #[test]
+    fn importance_estimates_deterministic() {
+        let entries = vec![user("我的项目报错了"), asst("可以检查一下日志")];
+        let c1 = extract_episode_candidates(&entries);
+        let c2 = extract_episode_candidates(&entries);
+        assert_eq!(c1[0].importance, c2[0].importance, "同输入必得同 importance");
+    }
+}

@@ -159,6 +159,16 @@ async fn handle_session_reset(
     state: &Arc<ServerState>,
 ) -> Result<MethodOk, ProtoError> {
     let session = p.session.clone().unwrap_or_else(SessionId::main);
+
+    // 推进起点前先沉淀 episodic 候选（设计 §11.5，P1-6）：reset 之后这段对话
+    // 不再进入任何提示词，这是它进入长期记忆的最后机会。失败不阻塞 reset。
+    crate::session::flush_before_reset(
+        state.store(),
+        &session.to_string(),
+        state.registry().cfg().max_history_entries,
+    )
+    .await;
+
     state
         .store()
         .writer()

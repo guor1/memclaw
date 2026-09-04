@@ -80,6 +80,14 @@ impl SessionRegistry {
             .clone()
     }
 
+    /// 会话配置（注册表持有的那份，各 actor 由它克隆而来）。
+    ///
+    /// 给不经过 actor 的路径用——如 `session.reset` 的 episodic 沉淀需要
+    /// `max_history_entries` 来限定拉取范围。
+    pub fn cfg(&self) -> &SessionConfig {
+        &self.inner.cfg
+    }
+
     /// 向所有活跃会话广播中止请求。run_id 全局唯一，各 actor 只中止匹配的活跃
     /// run，故对无关会话是 no-op。空 run_id 会中止各会话的活跃 run（见 session actor）。
     pub async fn abort_all(&self, run_id: oc_proto::RunId, hard: bool) {

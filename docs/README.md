@@ -69,18 +69,17 @@
 
 ---
 
-## 当前位置（2026-09-02）
+## 当前位置（2026-09-04）
 
 **已完成**：
 - ✅ M1-M6 里程碑：对话 / 持久化 / 记忆 / 防卡死 / 工具 / 主动性 / CLI
 - ✅ P0 稳定核心闭环：事件丢失 / 审批取消 / 泄漏清理 / 阻塞 IO
-- ✅ P1-1~P1-5：ask_user / standing intent / 偏好 supersede / dreaming 重写 / cron 工具
-
-**进行中**：
-- 🔄 P1-6：episodic 产出（dreaming 上游断点）
-- 🔄 P1-7：代码质量清理（clippy 警告清零）
+- ✅ **P1 全部**：ask_user / standing intent / 偏好 supersede / dreaming 重写 /
+  cron 工具 / **episodic 产出（P1-6）** / 代码质量（P1-7）
+- ✅ `oc-http`：OpenAI Responses API 兼容层（计划外产出）
 
 **下一步**：
+- P1 真机复验 + `oc http` 真机端到端（两者都只有自动化覆盖，本仓历史上缺陷都是真机才暴露）
 - P2 阶段 1：读写分离 / 写线程自愈 / 内存淘汰（可用性基石）
 - P2 阶段 2：索引 / CI / 文档（工程化收口）
 

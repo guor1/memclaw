@@ -575,6 +575,14 @@ async fn compact_session(
         })
         .collect();
 
+    // 摘要之前先沉淀 episodic 候选（设计 §11.5，P1-6）。
+    //
+    // 顺序刻意在调模型**之前**：摘要是有损的（多条压成一段），且模型调用可能失败。
+    // 放在后面的话，摘要失败就连沉淀一起丢——而这批历史正要被摘要取代，
+    // 是它们进入长期记忆的最后机会。
+    // 只 flush 进摘要区的那部分（`older`）；保留区还在上下文里，等下次压缩再说。
+    flush_episodic(store, session_id, older).await;
+
     let older_count = older.len();
     let input_chars: usize = msgs.iter().map(|m| m.content.chars().count()).sum();
     info!(session = %session_id, msgs = older_count, input_chars, "compact：调摘要模型");
@@ -599,6 +607,99 @@ async fn compact_session(
         session_id,
         &format!("已压缩上下文：{older_count} 条历史消息总结为摘要"),
     );
+}
+
+/// 把一段会话历史沉淀为 episodic 记忆候选（设计 §11.5，P1-6）。
+///
+/// **这是 dreaming 的上游**：`dream_candidates` 只取 `tier='episodic'`，而在本函数之前
+/// 全仓唯一的记忆写入路径是 `persist_explicit_memory`（用户显式「记住…」→ 直接 curated）。
+/// 没有本函数，dreaming 每轮扫描都是空集，§11.4 的巩固能力等于不存在。
+///
+/// 在**上下文被丢弃前**调用（compact 摘要 / session.reset 推进起点），
+/// 否则这些内容再也没有第二次机会进入长期记忆。
+///
+/// 候选判定是纯函数（`core::extract_episode_candidates`）；这里只做映射与落库。
+/// origin 记 `Agent` 而非 `Owner`：内容是**系统从对话里推断**该记什么，
+/// 不是用户交代的。dreaming 门2 只排除 Untrusted/System，Agent 仍可被巩固，
+/// 但与用户显式记忆的信任级别区分开（设计 §4.2「绝不默认 Owner」）。
+///
+/// **失败仅告警**：记忆沉淀是尽力而为，不能阻塞 compact / reset 本身。
+/// 返回实际写入条数（供日志与测试断言）。
+async fn flush_episodic(
+    store: &oc_store::Store,
+    session_id: &str,
+    entries: &[oc_store::Entry],
+) -> usize {
+    use oc_core::memory::{extract_episode_candidates, ConversationEntry};
+
+    let convo: Vec<ConversationEntry> = entries
+        .iter()
+        .map(|e| ConversationEntry {
+            role: match e.role {
+                oc_store::Role::User => "user",
+                oc_store::Role::Assistant => "assistant",
+                oc_store::Role::Tool => "tool",
+                oc_store::Role::System => "system",
+            },
+            content: e.content.clone(),
+        })
+        .collect();
+
+    let cands = extract_episode_candidates(&convo);
+    if cands.is_empty() {
+        debug!(session = %session_id, entries = entries.len(), "episodic flush：无候选");
+        return 0;
+    }
+
+    let mut written = 0usize;
+    for c in &cands {
+        let hash = content_hash(&c.content);
+        let mem = oc_store::NewMemory {
+            // 内容哈希做 id：重复 flush 同一段历史会 upsert 同一行，不产生重复候选。
+            id: format!("mem-{hash}"),
+            tier: oc_store::Tier::Episodic,
+            origin: oc_store::Origin::Agent,
+            text: c.content.clone(),
+            keywords: None,
+            importance: c.importance,
+            content_hash: hash,
+            // 情节记忆不参与偏好 supersede（那是 curated 的事）。
+            pref_key: None,
+        };
+        match store.writer().upsert_memory(mem).await {
+            Ok(()) => written += 1,
+            Err(e) => warn!(error = %e, "episodic 候选写入失败"),
+        }
+    }
+
+    info!(
+        session = %session_id,
+        candidates = cands.len(),
+        written,
+        "episodic flush 完成"
+    );
+    written
+}
+
+/// reset 前的记忆沉淀（设计 §11.5，P1-6）。
+///
+/// `session.reset` 会把上下文起点推到当前末尾，之前的对话不再进入任何一轮提示词。
+/// 推进**之前**先沉淀，否则这些内容永久失去进入长期记忆的机会。
+///
+/// 由 dispatch 的 `session.reset` handler 调用（reset 不经过 session actor：
+/// 它只改 `sessions.reset_at` 一列，不需要占用车道）。
+pub async fn flush_before_reset(store: &oc_store::Store, session_id: &str, max_entries: i64) {
+    let entries = match store.writer().load_transcript(session_id.into(), max_entries).await {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(error = %e, "reset 前加载历史失败，跳过记忆沉淀");
+            return;
+        }
+    };
+    if entries.is_empty() {
+        return;
+    }
+    flush_episodic(store, session_id, &entries).await;
 }
 
 /// 向 client 推一条 compact 相关的系统通知（走 Proactive 通道，归属本会话）。
