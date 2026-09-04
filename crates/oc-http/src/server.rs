@@ -197,7 +197,7 @@ async fn create_response(
     let created_at = adapter::now_secs();
 
     if req.stream.unwrap_or(false) {
-        let sse_state = SseState::new(response_id, run_id, model, created_at);
+        let sse_state = SseState::new(response_id, run_id, session_id, model, created_at);
         let stream = stream_sse(conn, sse_state);
         Ok(Sse::new(stream)
             .keep_alive(
@@ -206,8 +206,15 @@ async fn create_response(
             )
             .into_response())
     } else {
-        let response =
-            accumulate_response(&mut conn, response_id, &run_id, model, created_at).await?;
+        let response = accumulate_response(
+            &mut conn,
+            response_id,
+            &run_id,
+            &session_id,
+            model,
+            created_at,
+        )
+        .await?;
         // Connection is at rest again (run reached a terminal phase), so it is
         // safe to hand back to the pool.
         state.pool.release(conn).await;
@@ -220,6 +227,7 @@ async fn accumulate_response(
     conn: &mut NdjsonConn,
     response_id: String,
     run_id: &RunId,
+    run_session: &SessionId,
     model: String,
     created_at: i64,
 ) -> HttpResult<Response> {
@@ -252,7 +260,14 @@ async fn accumulate_response(
             Some(Frame::Event(Event::Assistant { run_id: rid, delta, .. })) if &rid == run_id => {
                 text.push_str(&delta);
             }
-            Some(Frame::Event(Event::Usage { input_tokens: n, .. })) => {
+            // Filtered by session for the same reason as the SSE path: `Usage`
+            // rides the daemon's global broadcast, so an unfiltered match takes
+            // token counts from whatever run reported last — TUI, cron, or a
+            // concurrent request. See `sse.rs` for why session is the finest
+            // scope available.
+            Some(Frame::Event(Event::Usage { session, input_tokens: n, .. }))
+                if &session == run_session =>
+            {
                 input_tokens = n;
             }
             Some(_) => {}

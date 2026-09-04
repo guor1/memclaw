@@ -134,9 +134,13 @@ async fn handle_chat_send(
     let sink = RunSink::Conn(out_tx.clone());
     match handle.submit(p.text.clone(), sink).await {
         Some(run_id) => Ok(MethodOk::ChatSend { run_id }),
+        // 队列已满或 actor 已停。**必须报错而不是回一个 run_id**：该轮不会执行，
+        // 也就永不产生 Lifecycle 事件，调用方拿着 id 只会白等（HTTP 侧无超时
+        // recv 循环 → 挂死）。`ErrorKind` 无 busy/unavailable 变体，暂用
+        // `Internal`，消息里说明是队列满，便于调用方区分。
         None => Err(ProtoError {
             kind: oc_proto::ErrorKind::Internal,
-            message: "会话车道不可用".to_string(),
+            message: "会话繁忙：队列已满，请稍后重试".to_string(),
         }),
     }
 }

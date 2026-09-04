@@ -131,12 +131,20 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 
 事件按 **run_id 精确过滤**：只按 session 过滤会混入并发 run 和 cron 触发的后台 run。
 
+**为什么必须过滤**：daemon 把事件发给**每条连接**（`conn.rs` 的事件转发任务订阅全局
+EventBus），所以一条 HTTP 连接会看到 TUI、cron、其他 HTTP 请求的全部事件。
+
+`Usage` 是例外，它**没有 run_id**，只有 session。oc-server 刻意把它留在广播上
+（`sink.rs`：只有内联 run 事件挪进了 per-run 定向通道），所以只能按 **session** 过滤。
+不过滤的后果是别人的 token 计数覆盖本响应的 usage。同会话内并发 run 仍无法区分 ——
+要根治得给 `Event::Usage` 加 run_id，属协议改动。
+
 | oc-proto Event | 发出的 SSE 事件 |
 |---|---|
 | `Lifecycle::Start` | `response.created` |
 | 首个 `Assistant` delta | `response.output_item.added` + `response.content_part.added` + `response.output_text.delta` |
 | 后续 `Assistant` delta | `response.output_text.delta` |
-| `Usage` | 不单独发事件，累进最终响应的 usage |
+| `Usage`（本 session） | 不单独发事件，累进最终响应的 usage |
 | `Lifecycle::End` | `response.output_text.done` + `response.output_item.done` + `response.completed` + `[DONE]` |
 | `Lifecycle::Error` | `response.failed` + `[DONE]` |
 
@@ -144,6 +152,31 @@ OpenAI 的流式响应把一次输出拆成 `added → delta → done` 三阶段
 若整轮无任何文本，跳过 item/text 的 done 事件，直接 `completed`。
 
 非流式走同一套累积逻辑，只是不输出 SSE，在 `Lifecycle::End` 后返回完整 `Response`。
+
+`Lifecycle` / `Assistant` 走 per-run 定向通道（有界背压，**不丢**），所以两条累积路径
+都不需要超时兜底：只要 run 起步了，终态事件一定到达。
+
+---
+
+## 3.5 并发语义
+
+**同会话串行。** 一个 session actor 单车道，这是 transcript 顺序合法的前提（并发落库会
+让 B 的 user 消息被 A 的回复埋在中间 → provider 400，见 `session.rs` 的 submit 注释）。
+所以同一 session 的并发 HTTP 请求会排队，`queue_cap = 16`（`provider_setup.rs`）。
+要并行就用不同的 `x-openclaw-session-key`。
+
+**队列满 → 立即报错，不挂死。** `submit` 返回 `None`，dispatch 映射成协议错误，HTTP 侧
+得到 5xx。这里曾有个挂死 bug：actor 在队列判定**之前**就回执 run_id，被拒的轮拿到合法
+id 却永不产生 Lifecycle 事件，而 HTTP 两条累积路径都是无超时 `recv()` 循环 → 请求永久
+挂起。默认会话落 `main` 后所有 HTTP 请求与 TUI 挤同一条队列，触发面被放大。回归测试见
+`oc-server/tests/queue_full_reject.rs`。
+
+**审批/ask_user 不会挂死。** HTTP 无法回执审批，但 run 侧的等待 `select!` 叠了 `cancel`
+与 `sink.closed()`（`tools_bridge.rs`），客户端断连即收敛。
+
+**已知未做**：无并发上限。`ConnPool::new(kind, 4)` 的 4 是**闲置**上限，`acquire` 在池空时
+无条件新建连接，故连接数随并发线性增长（每条 2 个 tokio 任务 + 2 个 32 槽 channel）。
+流式路径也不归还连接（只有非流式调 `release`），流式负载下池等于没用。见 §8。
 
 ---
 
@@ -269,15 +302,18 @@ oc-llm / oc-server / compaction 的 token 估算。改动面最大，且依赖�
 ## 8. 已知技术债
 
 - `response_id → SessionId` 在内存里，重启后 `previous_response_id` 失效。要持久化需加一张表并走 schema 迁移，暂未做。
-- 非流式路径下 `accumulate_response` 结束后连接才归还池；流式则由 SSE 持有到流结束。
+- 非流式路径下 `accumulate_response` 结束后连接才归还池；**流式路径不归还**（由 SSE 持有到流结束后 drop），故流式负载下池不起作用。
+- **无并发上限**：`max_idle = 4` 只限闲置数，连接总数随并发线性增长。生产化应加 `tower::limit::ConcurrencyLimitLayer`。
+- 池化连接复用时可能带最多 288 个陈旧帧（本地 32 + daemon 出站 256）。`handshake` 跳过非 `Res` 帧、`run_id`/session 过滤挡住事件，故不影响正确性，但白读一遍。
+- 同会话内并发 run 的 `Usage` 无法精确归属（`Event::Usage` 没有 run_id）。跨会话已按 session 过滤。
 - 输出 token 用 `chars/4` 估算——daemon 的 `Usage` 事件只报 input_tokens。比报 0 好，但不准。
-- 错误码映射较粗：`LoopDetected` / `Timeout` 目前都归到 5xx，可细化为 429 / 504。
+- 错误码映射较粗：`LoopDetected` / `Timeout` 目前都归到 5xx，可细化为 429 / 504。队列满目前也是 5xx（`ErrorKind` 无 busy 变体），语义上更该是 429/503。
 
 ---
 
 ## 9. 验证状态
 
-`cargo test -p oc-http`：35 个单元测试，覆盖
+`cargo test -p oc-http`：36 个单元测试，覆盖
 
 - **会话解析** — user 稳定性与 `main` 隔离、裸请求落 `main`、`previous_response_id` 命中与
   未命中降级（降级仍保留 user 作用域）
@@ -285,9 +321,13 @@ oc-llm / oc-server / compaction 的 token 估算。改动面最大，且依赖�
   前缀拒绝（且只匹配前缀不匹配子串）、非 UTF-8 头拒绝
 - **input 归一化** — 多条 user 取最后一条、system 进提示、空输入拒绝、`function_call_output` 单独成轮
 - **文件处理** — base64 各余数长度的解码、不可信边界包裹、url 源拒绝、非 function 工具拒绝
+- **跨会话隔离** — 别的 session 的 `Usage` 不污染本响应的 token 计数
 - **SSE 状态机** — 跨 run 事件隔离、首 delta 开 item、序列号单调、三种终止路径（正常/无文本/错误）
 
-全量 `cargo test`：255 passed。`cargo clippy -p oc-http --all-targets`：无告警。
+另有 `oc-server/tests/queue_full_reject.rs` 守住队列满必须返回 `None`（该测试在修复前
+确实失败，验证过）。
+
+全量 `cargo test`：258 passed。`cargo clippy --workspace --all-targets`：无告警。
 
 尚未做**真机端到端验证**（起 daemon + `oc http`，用真实 OpenAI SDK 打通）。
 按本仓历史，P0-1 / P1-1 的缺陷都是真机才暴露的，这一步不能省。

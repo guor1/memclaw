@@ -396,6 +396,14 @@ impl App {
                         }
                     }
                 }
+                // 请求被拒（如「会话繁忙：队列已满」）。必须显示：被拒的轮不会产生
+                // 任何 Lifecycle 事件，若静默吞掉，界面会一直停在「排队中…」等一个
+                // 永不起步的 run。同时清掉排队提示的截止点。
+                ResResult::Err(e) => {
+                    self.pending_queue_hint = None;
+                    self.status = format!("错误: {}", e.message);
+                    self.push_sys(&format!("请求被拒: {}", e.message));
+                }
                 _ => {}
             },
             Frame::Req(_) => {}

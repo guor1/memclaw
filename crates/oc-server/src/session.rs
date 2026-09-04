@@ -119,6 +119,11 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// 提交一轮。`None` 表示该轮**不会执行**：actor 已停（`tx.send` 失败）或
+    /// 队列已满被拒（actor 不回执，见 `SubmitResult::Rejected`）。
+    ///
+    /// 反过来说，返回 `Some(run_id)` 即保证该轮已起步或已入队，调用方等它的
+    /// Lifecycle 事件不会白等。
     pub async fn submit(&self, text: String, sink: crate::sink::RunSink) -> Option<RunId> {
         let (reply, rx) = oneshot::channel();
         self.tx.send(SessionCmd::Submit { text, sink, reply }).await.ok()?;
@@ -208,7 +213,6 @@ async fn actor_loop(
                 info!(session = %sid, run_id = %run_id, chars = text.chars().count(), "submit 受理");
                 // 暂存本轮 sink（起步时取用）。
                 sinks.insert(run_id.to_string(), sink);
-                let _ = reply.send(run_id.clone());
 
                 // 注意：**此处不落库用户消息**。落库推迟到该轮真正起步时（见 begin_run）。
                 // 原因：同一 session 并发提交时，排队轮若在 submit 时就落库，会被前一个
@@ -219,9 +223,15 @@ async fn actor_loop(
                     run_id: run_id.to_string(),
                     text,
                 };
+                // 回执**必须在队列判定之后**：被拒的轮永不产生任何 Lifecycle 事件，
+                // 若先回 run_id，调用方会拿着一个合法 id 无限等一个不存在的 run
+                // （HTTP 的 accumulate_response / SSE 都是无超时 recv 循环 → 挂死）。
+                // 判定后再回，`Rejected` 分支不回执 → oneshot 发送端 drop →
+                // `submit()` 得到 `None` → dispatch 映射成协议错误，调用方立即知情。
                 match queue.submit(turn) {
                     SubmitResult::Started(t) => {
                         info!(session = %sid, run_id = %run_id, "run 起步");
+                        let _ = reply.send(run_id.clone());
                         active = Some(
                             begin_run(
                                 &session_id, &cfg, &provider, &events, &self_tx, &store, &diag,
@@ -233,12 +243,15 @@ async fn actor_loop(
                     SubmitResult::Queued => {
                         diag.set_queue_depth(queue.pending_len());
                         info!(session = %sid, run_id = %run_id, queued = queue.pending_len(), "轮已排队（车道忙）");
+                        let _ = reply.send(run_id.clone());
                     }
                     SubmitResult::Rejected => {
                         warn!(session = %sid, "队列已满，拒绝新轮");
                         diag.set_error("队列已满，拒绝新轮".to_string());
                         // 该轮不会跑，清理其暂存 sink，避免泄漏。
                         sinks.remove(run_id.as_str());
+                        // 不回执：drop(reply) 让调用方的 `rx.await` 失败 → None。
+                        drop(reply);
                     }
                 }
             }

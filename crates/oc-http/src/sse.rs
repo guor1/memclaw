@@ -3,7 +3,7 @@
 use std::pin::Pin;
 
 use futures_util::Stream;
-use oc_proto::{Event, Frame, LifecyclePhase, RunId};
+use oc_proto::{Event, Frame, LifecyclePhase, RunId, SessionId};
 
 use crate::conn_pool::NdjsonConn;
 use crate::error::{HttpError, HttpResult};
@@ -16,6 +16,9 @@ pub struct SseState {
     /// Events are matched on run id, which is unique per turn — matching on
     /// session alone would mix in concurrent or background runs.
     pub run_id: RunId,
+    /// Session this run belongs to. Needed for `Usage`, which the daemon
+    /// broadcasts with session scope but no run id.
+    pub session: SessionId,
     pub model: String,
     pub created_at: i64,
     item_id: Option<String>,
@@ -25,10 +28,17 @@ pub struct SseState {
 }
 
 impl SseState {
-    pub fn new(response_id: String, run_id: RunId, model: String, created_at: i64) -> Self {
+    pub fn new(
+        response_id: String,
+        run_id: RunId,
+        session: SessionId,
+        model: String,
+        created_at: i64,
+    ) -> Self {
         Self {
             response_id,
             run_id,
+            session,
             model,
             created_at,
             item_id: None,
@@ -209,9 +219,20 @@ pub fn event_to_sse(ev: &Event, state: &mut SseState) -> Option<(String, bool)> 
 
             Some((parts.concat(), false))
         }
-        // Usage has no session/run scoping in the protocol; it is folded into the
-        // final response rather than emitted as its own event.
-        Event::Usage { input_tokens, .. } => {
+        // `Usage` stays on the daemon's global broadcast (see oc-server `sink.rs`:
+        // only inline run events moved to the per-run channel), so this connection
+        // sees usage from *every* session — the TUI, cron, other HTTP requests.
+        // It must be filtered by session or an unrelated run's token count
+        // overwrites this response's.
+        //
+        // Session is the finest scope available: `Event::Usage` carries no run id,
+        // so concurrent runs within one session still cannot be told apart.
+        // Narrowing that needs a run id in the protocol.
+        Event::Usage {
+            session,
+            input_tokens,
+            ..
+        } if session == &state.session => {
             state.input_tokens = *input_tokens;
             None
         }
@@ -266,7 +287,13 @@ mod tests {
     use oc_proto::SessionId;
 
     fn state() -> SseState {
-        SseState::new("resp_x".into(), RunId::new("run_1"), "m".into(), 0)
+        SseState::new(
+            "resp_x".into(),
+            RunId::new("run_1"),
+            SessionId::main(),
+            "m".into(),
+            0,
+        )
     }
 
     fn assistant(run: &str, delta: &str) -> Event {
@@ -373,5 +400,22 @@ mod tests {
         );
         assert!(out.is_none(), "usage is folded into the final response");
         assert_eq!(s.input_tokens, 42);
+    }
+
+    #[test]
+    fn usage_from_another_session_is_ignored() {
+        // The daemon broadcasts Usage to every connection, so a TUI or cron run
+        // reporting tokens must not overwrite this response's count.
+        let mut s = state(); // session = main
+        let out = event_to_sse(
+            &Event::Usage {
+                session: SessionId::new("http-user-deadbeef"),
+                input_tokens: 9999,
+                context_window: 1000,
+            },
+            &mut s,
+        );
+        assert!(out.is_none());
+        assert_eq!(s.input_tokens, 0, "another session's usage must not leak in");
     }
 }
