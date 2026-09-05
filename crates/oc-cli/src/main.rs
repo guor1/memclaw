@@ -41,6 +41,12 @@ enum Command {
         /// oc-server socket/pipe 路径（默认平台默认路径）。
         #[arg(long)]
         socket: Option<String>,
+        /// 到 daemon 的最大并发连接数。超出后新请求等待 10s 再返回 503。
+        ///
+        /// 每条连接在本进程和 daemon 各占一套任务与缓冲，故这是并发的硬上限。
+        /// 同一会话本就串行执行（车道单开），调大只对多 session key 并行有意义。
+        #[arg(long, default_value = "32")]
+        max_conns: usize,
     },
     /// 交互式初始化：生成 ~/.oc 骨架（config.toml + SOUL.md 等）。
     Onboard,
@@ -139,7 +145,7 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Some(Command::Doctor { dump_schema }) => doctor::run(dump_schema),
         Some(Command::Serve) => run_serve(),
-        Some(Command::Http { port, socket }) => run_http(port, socket),
+        Some(Command::Http { port, socket, max_conns }) => run_http(port, socket, max_conns),
         Some(Command::Onboard) => onboard::run(),
         Some(Command::Cron(CronCmd::Add { expr, prompt, tz })) => {
             cli_client::cron_add(expr, prompt, tz)
@@ -171,7 +177,7 @@ fn main() -> anyhow::Result<()> {
 ///
 /// 独立于 `serve`：HTTP 层只做协议适配，连到已在跑的 daemon。两个进程分开，
 /// HTTP 侧崩溃不影响核心会话。
-fn run_http(port: u16, socket: Option<String>) -> anyhow::Result<()> {
+fn run_http(port: u16, socket: Option<String>, max_conns: usize) -> anyhow::Result<()> {
     let home = paths::oc_home()?;
 
     use tracing_subscriber::prelude::*;
@@ -205,7 +211,7 @@ fn run_http(port: u16, socket: Option<String>) -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
-        let pool = oc_http::conn_pool::ConnPool::new(kind, 4);
+        let pool = oc_http::conn_pool::ConnPool::new(kind, 4, max_conns);
         let app = oc_http::create_app(pool, model);
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         let listener = tokio::net::TcpListener::bind(addr).await?;

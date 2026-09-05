@@ -15,6 +15,10 @@ pub enum HttpError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// Capacity exhausted, not a failure — the caller should retry.
+    #[error("busy: {0}")]
+    Busy(String),
+
     #[error("protocol error: {0}")]
     Protocol(String),
 
@@ -42,6 +46,7 @@ impl IntoResponse for HttpError {
         let (status, code) = match &self {
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request_error"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+            Self::Busy(_) => (StatusCode::SERVICE_UNAVAILABLE, "capacity_exceeded"),
             Self::Protocol(_) => (StatusCode::BAD_GATEWAY, "protocol_error"),
             Self::Internal(_) | Self::Connection(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")

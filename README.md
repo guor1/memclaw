@@ -131,7 +131,12 @@ oc cron rm <cron_id>
 ```bash
 oc http                    # 默认端口 8080，监听 127.0.0.1
 oc http --port 3000        # 自定义端口
+oc http --max-conns 8      # 到 daemon 的并发连接上限（默认 32）
 ```
+
+`--max-conns` 是并发硬上限：每条连接在本进程和 daemon 各占一套任务与缓冲。超限的请求等
+10s，仍拿不到连接就返回 `503 capacity_exceeded`。同一会话本来就串行执行，调大它只对用多个
+session key 并行的场景有意义。
 
 **curl 测试**：
 

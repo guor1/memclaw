@@ -251,6 +251,12 @@ fn format_event(ev: &SseEvent) -> String {
 }
 
 /// Drive the SSE stream off the daemon connection.
+///
+/// Takes `conn` by value: the generator owns it for the stream's lifetime, so
+/// when axum drops the stream — normal end, error, or client disconnect — the
+/// connection drops too and its pool permit is released. The streaming path
+/// never calls `ConnPool::release`, so that drop is the *only* thing returning
+/// the permit; keep it that way.
 pub fn stream_sse(
     conn: NdjsonConn,
     state: SseState,

@@ -174,9 +174,19 @@ id 却永不产生 Lifecycle 事件，而 HTTP 两条累积路径都是无超时
 **审批/ask_user 不会挂死。** HTTP 无法回执审批，但 run 侧的等待 `select!` 叠了 `cancel`
 与 `sink.closed()`（`tools_bridge.rs`），客户端断连即收敛。
 
-**已知未做**：无并发上限。`ConnPool::new(kind, 4)` 的 4 是**闲置**上限，`acquire` 在池空时
-无条件新建连接，故连接数随并发线性增长（每条 2 个 tokio 任务 + 2 个 32 槽 channel）。
-流式路径也不归还连接（只有非流式调 `release`），流式负载下池等于没用。见 §8。
+**并发上限。** `ConnPool` 用 `Semaphore` 限**存活**连接数（`--max-conns`，默认 32）。这是
+真正稀缺的资源：每条连接在本进程占 2 个 tokio 任务 + 2 个 32 槽 channel，在 daemon 侧还
+占一整套连接处理逻辑（读/写/事件转发三条任务 + 256 槽出站队列）。
+
+许可挂在 `NdjsonConn` 上，**随 drop 归还**，所以流式路径自动被覆盖 —— 那条路径不调
+`release`，生成器持有连接直到流结束或客户端断开，届时连接与许可一起释放。
+
+`max_idle`（4）是另一回事：只限**闲置**保留数，且被 clamp 到 `max_conns`。闲置连接**保留
+许可**——它们仍是存活连接，若放掉许可，`max_conns` 就只限并发使用数，daemon 侧的连接处理
+器数量仍可无界增长。
+
+超限时等待 10s 再返回 **503 `capacity_exceeded`**。两个极端都不取：立即失败会误杀只需等
+一轮的请求；无限等待则复现了这个上限本要防的挂死（SSE 流会占着许可几分钟）。
 
 ---
 
@@ -302,9 +312,9 @@ oc-llm / oc-server / compaction 的 token 估算。改动面最大，且依赖�
 ## 8. 已知技术债
 
 - `response_id → SessionId` 在内存里，重启后 `previous_response_id` 失效。要持久化需加一张表并走 schema 迁移，暂未做。
-- 非流式路径下 `accumulate_response` 结束后连接才归还池；**流式路径不归还**（由 SSE 持有到流结束后 drop），故流式负载下池不起作用。
-- **无并发上限**：`max_idle = 4` 只限闲置数，连接总数随并发线性增长。生产化应加 `tower::limit::ConcurrencyLimitLayer`。
+- 流式路径不把连接**放回池**复用（许可已随 drop 归还，见 §3.5，但连接本身重建）。要复用需在流结束时把 conn 交还池，而 `Sse` 拿走了所有权，改动不小、收益有限（省一次 connect + handshake）。
 - 池化连接复用时可能带最多 288 个陈旧帧（本地 32 + daemon 出站 256）。`handshake` 跳过非 `Res` 帧、`run_id`/session 过滤挡住事件，故不影响正确性，但白读一遍。
+- 等待许可的请求本身不占连接，但仍占一个 tokio 任务和已解析的请求体（axum 默认 2MB 上限）。极端洪峰下内存随等待者数量增长；真要防得在 axum 层加 `ConcurrencyLimitLayer` 或前置代理限流。
 - 同会话内并发 run 的 `Usage` 无法精确归属（`Event::Usage` 没有 run_id）。跨会话已按 session 过滤。
 - 输出 token 用 `chars/4` 估算——daemon 的 `Usage` 事件只报 input_tokens。比报 0 好，但不准。
 - 错误码映射较粗：`LoopDetected` / `Timeout` 目前都归到 5xx，可细化为 429 / 504。队列满目前也是 5xx（`ErrorKind` 无 busy 变体），语义上更该是 429/503。
@@ -313,7 +323,7 @@ oc-llm / oc-server / compaction 的 token 估算。改动面最大，且依赖�
 
 ## 9. 验证状态
 
-`cargo test -p oc-http`：36 个单元测试，覆盖
+`cargo test -p oc-http`：41 个单元测试，覆盖
 
 - **会话解析** — user 稳定性与 `main` 隔离、裸请求落 `main`、`previous_response_id` 命中与
   未命中降级（降级仍保留 user 作用域）
@@ -325,9 +335,10 @@ oc-llm / oc-server / compaction 的 token 估算。改动面最大，且依赖�
 - **SSE 状态机** — 跨 run 事件隔离、首 delta 开 item、序列号单调、三种终止路径（正常/无文本/错误）
 
 另有 `oc-server/tests/queue_full_reject.rs` 守住队列满必须返回 `None`（该测试在修复前
-确实失败，验证过）。
+确实失败，验证过），`oc-http/src/conn_pool.rs` 守住并发上限语义（许可计数、超限报 Busy、
+drop 归还许可）。
 
-全量 `cargo test`：258 passed。`cargo clippy --workspace --all-targets`：无告警。
+全量 `cargo test`：263 passed。`cargo clippy --workspace --all-targets`：无告警。
 
 尚未做**真机端到端验证**（起 daemon + `oc http`，用真实 OpenAI SDK 打通）。
 按本仓历史，P0-1 / P1-1 的缺陷都是真机才暴露的，这一步不能省。
