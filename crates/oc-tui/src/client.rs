@@ -14,7 +14,25 @@ pub enum ConnectTo {
 }
 
 impl ConnectTo {
+    /// 平台默认端点。`OC_SOCKET` 若已设置则优先——必须与 server 侧
+    /// （`oc_server::transport`）保持同一套解析规则，否则 CLI 会连错端点。
+    ///
+    /// oc-tui 不依赖 oc-server，故常量在此重复一份；两处都改才算改对。
     pub fn platform_default(oc_home: &std::path::Path) -> Self {
+        if let Some(s) = std::env::var("OC_SOCKET")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            #[cfg(windows)]
+            {
+                return ConnectTo::Pipe(s);
+            }
+            #[cfg(not(windows))]
+            {
+                return ConnectTo::Unix(PathBuf::from(s));
+            }
+        }
         #[cfg(windows)]
         {
             let _ = oc_home;

@@ -17,9 +17,31 @@ pub enum TransportKind {
     Pipe(String),
 }
 
+/// 端点覆盖环境变量。
+///
+/// 存在理由：Windows 的默认管道名是**全局常量**（见 [`default_pipe_name`]），
+/// `platform_default` 不看 `oc_home`，所以单靠 `OC_HOME` 无法把测试 daemon 与
+/// 开发机上正在跑的那个隔开——改了 `OC_HOME` 再跑 `oc sessions`，返回的仍是
+/// 原 daemon 的数据。给每个 CLI 子命令加 `--socket` 太啰嗦，故用环境变量统一覆盖：
+/// `oc serve` 与所有 CLI/TUI 客户端都尊重它，端到端测试因此能自我隔离。
+///
+/// 默认不设置，行为与之前完全一致。
+pub const SOCKET_ENV: &str = "OC_SOCKET";
+
+/// 读 [`SOCKET_ENV`]（空值视为未设置）。
+pub fn socket_override() -> Option<String> {
+    std::env::var(SOCKET_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 impl TransportKind {
-    /// 平台默认传输。
+    /// 平台默认传输。`OC_SOCKET` 若已设置则优先。
     pub fn platform_default(oc_home: &std::path::Path) -> Self {
+        if let Some(s) = socket_override() {
+            return Self::from_endpoint(s);
+        }
         #[cfg(windows)]
         {
             let _ = oc_home;
@@ -28,6 +50,19 @@ impl TransportKind {
         #[cfg(not(windows))]
         {
             TransportKind::Unix(oc_home.join("run").join("oc.sock"))
+        }
+    }
+
+    /// 按平台语义解释一个显式端点（Windows 管道名 / Unix socket 路径）。
+    pub fn from_endpoint(endpoint: impl Into<String>) -> Self {
+        let s = endpoint.into();
+        #[cfg(windows)]
+        {
+            TransportKind::Pipe(s)
+        }
+        #[cfg(not(windows))]
+        {
+            TransportKind::Unix(std::path::PathBuf::from(s))
         }
     }
 }

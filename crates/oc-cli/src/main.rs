@@ -32,7 +32,15 @@ enum Command {
         dump_schema: bool,
     },
     /// 启动常驻进程。
-    Serve,
+    Serve {
+        /// 监听的 socket 路径 / 管道名（默认平台默认值）。
+        ///
+        /// 主要给测试用：Windows 的默认管道名是全局常量 `\\.\pipe\oc-daemon`
+        /// （`TransportKind::platform_default` 忽略 `oc_home`），因此仅靠 `OC_HOME`
+        /// 无法把测试 daemon 与开发机上正在跑的那个隔开。对称于 `oc http --socket`。
+        #[arg(long)]
+        socket: Option<String>,
+    },
     /// 启动 OpenAI Responses API 兼容的 HTTP 服务器。
     Http {
         /// HTTP 监听端口。
@@ -144,7 +152,7 @@ enum MemoryCmd {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Some(Command::Doctor { dump_schema }) => doctor::run(dump_schema),
-        Some(Command::Serve) => run_serve(),
+        Some(Command::Serve { socket }) => run_serve(socket),
         Some(Command::Http { port, socket, max_conns }) => run_http(port, socket, max_conns),
         Some(Command::Onboard) => onboard::run(),
         Some(Command::Cron(CronCmd::Add { expr, prompt, tz })) => {
@@ -177,6 +185,15 @@ fn main() -> anyhow::Result<()> {
 ///
 /// 独立于 `serve`：HTTP 层只做协议适配，连到已在跑的 daemon。两个进程分开，
 /// HTTP 侧崩溃不影响核心会话。
+/// 解析 `--socket` 覆盖：显式给路径时按平台语义解释，否则用平台默认
+/// （后者本身也会先看 `OC_SOCKET` 环境变量，见 `oc_server::transport`）。
+fn resolve_transport(socket: Option<String>, home: &std::path::Path) -> oc_server::TransportKind {
+    match socket {
+        Some(s) => oc_server::TransportKind::from_endpoint(s),
+        None => oc_server::TransportKind::platform_default(home),
+    }
+}
+
 fn run_http(port: u16, socket: Option<String>, max_conns: usize) -> anyhow::Result<()> {
     let home = paths::oc_home()?;
 
@@ -188,20 +205,7 @@ fn run_http(port: u16, socket: Option<String>, max_conns: usize) -> anyhow::Resu
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    // socket 覆盖：显式给路径时按平台语义解释（Windows 管道名 / Unix 路径）。
-    let kind = match socket {
-        Some(s) => {
-            #[cfg(windows)]
-            {
-                oc_server::TransportKind::Pipe(s)
-            }
-            #[cfg(not(windows))]
-            {
-                oc_server::TransportKind::Unix(std::path::PathBuf::from(s))
-            }
-        }
-        None => oc_server::TransportKind::platform_default(&home),
-    };
+    let kind = resolve_transport(socket, &home);
 
     // 模型名仅用于回填响应体的 `model` 字段（客户端常据此展示/记账）；
     // 实际用哪个模型由 daemon 的配置决定，HTTP 侧无法覆盖。
@@ -225,7 +229,7 @@ fn run_http(port: u16, socket: Option<String>, max_conns: usize) -> anyhow::Resu
 }
 
 /// 启动常驻进程（阻塞直到收到关停信号）。
-fn run_serve() -> anyhow::Result<()> {
+fn run_serve(socket: Option<String>) -> anyhow::Result<()> {
     let home = paths::oc_home()?;
     std::fs::create_dir_all(&home)?;
 
@@ -257,7 +261,7 @@ fn run_serve() -> anyhow::Result<()> {
     // 单实例锁：防止多个 serve 争用同一 socket / 库。
     let _guard = lock::acquire(&home)?;
 
-    let kind = oc_server::TransportKind::platform_default(&home);
+    let kind = resolve_transport(socket, &home);
 
     let cfg = config_loader::load()?;
     let (provider, session_cfg, heartbeat) = provider_setup::build(&cfg)?;
