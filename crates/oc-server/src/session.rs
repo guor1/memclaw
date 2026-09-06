@@ -702,7 +702,7 @@ async fn flush_episodic(
 /// 由 dispatch 的 `session.reset` handler 调用（reset 不经过 session actor：
 /// 它只改 `sessions.reset_at` 一列，不需要占用车道）。
 pub async fn flush_before_reset(store: &oc_store::Store, session_id: &str, max_entries: i64) {
-    let entries = match store.writer().load_transcript(session_id.into(), max_entries).await {
+    let entries = match store.load_transcript(session_id.into(), max_entries).await {
         Ok(e) => e,
         Err(e) => {
             warn!(error = %e, "reset 前加载历史失败，跳过记忆沉淀");
@@ -782,7 +782,7 @@ async fn persist_explicit_memory(store: &oc_store::Store, user_msg: &str) {
     // 查询失败不放弃写入：退化成 Add（宁可多留一条，也不因读失败丢掉用户的话）。
     let mut to_delete: Option<String> = None;
     if let Some(key) = &pref_key {
-        match store.writer().memory_by_pref_key(key.clone()).await {
+        match store.memory_by_pref_key(key.clone()).await {
             Ok(rows) => {
                 let existing: Vec<Pref> = rows
                     .iter()
@@ -897,7 +897,6 @@ async fn lane1_bootstrap(
 
     // 仅取 curated 候选（自动注入只限 curated）。
     let rows = match store
-        .writer()
         .search_candidates(terms.clone(), Some(oc_store::Tier::Curated), 32)
         .await
     {
@@ -962,7 +961,7 @@ async fn intent_scan(
     use oc_core::memory::{intent_prefilter, StandingIntent};
     use oc_core::proactive::{allow_fire, FireDecision, IntentState, NagCfg};
 
-    let rows = match store.writer().intent_list().await {
+    let rows = match store.intent_list().await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "standing intent：读取失败，跳过本轮触发");

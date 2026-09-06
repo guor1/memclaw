@@ -50,7 +50,7 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>, out_tx: &mpsc::Send
         Method::ChatHistory(p) => {
             let limit = p.limit.unwrap_or(200) as i64;
             let session = p.session.clone().unwrap_or_else(SessionId::main);
-            match state.store().writer().load_transcript(session.to_string(), limit).await {
+            match state.store().load_transcript(session.to_string(), limit).await {
                 Ok(entries) => {
                     let out = entries
                         .into_iter()
@@ -198,7 +198,7 @@ async fn handle_compact(
 
 /// 列出所有会话（sessions.list）。
 async fn handle_sessions_list(state: &Arc<ServerState>) -> Result<MethodOk, ProtoError> {
-    let rows = state.store().writer().session_list().await.map_err(|e| ProtoError {
+    let rows = state.store().session_list().await.map_err(|e| ProtoError {
         kind: oc_proto::ErrorKind::Internal,
         message: format!("列出会话失败: {e}"),
     })?;
@@ -216,8 +216,13 @@ async fn handle_sessions_list(state: &Arc<ServerState>) -> Result<MethodOk, Prot
 
 /// 整机诊断快照（`oc debug`）：会话运行时状态 + 写线程健康 + 订阅者数。
 async fn handle_diagnostics(state: &Arc<ServerState>) -> Result<MethodOk, ProtoError> {
-    // 写线程健康：发一个廉价读命令（session_list），能回即视为存活。
-    let store_writer_alive = state.store().writer().session_list().await.is_ok();
+    // 写线程健康：投一条 no-op 到写队列并等它被执行。
+    //
+    // 曾经用 `session_list()` 当探针，但 P2-1 把读挪到独立连接池之后，
+    // 那条命令根本不再经过写线程——探针会在写线程已死时照样返回 true。
+    // 现在用 `writer_ping()`：既确认线程活着，也确认队列在推进
+    // （长事务卡住时线程活着但不动，`is_alive()` 单独答不了这一问）。
+    let store_writer_alive = state.store().writer_ping().await.is_ok();
     let snap = oc_proto::DiagnosticsSnapshot {
         uptime_secs: state.diag().uptime_secs(),
         sessions: state.diag().snapshot_sessions(),
@@ -270,7 +275,7 @@ async fn handle_cron_add(
 }
 
 async fn handle_cron_list(state: &Arc<ServerState>) -> Result<MethodOk, ProtoError> {
-    let rows = state.store().writer().cron_list().await.map_err(|e| ProtoError {
+    let rows = state.store().cron_list().await.map_err(|e| ProtoError {
         kind: oc_proto::ErrorKind::Internal,
         message: format!("列出 cron 失败: {e}"),
     })?;
@@ -358,7 +363,7 @@ async fn handle_intent_add(
 }
 
 async fn handle_intent_list(state: &Arc<ServerState>) -> Result<MethodOk, ProtoError> {
-    let rows = state.store().writer().intent_list().await.map_err(|e| ProtoError {
+    let rows = state.store().intent_list().await.map_err(|e| ProtoError {
         kind: oc_proto::ErrorKind::Internal,
         message: format!("列出 standing intent 失败: {e}"),
     })?;
@@ -405,7 +410,6 @@ async fn handle_memory_search(
     let limit = p.limit.unwrap_or(10) as i64;
     let rows = state
         .store()
-        .writer()
         .search_candidates(terms.clone(), None, 64)
         .await
         .map_err(|e| ProtoError {

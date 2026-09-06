@@ -49,7 +49,7 @@ pub struct ProactiveCtx {
 
 /// 执行一轮 cron 扫描。返回本轮触发的任务数。
 pub async fn cron_scan(ctx: &ProactiveCtx, now_secs: i64) -> usize {
-    let crons = match ctx.store.writer().cron_list().await {
+    let crons = match ctx.store.cron_list().await {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, "proactive：读取 cron 失败，跳过本轮");
@@ -327,7 +327,7 @@ fn spawn_precise_timer(ctx: ProactiveCtx, id: String, secs: i64) {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(secs.max(0) as u64)).await;
         // 重新读：用户可能已 rm，或心跳已抢先触发。
-        let rows = match ctx.store.writer().cron_list().await {
+        let rows = match ctx.store.cron_list().await {
             Ok(r) => r,
             Err(e) => {
                 warn!(id = %id, error = %e, "proactive：timer 读取 cron 失败");

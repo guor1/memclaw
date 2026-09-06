@@ -9,11 +9,13 @@
 pub mod error;
 pub mod migrate;
 pub mod ops;
+pub mod reader;
 pub mod schema;
 pub mod types;
 pub mod writer;
 
 pub use error::{StoreError, StoreResult};
+pub use reader::Reader;
 pub use types::*;
 pub use writer::Writer;
 
@@ -21,26 +23,123 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
-/// Store 门面：持有单写线程句柄。读写都经写线程串行（单用户下足够）。
+/// Store 门面：写走单写线程，读走独立连接池（P2-1）。
+///
+/// **读写分流**（设计 §3.1）：写由 [`Writer`] 的专用线程串行执行（唯一可写连接）；
+/// 读由 [`Reader`] 的小连接池在 `spawn_blocking` 上跑。WAL 下二者互不阻塞，
+/// 所以一次全表扫描不再拖住所有会话的落库。
+///
+/// **内存库的例外**：`reader` 为 `None` 时读回落到写线程。SQLite 的
+/// `:memory:` 库**每条连接一个独立库**——池里的连接会看到一个空库，
+/// 而共享它需要 `cache=shared` URI，那又会关掉 WAL 并引入
+/// `SQLITE_LOCKED_SHAREDCACHE`（`busy_timeout` 管不着）。测试用内存库图的是
+/// 快和干净，不值得为此换一套并发语义，故只在文件库上分流。
+/// 生产路径（[`Store::open_path`]）始终有池。
 #[derive(Clone)]
 pub struct Store {
     writer: Writer,
+    reader: Option<Reader>,
 }
 
 impl Store {
-    /// 打开磁盘库并启动写线程。
+    /// 打开磁盘库并启动写线程 + 读连接池。
     pub fn open_path(path: std::path::PathBuf) -> StoreResult<Self> {
-        Ok(Self { writer: Writer::spawn(Some(path))? })
+        // 先起写线程：它负责建库与迁移，读连接必须在那之后才开得出正确 schema。
+        let writer = Writer::spawn(Some(path.clone()))?;
+        Ok(Self {
+            writer,
+            reader: Some(Reader::new(path)),
+        })
     }
 
-    /// 打开内存库（测试）。
+    /// 打开内存库（测试）。读回落到写线程，见类型文档。
     pub fn open_memory() -> StoreResult<Self> {
-        Ok(Self { writer: Writer::spawn(None)? })
+        Ok(Self {
+            writer: Writer::spawn(None)?,
+            reader: None,
+        })
     }
 
     pub fn writer(&self) -> &Writer {
         &self.writer
     }
+
+    /// 读连接池；内存库为 `None`（读回落写线程）。
+    pub fn reader(&self) -> Option<&Reader> {
+        self.reader.as_ref()
+    }
+
+    /// 写线程是否存活（一次原子读）。写侧死后读仍可用——降级而非全瘫。
+    pub fn writer_alive(&self) -> bool {
+        self.writer.is_alive()
+    }
+
+    /// 端到端写侧健康探针：投一条 no-op 并等它被执行。
+    pub async fn writer_ping(&self) -> StoreResult<()> {
+        self.writer.ping().await
+    }
+}
+
+/// 生成一个读方法：有池走池（`spawn_blocking`），无池回落写线程。
+///
+/// 两条路径共用 `ops::*` 同一个函数，所以不存在"读池版本和写线程版本
+/// 行为不一致"的风险——回落只是少了并行，不是另一套实现。
+macro_rules! read_call {
+    (
+        $(#[$m:meta])*
+        $name:ident($($arg:ident : $ty:ty),* $(,)?) -> $ret:ty,
+        pool: |$conn:ident| $body:expr
+    ) => {
+        $(#[$m])*
+        pub async fn $name(&self, $($arg: $ty),*) -> StoreResult<$ret> {
+            match &self.reader {
+                Some(r) => r.read(move |$conn| $body).await,
+                None => self.writer.$name($($arg),*).await,
+            }
+        }
+    };
+}
+
+impl Store {
+    read_call!(
+        /// 取会话历史（正序，`reset_at` 之后、最多 `max_entries` 条）。
+        load_transcript(session_id: String, max_entries: i64) -> Vec<types::Entry>,
+        pool: |c| ops::load_transcript(c, &session_id, max_entries)
+    );
+    read_call!(
+        /// Lane1 记忆检索的候选集（词法预筛，排名在 oc-core）。
+        search_candidates(
+            query_terms: Vec<String>,
+            tier_filter: Option<types::Tier>,
+            limit: i64,
+        ) -> Vec<types::MemoryRow>,
+        pool: |c| ops::search_candidates(c, &query_terms, tier_filter, limit)
+    );
+    read_call!(
+        /// dreaming 的巩固候选（仅 episodic）。
+        dream_candidates(limit: i64) -> Vec<types::MemoryRow>,
+        pool: |c| ops::dream_candidates(c, limit)
+    );
+    read_call!(
+        /// 按偏好主题取既有偏好（供 supersede 判冲突）。
+        memory_by_pref_key(key: String) -> Vec<types::MemoryRow>,
+        pool: |c| ops::memory_by_pref_key(c, &key)
+    );
+    read_call!(
+        /// 全部会话（`oc sessions`）。
+        session_list() -> Vec<types::SessionRow>,
+        pool: |c| ops::session_list(c)
+    );
+    read_call!(
+        /// 全部 cron 任务（心跳扫描 + `oc cron list`）。
+        cron_list() -> Vec<types::CronRow>,
+        pool: |c| ops::cron_list(c)
+    );
+    read_call!(
+        /// 全部 standing intent（每轮入站消息预筛 + `oc intent list`）。
+        intent_list() -> Vec<types::StandingIntentRow>,
+        pool: |c| ops::intent_list(c)
+    );
 }
 
 /// 打开（或创建）数据库，应用启动 PRAGMA 并跑前向迁移。

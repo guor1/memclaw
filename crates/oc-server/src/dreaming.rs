@@ -48,7 +48,7 @@ pub async fn scan_with(
     cfg: &DreamCfg,
     ctx: Option<&ConsolidateCtx>,
 ) -> usize {
-    let rows = match store.writer().dream_candidates(SCAN_LIMIT).await {
+    let rows = match store.dream_candidates(SCAN_LIMIT).await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "dreaming：取候选失败，跳过本轮");
