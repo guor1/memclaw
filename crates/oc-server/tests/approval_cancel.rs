@@ -13,7 +13,8 @@ use oc_llm::mock::{ScriptStep, SequencedMock};
 use oc_llm::types::ToolCallDelta;
 use oc_llm::{Delta, FinishReason};
 use oc_proto::{Event, LifecyclePhase};
-use oc_server::session::{self, SessionConfig};
+use oc_server::session;
+use oc_server::testing::{test_cfg, SessionConfigExt};
 use oc_server::tools_bridge::ToolExecutor;
 use oc_tools::exec::ExecTool;
 use oc_tools::ToolRegistry;
@@ -43,26 +44,9 @@ async fn abort_interrupts_pending_approval_and_cleans_registry() {
     let registry: oc_server::state::ApprovalRegistry = Arc::new(dashmap::DashMap::new());
     let executor = ToolExecutor::new(Arc::new(reg)).with_approvals(Arc::clone(&registry));
 
-    let cfg = SessionConfig {
-        model: "mock".into(),
-        system_prompt: None,
-        idle_timeout: Duration::from_secs(30),
-        run_timeout: None,
-        queue_cap: 8,
-        tools: Some(executor),
-        warn_secs: 60,
-        abort_min_secs: 300,
-        max_history_entries: 200,
-        history_token_budget: 8000,
-        soul: String::new(),
-        skills: Vec::new(),
-        trigger_threshold: 0.72,
-        trigger_max_per_turn: 3,
-        intent_defaults: Default::default(),
-        soul_dir: None,
-        default_tz: "UTC".into(),
-        context_window: 65536,
-    };
+    let cfg = test_cfg()
+        .with_idle_timeout(Duration::from_secs(30))
+        .with_tools(executor);
 
     let scripts = vec![tool_call_step("call-danger", "exec", "{\"command\": \"sudo rm -rf /\"}")];
     let provider = Arc::new(SequencedMock::new(scripts));

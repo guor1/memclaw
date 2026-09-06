@@ -68,26 +68,7 @@ async fn connect_and_echo_roundtrip() {
         use std::sync::Arc;
         use std::time::Duration;
         let provider = Arc::new(oc_llm::mock::MockProvider::echo_text("你好，我在。"));
-        let cfg = oc_server::SessionConfig {
-            model: "mock".into(),
-            system_prompt: None,
-            idle_timeout: Duration::from_secs(5),
-            run_timeout: None,
-            queue_cap: 8,
-            tools: None,
-            warn_secs: 60,
-            abort_min_secs: 300,
-            max_history_entries: 200,
-            history_token_budget: 8000,
-            soul: String::new(),
-            skills: Vec::new(),
-            trigger_threshold: 0.72,
-            trigger_max_per_turn: 3,
-            intent_defaults: Default::default(),
-            soul_dir: None,
-            default_tz: "UTC".into(),
-            context_window: 65536,
-        };
+        let cfg = oc_server::testing::test_cfg();
         let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
     });
 
@@ -167,26 +148,7 @@ async fn sessions_list_roundtrip() {
         use std::sync::Arc;
         use std::time::Duration;
         let provider = Arc::new(oc_llm::mock::MockProvider::echo_text("hi"));
-        let cfg = oc_server::SessionConfig {
-            model: "mock".into(),
-            system_prompt: None,
-            idle_timeout: Duration::from_secs(5),
-            run_timeout: None,
-            queue_cap: 8,
-            tools: None,
-            warn_secs: 60,
-            abort_min_secs: 300,
-            max_history_entries: 200,
-            history_token_budget: 8000,
-            soul: String::new(),
-            skills: Vec::new(),
-            trigger_threshold: 0.72,
-            trigger_max_per_turn: 3,
-            intent_defaults: Default::default(),
-            soul_dir: None,
-            default_tz: "UTC".into(),
-            context_window: 65536,
-        };
+        let cfg = oc_server::testing::test_cfg();
         let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
     });
 
@@ -240,26 +202,7 @@ async fn diagnostics_roundtrip() {
         use std::sync::Arc;
         use std::time::Duration;
         let provider = Arc::new(oc_llm::mock::MockProvider::echo_text("hi"));
-        let cfg = oc_server::SessionConfig {
-            model: "mock".into(),
-            system_prompt: None,
-            idle_timeout: Duration::from_secs(5),
-            run_timeout: None,
-            queue_cap: 8,
-            tools: None,
-            warn_secs: 60,
-            abort_min_secs: 300,
-            max_history_entries: 200,
-            history_token_budget: 8000,
-            soul: String::new(),
-            skills: Vec::new(),
-            trigger_threshold: 0.72,
-            trigger_max_per_turn: 3,
-            intent_defaults: Default::default(),
-            soul_dir: None,
-            default_tz: "UTC".into(),
-            context_window: 65536,
-        };
+        let cfg = oc_server::testing::test_cfg();
         let _ = oc_server::serve_with(server_kind, provider, cfg, Duration::from_secs(60), oc_store::Store::open_memory().unwrap()).await;
     });
 

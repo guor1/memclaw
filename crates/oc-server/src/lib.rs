@@ -18,6 +18,8 @@ pub mod session;
 pub mod sink;
 pub mod state;
 pub mod summarize;
+#[cfg(feature = "test-support")]
+pub mod testing;
 pub mod tools_bridge;
 pub mod transport;
 

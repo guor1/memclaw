@@ -10,28 +10,10 @@ use oc_llm::{Delta, FinishReason};
 use oc_proto::{Event, LifecyclePhase, RunErrorKind};
 use oc_server::session::{self, SessionConfig};
 use tokio::sync::broadcast;
+use oc_server::testing::{test_cfg, SessionConfigExt};
 
 fn cfg(idle_ms: u64) -> SessionConfig {
-    SessionConfig {
-        model: "mock".into(),
-        system_prompt: None,
-        idle_timeout: Duration::from_millis(idle_ms),
-        run_timeout: None,
-        queue_cap: 8,
-        tools: None,
-        warn_secs: 60,
-        abort_min_secs: 300,
-        max_history_entries: 200,
-        history_token_budget: 8000,
-        soul: String::new(),
-        skills: Vec::new(),
-        trigger_threshold: 0.72,
-        trigger_max_per_turn: 3,
-        intent_defaults: Default::default(),
-        soul_dir: None,
-        default_tz: "UTC".into(),
-        context_window: 65536,
-    }
+    test_cfg().with_idle_timeout(Duration::from_millis(idle_ms))
 }
 
 /// 收集事件直到出现终态（End 或 Error），或超时。
@@ -118,26 +100,9 @@ async fn health_scan_aborts_stuck_run() {
     let (tx, mut rx) = broadcast::channel(256);
     // 模型卡很久；idle 看门狗设长(60s)不先触发，让卡死诊断来处理。
     let provider = Arc::new(MockProvider::stalls_for(Duration::from_secs(60)));
-    let cfg = SessionConfig {
-        model: "mock".into(),
-        system_prompt: None,
-        idle_timeout: Duration::from_secs(60), // 看门狗不先触发
-        run_timeout: None,
-        queue_cap: 8,
-        tools: None,
-        warn_secs: 1,      // 1s 警告
-        abort_min_secs: 2, // 2s 达 abort 条件
-        max_history_entries: 200,
-        history_token_budget: 8000,
-        soul: String::new(),
-        skills: Vec::new(),
-        trigger_threshold: 0.72,
-        trigger_max_per_turn: 3,
-        intent_defaults: Default::default(),
-        soul_dir: None,
-        default_tz: "UTC".into(),
-        context_window: 65536,
-    };
+    let cfg = test_cfg()
+        .with_idle_timeout(Duration::from_secs(60)) // 看门狗不先触发
+        .with_watchdog(1, 2); // 1s 警告 / 2s 达 abort 条件
     let handle = session::spawn(oc_proto::SessionId::main(), cfg, provider, tx, oc_store::Store::open_memory().unwrap(), oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
 
     let _run = handle.submit("会卡死".into(), handle.broadcast_sink()).await.expect("run");

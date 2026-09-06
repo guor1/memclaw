@@ -13,28 +13,10 @@ use oc_proto::{Event, LifecyclePhase, SessionId};
 use oc_server::registry::SessionRegistry;
 use oc_server::session::SessionConfig;
 use tokio::sync::broadcast;
+use oc_server::testing::{test_cfg, SessionConfigExt};
 
 fn cfg() -> SessionConfig {
-    SessionConfig {
-        model: "mock".into(),
-        system_prompt: None,
-        idle_timeout: Duration::from_secs(5),
-        run_timeout: None,
-        queue_cap: 8,
-        tools: None,
-        warn_secs: 60,
-        abort_min_secs: 300,
-        max_history_entries: 200,
-        history_token_budget: 8000,
-        soul: "人格".into(),
-        skills: Vec::new(),
-        trigger_threshold: 0.5,
-        trigger_max_per_turn: 3,
-        intent_defaults: Default::default(),
-        soul_dir: None,
-        default_tz: "UTC".into(),
-        context_window: 65536,
-    }
+    test_cfg().with_soul("人格").with_trigger_threshold(0.5)
 }
 
 /// 收集事件直到看到指定 run 数量的 End（或超时）。

@@ -9,28 +9,10 @@ use oc_llm::mock::CapturingMock;
 use oc_proto::{Event, LifecyclePhase};
 use oc_server::session::{self, SessionConfig};
 use tokio::sync::broadcast;
+use oc_server::testing::{test_cfg, SessionConfigExt};
 
 fn cfg(soul: &str) -> SessionConfig {
-    SessionConfig {
-        model: "mock".into(),
-        system_prompt: None,
-        idle_timeout: Duration::from_secs(5),
-        run_timeout: None,
-        queue_cap: 8,
-        tools: None,
-        warn_secs: 60,
-        abort_min_secs: 300,
-        max_history_entries: 200,
-        history_token_budget: 8000,
-        soul: soul.to_string(),
-        skills: Vec::new(),
-        trigger_threshold: 0.72,
-        trigger_max_per_turn: 3,
-        intent_defaults: Default::default(),
-        soul_dir: None,
-        default_tz: "UTC".into(),
-        context_window: 65536,
-    }
+    test_cfg().with_soul(soul)
 }
 
 async fn wait_terminal(rx: &mut broadcast::Receiver<Event>, timeout: Duration) {

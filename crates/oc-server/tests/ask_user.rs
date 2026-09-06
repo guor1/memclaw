@@ -17,6 +17,7 @@ use oc_server::tools_bridge::ToolExecutor;
 use oc_tools::ask_user::AskUserTool;
 use oc_tools::ToolRegistry;
 use tokio::sync::broadcast;
+use oc_server::testing::{test_cfg, SessionConfigExt};
 
 fn tool_call_step(id: &str, name: &str, args: &str) -> Vec<ScriptStep> {
     vec![
@@ -40,26 +41,9 @@ fn text_step(t: &str) -> Vec<ScriptStep> {
 }
 
 fn cfg(tools: ToolExecutor) -> SessionConfig {
-    SessionConfig {
-        model: "mock".into(),
-        system_prompt: None,
-        idle_timeout: Duration::from_secs(30),
-        run_timeout: None,
-        queue_cap: 8,
-        tools: Some(tools),
-        warn_secs: 60,
-        abort_min_secs: 300,
-        max_history_entries: 200,
-        history_token_budget: 8000,
-        soul: String::new(),
-        skills: Vec::new(),
-        trigger_threshold: 0.72,
-        trigger_max_per_turn: 3,
-        intent_defaults: Default::default(),
-        soul_dir: None,
-        default_tz: "UTC".into(),
-        context_window: 65536,
-    }
+    test_cfg()
+        .with_idle_timeout(Duration::from_secs(30))
+        .with_tools(tools)
 }
 
 #[tokio::test]

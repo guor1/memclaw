@@ -25,5 +25,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 
+[features]
+# 测试 harness（`oc_server::testing`）。默认关闭，仅测试构建启用。
+#
+# 放在 src/ 而非 tests/ 是因为 Rust 里 tests/*.rs 各自是独立 crate，无法共享代码；
+# 而 oc-http 的 e2e 也要起真 daemon，跨 crate 更只能走 feature。
+test-support = ["dep:tempfile"]
+
+[dependencies.tempfile]
+version = "3"
+optional = true
+
 [dev-dependencies]
 tempfile = "3"
+# 自身的集成测试也要用 harness。
+oc-server = { path = ".", features = ["test-support"] }

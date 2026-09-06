@@ -81,26 +81,7 @@ async fn long_reply_not_truncated() {
     let server_kind = kind.clone();
     let server = tokio::spawn(async move {
         let provider = Arc::new(MockProvider::scripted(script));
-        let cfg = oc_server::SessionConfig {
-            model: "mock".into(),
-            system_prompt: None,
-            idle_timeout: Duration::from_secs(5),
-            run_timeout: None,
-            queue_cap: 8,
-            tools: None,
-            warn_secs: 60,
-            abort_min_secs: 300,
-            max_history_entries: 200,
-            history_token_budget: 8000,
-            soul: String::new(),
-            skills: Vec::new(),
-            trigger_threshold: 0.72,
-            trigger_max_per_turn: 3,
-            intent_defaults: Default::default(),
-            soul_dir: None,
-            default_tz: "UTC".into(),
-            context_window: 65536,
-        };
+        let cfg = oc_server::testing::test_cfg();
         let _ = oc_server::serve_with(
             server_kind,
             provider,
