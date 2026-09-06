@@ -250,6 +250,20 @@ fn format_event(ev: &SseEvent) -> String {
     }
 }
 
+/// Pull the data values out of an already-framed SSE payload.
+///
+/// [`event_to_sse`] emits complete frames (and sometimes several in one string,
+/// e.g. the terminal batch plus `[DONE]`). Axum wants the bare value instead —
+/// it does the `data: ` framing itself. Lines that are not `data: ` frames are
+/// dropped, so blank separators do not turn into empty events.
+fn split_sse_data(payload: &str) -> Vec<String> {
+    payload
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Drive the SSE stream off the daemon connection.
 ///
 /// Takes `conn` by value: the generator owns it for the stream's lifetime, so
@@ -269,9 +283,15 @@ pub fn stream_sse(
             match conn.rx.recv().await {
                 Some(Frame::Event(ev)) => {
                     if let Some((payload, terminal)) = event_to_sse(&ev, &mut state) {
-                        // The payload is already fully SSE-framed (possibly several
-                        // events at once), so it is emitted verbatim.
-                        yield Ok(axum::response::sse::Event::default().data(payload));
+                        // `event_to_sse` returns an already-framed payload (`data: ...\n\n`,
+                        // possibly several frames at once). Axum's `Event::data()` adds its
+                        // own `data: ` prefix, so handing it the framed text verbatim emits
+                        // `data: data: {...}` — which no standard SSE client can parse.
+                        // Split the payload back into individual data values and let axum
+                        // do the framing exactly once.
+                        for value in split_sse_data(&payload) {
+                            yield Ok(axum::response::sse::Event::default().data(value));
+                        }
                         if terminal {
                             break;
                         }

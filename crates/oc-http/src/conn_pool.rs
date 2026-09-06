@@ -34,6 +34,24 @@ const CHANNEL_CAP: usize = 32;
 /// their permit for the whole stream, so permits can stay taken for minutes).
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Windows named-pipe `ERROR_PIPE_BUSY`: every instance is currently taken.
+///
+/// Not a real failure — the server creates the next instance only after the
+/// previous one is connected, so concurrent clients routinely see this for a
+/// moment. Retrying is the documented way to handle it.
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// How long to keep retrying [`ERROR_PIPE_BUSY`] before treating it as a real
+/// connection failure. Comfortably longer than the server needs to loop back
+/// around to `accept`, yet short enough that a genuinely dead daemon still
+/// fails well inside [`ACQUIRE_TIMEOUT`].
+#[cfg(windows)]
+const PIPE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(windows)]
+const PIPE_BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+
 #[derive(Clone)]
 pub struct ConnPool {
     inner: Arc<Mutex<Vec<NdjsonConn>>>,
@@ -152,10 +170,33 @@ async fn connect(transport: &TransportKind) -> HttpResult<NdjsonConn> {
         #[cfg(windows)]
         TransportKind::Pipe(name) => {
             use tokio::net::windows::named_pipe::ClientOptions;
-            let s = ClientOptions::new()
-                .open(name)
-                .map_err(|e| HttpError::Connection(format!("connect to {name} failed: {e}")))?;
-            Ok(spawn_codec(s))
+
+            // `ERROR_PIPE_BUSY` 必须重试，不能当失败。
+            //
+            // server 的 accept 循环一次只备**一个**管道实例：取出当前实例等连接，
+            // 连上之后才创建下一个（见 oc-server/src/transport.rs `Listener::accept`）。
+            // 于是并发连接时，后到的客户端可能撞上"所有管道范例都在使用中"
+            // （os error 231）——这不是真的连不上，只是下一个实例还没建好。
+            //
+            // Windows 对此的标准做法就是等一下再试。不重试的表现是：`oc http`
+            // 并发请求随机 500，而 daemon 侧毫无异常日志。
+            let deadline = std::time::Instant::now() + PIPE_BUSY_TIMEOUT;
+            loop {
+                match ClientOptions::new().open(name) {
+                    Ok(s) => return Ok(spawn_codec(s)),
+                    Err(e)
+                        if e.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(PIPE_BUSY_RETRY_INTERVAL).await;
+                    }
+                    Err(e) => {
+                        return Err(HttpError::Connection(format!(
+                            "connect to {name} failed: {e}"
+                        )))
+                    }
+                }
+            }
         }
         #[cfg(not(unix))]
         TransportKind::Unix(_) => Err(HttpError::Internal(
