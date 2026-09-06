@@ -302,6 +302,13 @@ pub struct DiagnosticsSnapshot {
     pub store_writer_alive: bool,
     /// 当前事件订阅者数（活跃连接近似）。
     pub event_subscribers: usize,
+    /// 幂等缓存当前条数（P2-3）。
+    ///
+    /// 长挂时观察内存是否稳定的抓手：本数与会话行数是两处按键无界增长的地方，
+    /// 各有 TTL / 空闲淘汰在收。若它随时间单调上涨，说明清扫没在跑。
+    /// `serde(default)` 兼容旧 server 的应答（缺该键按 0）。
+    #[serde(default)]
+    pub idem_entries: usize,
     /// 采样时刻（unix ms），供 client 计算各 run 的实时 age。
     pub sampled_at: i64,
     pub proto_version: u16,

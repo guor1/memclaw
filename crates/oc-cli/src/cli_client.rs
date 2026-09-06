@@ -300,8 +300,8 @@ fn render_diag(s: &oc_proto::DiagnosticsSnapshot) -> String {
     let writer = if s.store_writer_alive { "OK" } else { "DOWN" };
     let _ = writeln!(
         out,
-        "uptime {hh:02}:{mm:02}:{ss:02}   writer {writer}   subs {}   proto v{}",
-        s.event_subscribers, s.proto_version
+        "uptime {hh:02}:{mm:02}:{ss:02}   writer {writer}   subs {}   idem {}   proto v{}",
+        s.event_subscribers, s.idem_entries, s.proto_version
     );
     let _ = writeln!(
         out,

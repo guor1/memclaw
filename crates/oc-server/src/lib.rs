@@ -148,9 +148,12 @@ pub async fn serve_with(
         }
     });
 
-    // 心跳 tick：每 tick 卡死诊断扫描 + cron 到期扫描；每 DREAM_EVERY_TICKS 一轮 dreaming。
+    // 心跳 tick：每 tick 卡死诊断扫描 + 内存 GC + cron 到期扫描；
+    // 每 DREAM_EVERY_TICKS 一轮 dreaming。
     let shutdown = CancellationToken::new();
-    let scan_registry = state.registry().clone();
+    // GC 与卡死扫描都挂在这里，而不是各起一个 tokio 定时任务：本 tick 已有关停
+    // 接线（`shutdown` token），且两者都是「扫一遍、都很便宜」的周期活儿。
+    let tick_state = Arc::clone(&state);
     // 巩固模型轮上下文：仅当配了 soul_dir（有落盘位置）才启用重写 MEMORY.md。
     let dream_ctx = soul_dir.map(|dir| dreaming::ConsolidateCtx {
         provider: Arc::clone(&provider),
@@ -158,13 +161,15 @@ pub async fn serve_with(
         soul_dir: dir,
     });
     scheduler::Heartbeat::new(heartbeat_interval).spawn(shutdown.clone(), move |tick| {
-        let registry = scan_registry.clone();
+        let tick_state = Arc::clone(&tick_state);
         let store = dream_store.clone();
         let pctx = proactive_ctx.clone();
         let dctx = dream_ctx.clone();
         async move {
             tracing::debug!(tick, "heartbeat：扫描");
-            registry.health_scan_all().await;
+            tick_state.registry().health_scan_all().await;
+            // 内存 GC（P2-3）：过期幂等键 + 空闲会话 actor（连带其诊断/用量格位）。
+            tick_state.gc_tick().await;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)

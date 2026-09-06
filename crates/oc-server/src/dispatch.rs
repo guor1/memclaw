@@ -12,7 +12,7 @@ use oc_proto::{
 use tokio::sync::mpsc;
 
 use crate::sink::RunSink;
-use crate::state::{CachedRes, ServerState};
+use crate::state::ServerState;
 
 /// 处理一个请求，返回应答载荷。副作用（事件广播）在此内部完成。
 ///
@@ -21,8 +21,8 @@ use crate::state::{CachedRes, ServerState};
 pub async fn handle_req(req: &Req, state: &Arc<ServerState>, out_tx: &mpsc::Sender<Frame>) -> ResResult {
     // 幂等：side-effecting 方法命中缓存直接返回首个结果。
     if let Some(key) = &req.idempotency_key {
-        if let Some(cached) = state.idem_get(key) {
-            return ResResult::Ok(cached.ok);
+        if let Some(ok) = state.idem_get(key) {
+            return ResResult::Ok(ok);
         }
     }
 
@@ -92,7 +92,7 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>, out_tx: &mpsc::Send
         Ok(ok) => {
             // 写幂等缓存。
             if let Some(key) = &req.idempotency_key {
-                state.idem_put(key.clone(), CachedRes { ok: ok.clone() });
+                state.idem_put(key.clone(), ok.clone());
             }
             ResResult::Ok(ok)
         }
@@ -132,7 +132,18 @@ async fn handle_chat_send(
     let handle = state.registry().get_or_spawn(&session);
     // 本轮内联事件定向回发到这条连接（背压不丢，P0-1）。
     let sink = RunSink::Conn(out_tx.clone());
-    match handle.submit(p.text.clone(), sink).await {
+    let mut result = handle.submit(p.text.clone(), sink.clone()).await;
+
+    // 拿到句柄后、submit 前，该 actor 可能刚被空闲淘汰（P2-3 的 GC 落在这个缝里）。
+    // 重取一次即可：`get_or_spawn` 见死句柄会换新 actor。窗口极窄且只发生在
+    // 「闲置满 24h 的会话正好此刻被唤醒」，重试一次足够；不重试的话，这条请求会
+    // 收到「队列已满」——队列其实空着，只是没人收命令，属误报。
+    if result.is_none() && handle.is_closed() {
+        let fresh = state.registry().get_or_spawn(&session);
+        result = fresh.submit(p.text.clone(), sink).await;
+    }
+
+    match result {
         Some(run_id) => Ok(MethodOk::ChatSend { run_id }),
         // 队列已满或 actor 已停。**必须报错而不是回一个 run_id**：该轮不会执行，
         // 也就永不产生 Lifecycle 事件，调用方拿着 id 只会白等（HTTP 侧无超时
@@ -228,6 +239,7 @@ async fn handle_diagnostics(state: &Arc<ServerState>) -> Result<MethodOk, ProtoE
         sessions: state.diag().snapshot_sessions(),
         store_writer_alive,
         event_subscribers: state.subscriber_count(),
+        idem_entries: state.idem_len(),
         sampled_at: now_millis(),
         proto_version: PROTO_VERSION,
     };

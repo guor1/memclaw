@@ -108,6 +108,19 @@ pub enum SessionCmd {
     Finished { run_id: RunId, outcome: RunOutcome },
     /// 卡死诊断扫描（由心跳 tick 触发）：检查活跃 run 是否卡死。
     HealthScan,
+    /// 空闲淘汰探针（P2-3，由心跳 tick 经 registry 触发）。
+    ///
+    /// 判定权在 actor 而不在 registry：「是否空闲」取决于有无活跃 run、有无排队轮、
+    /// 上次处理命令距今多久——这些状态只有 actor 自己知道。registry 侧能看到的
+    /// 「上次 `get_or_spawn` 时刻」是个坏代理：一条连接握一个句柄连续跑几小时，
+    /// 期间不再查 registry，按那个时刻算会把正忙的会话判成空闲。
+    ///
+    /// 答 `true` 前 actor 会**先关掉自己的接收端再退出**，因此 registry 拿到
+    /// `true` 时 `Sender::is_closed()` 已为真——移除判据是确定的，不依赖时序。
+    EvictIfIdle {
+        idle_after: Duration,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// actor 句柄。
@@ -151,7 +164,33 @@ impl SessionHandle {
     pub async fn health_scan(&self) {
         let _ = self.tx.send(SessionCmd::HealthScan).await;
     }
+
+    /// 探一次空闲淘汰（P2-3）：`true` = actor 已判定自己空闲**并已退出**。
+    ///
+    /// `try_send` 而非 `send().await`：命令通道满说明 actor 正被大量命令追着跑，
+    /// 那就不是空闲——此时该立刻答「不淘汰」，而不是排在队尾等它腾出手。
+    ///
+    /// 回执等待带 [`EVICT_PROBE_TIMEOUT`] 上限。actor 处理 `Compact` 是**占道
+    /// 串行**的（见 actor_loop），探针若无超时会把整轮 GC 卡在那儿。超时按
+    /// 「不淘汰」处理，语义正确：答不上话的 actor 正忙着。
+    pub async fn evict_if_idle(&self, idle_after: Duration) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.try_send(SessionCmd::EvictIfIdle { idle_after, reply }).is_err() {
+            return false;
+        }
+        matches!(tokio::time::timeout(EVICT_PROBE_TIMEOUT, rx).await, Ok(Ok(true)))
+    }
+
+    /// actor 是否已停（接收端关闭）。registry 用它识别失效句柄并重建。
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
 }
+
+/// 空闲淘汰探针的回执等待上限。
+///
+/// 只需覆盖「actor 处理完手头一条命令」的常规耗时；等不到就当它忙。
+const EVICT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 启动 session actor，返回句柄。
 ///
@@ -195,6 +234,15 @@ async fn actor_loop(
     let mut sinks: std::collections::HashMap<String, crate::sink::RunSink> =
         std::collections::HashMap::new();
     let sid = session_id.to_string();
+    // 上次「真实活动」时刻，供空闲淘汰判定（P2-3）。
+    //
+    // 只有 Submit / Compact / Finished 刷新它——即真有人用这条会话。
+    // **HealthScan 与 EvictIfIdle 刻意不刷新**：两者都是心跳自己发的，若计入活动，
+    // 每 tick 都会把时钟推到「刚刚」，空闲阈值永远不可能到达，淘汰形同不存在。
+    // Abort 也不刷新：它是向**所有** actor 广播的，计入会让闲置会话被无关的
+    // abort 续命；若某次 abort 真命中本会话的活跃 run，那这会话本就不可淘汰，
+    // 且随后的 Finished 会刷新时钟。
+    let mut last_activity = tokio::time::Instant::now();
 
     // 确保本会话存在。kind 统一记为 "main"（用户会话）；cron/dreaming 等隔离
     // 子会话不经本 actor，细分留待后续。
@@ -209,6 +257,7 @@ async fn actor_loop(
     while let Some(cmd) = rx.recv().await {
         match cmd {
             SessionCmd::Submit { text, sink, reply } => {
+                last_activity = tokio::time::Instant::now();
                 let run_id = RunId::new(uuid_v7());
                 info!(session = %sid, run_id = %run_id, chars = text.chars().count(), "submit 受理");
                 // 暂存本轮 sink（起步时取用）。
@@ -269,6 +318,7 @@ async fn actor_loop(
                 }
             }
             SessionCmd::Compact => {
+                last_activity = tokio::time::Instant::now();
                 // 手动 /compact：摘要当前历史（保留最近 keep_recent 条）。
                 // 注意：compact 串行占用车道（与 OpenClaw 一致），期间新消息排队。
                 let tc = std::time::Instant::now();
@@ -279,6 +329,7 @@ async fn actor_loop(
                 info!(session = %sid, ms = tc.elapsed().as_millis(), "compact 结束");
             }
             SessionCmd::Finished { run_id, outcome } => {
+                last_activity = tokio::time::Instant::now();
                 if active.as_ref().map(|a| &a.run_id) == Some(&run_id) {
                     let elapsed = active.as_ref().map(|a| a.started_at.elapsed().as_millis()).unwrap_or(0);
                     if !matches!(outcome, RunOutcome::Completed) {
@@ -324,6 +375,29 @@ async fn actor_loop(
                         RunHealth::Healthy => {}
                     }
                 }
+            }
+            SessionCmd::EvictIfIdle { idle_after, reply } => {
+                // 「忙」= 有活跃 run 或有排队轮。此时无论闲多久都不淘汰：淘汰会连
+                // 带丢掉活跃 run 的 sink 与排队轮，等于无声掐掉正在跑的对话。
+                let busy = active.is_some() || queue.pending_len() > 0;
+                if busy || last_activity.elapsed() < idle_after {
+                    let _ = reply.send(false);
+                    continue;
+                }
+
+                // **先关接收端、再回执**：让 registry 侧的 `is_closed()` 在收到
+                // `true` 时必然已为真，移除判据不依赖时序（见 registry::evict_idle）。
+                rx.close();
+                info!(
+                    session = %sid,
+                    idle_secs = last_activity.elapsed().as_secs(),
+                    "会话空闲淘汰：actor 退出"
+                );
+                let _ = reply.send(true);
+                // 缓冲区里可能还压着刚到的命令，此处一并丢弃。丢 Submit 是安全的：
+                // 该轮未起步、无任何副作用，提交方的 oneshot 随之 drop → `submit()`
+                // 得到 `None` → dispatch 重新 `get_or_spawn`（拿到新 actor）后重试。
+                break;
             }
         }
     }

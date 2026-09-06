@@ -40,3 +40,6 @@ optional = true
 tempfile = "3"
 # 自身的集成测试也要用 harness。
 oc-server = { path = ".", features = ["test-support"] }
+# `test-util` 提供 `#[tokio::test(start_paused = true)]` + `time::advance`：
+# 幂等缓存 TTL 是 1 小时，靠真等测不了，只能推时钟。仅 dev 依赖，不进发布二进制。
+tokio = { version = "1", features = ["test-util"] }

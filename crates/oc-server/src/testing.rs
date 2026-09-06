@@ -116,6 +116,42 @@ impl SessionConfigExt for SessionConfig {
     }
 }
 
+/// 起一个进程内 [`ServerState`](crate::ServerState) + 其会话注册表，不经传输层。
+///
+/// 给「只测 state/registry 语义」的用例用（如 P2-3 的内存 GC）：`ServerState::new`
+/// 有 9 个参数、其中 4 个是只为它存在的空注册表，逐个测试重复构造既啰嗦又容易在
+/// 加字段时集体失修。返回 state 与 registry 两个句柄（registry 也在 state 里，
+/// 但测试常要直接 `get_or_spawn`）。
+pub fn test_state(
+    provider: Arc<dyn Provider>,
+    cfg: SessionConfig,
+    store: oc_store::Store,
+) -> (Arc<crate::ServerState>, crate::registry::SessionRegistry, tokio::sync::broadcast::Receiver<Event>) {
+    let (event_tx, event_rx) = tokio::sync::broadcast::channel(512);
+    let diag = crate::diag::DiagRegistry::new();
+    let context_window = cfg.context_window;
+    let intent_defaults = cfg.intent_defaults.clone();
+    let registry = crate::registry::SessionRegistry::new(
+        cfg,
+        provider,
+        event_tx.clone(),
+        store.clone(),
+        diag.clone(),
+    );
+    let state = Arc::new(crate::ServerState::new(
+        event_tx.clone(),
+        registry.clone(),
+        Arc::new(dashmap::DashMap::new()),
+        Arc::new(dashmap::DashMap::new()),
+        crate::ledger::TaskLedger::new(event_tx),
+        store,
+        context_window,
+        diag,
+        intent_defaults,
+    ));
+    (state, registry, event_rx)
+}
+
 /// 本测试专用的唯一传输端点。
 ///
 /// `tag` 区分同进程内并发运行的测试。Windows 命名管道在

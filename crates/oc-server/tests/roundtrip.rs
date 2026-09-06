@@ -193,6 +193,9 @@ async fn sessions_list_roundtrip() {
 
 /// diagnostics 经真实传输往返：验证 DiagnosticsSnapshot 能被序列化，且预建的
 /// main 会话出现在快照里（回归 MethodOk 新变体的传输契约）。
+///
+/// 顺带钉住 `idem_entries` 这条计数真的从 state 穿过协议到客户端（P2-3 的内存
+/// 可观测抓手；语义本身在 tests/gc.rs 覆盖，这里只管传输契约）。
 #[tokio::test]
 async fn diagnostics_roundtrip() {
     let kind = test_transport("diag");
@@ -218,6 +221,14 @@ async fn diagnostics_roundtrip() {
     })).await;
     let _ = recv(&mut reader).await;
 
+    // 先发一条**带幂等键**的请求，让幂等缓存里确实有东西可数。
+    send(&mut w, &Frame::Req(Req {
+        id: ReqId::new("h1"),
+        method: Method::Health,
+        idempotency_key: Some(oc_proto::IdemKey::new("idem-probe")),
+    })).await;
+    let _ = recv(&mut reader).await;
+
     send(&mut w, &Frame::Req(Req {
         id: ReqId::new("d1"),
         method: Method::Diagnostics,
@@ -236,6 +247,10 @@ async fn diagnostics_roundtrip() {
                     assert!(
                         snap.sessions.iter().any(|s| s.session_id.as_str() == "main"),
                         "快照应含预建的 main 会话"
+                    );
+                    assert_eq!(
+                        snap.idem_entries, 1,
+                        "上面那条带幂等键的请求应被计入 idem_entries"
                     );
                 }
                 other => panic!("期望 Diagnostics 应答，得到 {other:?}"),

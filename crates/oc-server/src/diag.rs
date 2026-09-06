@@ -66,6 +66,15 @@ impl DiagRegistry {
         self.started.elapsed().as_secs()
     }
 
+    /// 丢弃某会话的诊断格位（其 actor 已被空闲淘汰，P2-3）。
+    ///
+    /// 不清就白淘汰了：本 map 与 `sessions` 同为 `SessionId` 键，只淘汰 actor
+    /// 会把「无界增长」从一处挪到另一处。会话若之后重新活跃，`for_session`
+    /// 会重建格位（计数从零起——它统计的是本次 actor 生命周期）。
+    pub fn forget(&self, session: &SessionId) {
+        self.inner.remove(session);
+    }
+
     /// 采样全部会话为对外视图。
     pub fn snapshot_sessions(&self) -> Vec<SessionDiagView> {
         let mut out: Vec<SessionDiagView> = self
