@@ -34,21 +34,30 @@
 > 想知道「现在做到哪了、下一步做什么」看《下一阶段计划》的变更记录。  
 > P1-7 与 P2 是 2026-09-02 代码评审后新增的详细计划。
 
-## testing/ — 测试用例（真机验证手册）
+## testing/ — 测试指南与覆盖矩阵
 
-自动化回归在 `crates/*/tests/`；这里是**只有真机跑起来才能观察**的端到端用例。
+2026-09-06 起，真机验证从**手册照着敲**改为**自动化执行**。原先 8 份逐步操作
+手册（2658 行）已删除，替换为两份：
 
-| 文档 | 覆盖 |
+| 文档 | 内容 |
 |---|---|
-| [P0-运行时测试用例](testing/P0-运行时测试用例.md) | 稳定核心闭环（含 §0 环境准备，**其余用例都沿用它**） |
-| [P1-运行时测试用例](testing/P1-运行时测试用例.md) | ask_user 等 P1 项 |
-| [P1-2-standing-intent测试用例](testing/P1-2-standing-intent测试用例.md) | 话题触发式待办（8 项） |
-| [P1-2-开发环境测试指南](testing/P1-2-开发环境测试指南.md) | 未安装场景下用 target/release/oc.exe 跑 |
-| [P1-3-偏好supersede测试用例](testing/P1-3-偏好supersede测试用例.md) | 偏好就地替换（8 项，含老库升级） |
-| [P1-4-dreaming重写MEMORY测试用例](testing/P1-4-dreaming重写MEMORY测试用例.md) | MEMORY.md 巩固重写（9 项，含并发写安全） |
-| [P1-5-cron工具测试用例](testing/P1-5-cron工具测试用例.md) | cron 工具（7 项，核心是本地时刻正确 + 到点真响） |
+| [README](testing/README.md) | 怎么跑、三层结构、**覆盖矩阵**（每条原 TC → 对应测试函数）、环境陷阱 |
+| [人工探针清单](testing/人工探针清单.md) | 只剩真正需要人眼判断的 4 条（回复质量、TUI 观感等） |
 
-> 环境准备（OC_HOME 隔离、构建启动、日志抓手）统一维护在 P0 那份的 §0。
+```sh
+cargo test --workspace      # 278 项自动化回归
+bash scripts/e2e/smoke.sh   # 进程级冒烟（真二进制 + 真 CLI + 真 HTTP）
+```
+
+CI（[ci.yml](../.github/workflows/ci.yml)）每次 push / PR 双平台跑上述内容 + clippy。
+
+> 这次迁移顺带抓到三个缺陷，其中 **SSE 双层 `data:` 前缀**（标准客户端一个事件
+> 都解析不出来）和 **`ERROR_PIPE_BUSY` 未重试**（Windows 并发随机 500）已修。
+> 详见 README 的「自动化过程中发现的缺陷」。
+>
+> 配套脚本：[`scripts/h3-concurrent.sh`](../scripts/h3-concurrent.sh) —— 手工并发打点，
+> 用时间轴重叠证明请求真并发。该思路已进代码（`gateway.rs` 的 `max_in_flight`），
+> 脚本保留供临时排查真机问题。
 
 ## research/ — 调研与审查（一次性产出）
 
@@ -64,12 +73,12 @@
 
 - **design/** 保留数字前缀（有阅读顺序）；其余目录用语义命名，**不加全局编号**
   （历史上全局编号导致过撞号：两个 `07-`）。
-- 专题文档统一 `<阶段项>-<主题>.md`，如 `P1-3-偏好supersede测试用例.md`。
+- 专题文档统一 `<阶段项>-<主题>.md`，如 `P1-7-代码质量与技术债.md`。
 - 内部链接用相对路径：跨目录 `../plan/xxx.md`，引用源码 `../../crates/...`。
 
 ---
 
-## 当前位置（2026-09-04）
+## 当前位置（2026-09-06）
 
 **已完成**：
 - ✅ M1-M6 里程碑：对话 / 持久化 / 记忆 / 防卡死 / 工具 / 主动性 / CLI
@@ -77,10 +86,13 @@
 - ✅ **P1 全部**：ask_user / standing intent / 偏好 supersede / dreaming 重写 /
   cron 工具 / **episodic 产出（P1-6）** / 代码质量（P1-7）
 - ✅ `oc-http`：OpenAI Responses API 兼容层（计划外产出）
+- ✅ **测试自动化 + CI 门禁**（2026-09-06）：手册式真机验证 → `cargo test` 里的
+  278 项自动化 e2e + 进程级冒烟；push/PR 双平台 CI。顺带修掉 SSE 双层 `data:`
+  前缀（流式对标准客户端不可用）与 Windows 并发 `ERROR_PIPE_BUSY`。
 
 **下一步**：
-- P1 真机复验 + `oc http` 真机端到端（两者都只有自动化覆盖，本仓历史上缺陷都是真机才暴露）
 - P2 阶段 1：读写分离 / 写线程自愈 / 内存淘汰（可用性基石）
-- P2 阶段 2：索引 / CI / 文档（工程化收口）
+- P2 阶段 2：索引 / 文档（工程化收口；CI 已提前落地）
+- 补两处未覆盖用例：老库 v1 迁移、真 OpenAI SDK 兼容（规格见 testing/README）
 
 详见 [plan/下一阶段计划.md](plan/下一阶段计划.md) 与 [CODE_REVIEW_2026-09-02.md](CODE_REVIEW_2026-09-02.md)。

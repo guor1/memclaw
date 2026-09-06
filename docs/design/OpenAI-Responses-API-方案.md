@@ -315,7 +315,17 @@ oc-llm / oc-server / compaction 的 token 估算。改动面最大，且依赖�
 - 流式路径不把连接**放回池**复用（许可已随 drop 归还，见 §3.5，但连接本身重建）。要复用需在流结束时把 conn 交还池，而 `Sse` 拿走了所有权，改动不小、收益有限（省一次 connect + handshake）。
 - 池化连接复用时可能带最多 288 个陈旧帧（本地 32 + daemon 出站 256）。`handshake` 跳过非 `Res` 帧、`run_id`/session 过滤挡住事件，故不影响正确性，但白读一遍。
 - 等待许可的请求本身不占连接，但仍占一个 tokio 任务和已解析的请求体（axum 默认 2MB 上限）。极端洪峰下内存随等待者数量增长；真要防得在 axum 层加 `ConcurrencyLimitLayer` 或前置代理限流。
-- 同会话内并发 run 的 `Usage` 无法精确归属（`Event::Usage` 没有 run_id）。跨会话已按 session 过滤。
+- **`usage.input_tokens` 在同会话并发下不可信**（2026-09-05 真机确认，见
+  [覆盖矩阵](../testing/README.md)）。两个缺陷叠加：
+  **(A)** `Usage` 走全局广播、经 `conn.rs` 的转发任务多绕一跳才入 `out_tx`，而
+  Lifecycle 直接入队，故 `Usage` 可能**晚于 `Lifecycle::End`** 到达；
+  `accumulate_response` 遇 `End` 即 break → 丢失 → 报 0。
+  **(B)** `Event::Usage` 只有 `session` 没有 `run_id`，同会话 N 个并发 run 时无法归属，
+  前一个 run 迟到的 `Usage` 会被后一个请求的累积器捡走 → **错配（比报 0 更难发现）**。
+  实测 3 并发：#1 得 0，#2/#3 得 2056/2072（真伪不可判）。
+  只影响 `usage` 字段，**不影响对话正确性**（文本、transcript 顺序、会话隔离均已验证正确）。
+  修法：给 `Event::Usage` 加 `run_id` 并按 run 过滤，同时让它与内联事件同通道保序
+  （或 `End` 后短暂续收）。前者改 `oc-proto`，跨 crate，留到 P2。
 - 输出 token 用 `chars/4` 估算——daemon 的 `Usage` 事件只报 input_tokens。比报 0 好，但不准。
 - 错误码映射较粗：`LoopDetected` / `Timeout` 目前都归到 5xx，可细化为 429 / 504。队列满目前也是 5xx（`ErrorKind` 无 busy 变体），语义上更该是 429/503。
 
@@ -338,7 +348,29 @@ oc-llm / oc-server / compaction 的 token 估算。改动面最大，且依赖�
 确实失败，验证过），`oc-http/src/conn_pool.rs` 守住并发上限语义（许可计数、超限报 Busy、
 drop 归还许可）。
 
-全量 `cargo test`：263 passed。`cargo clippy --workspace --all-targets`：无告警。
+全量 `cargo test`：278 passed。`cargo clippy --workspace --all-targets`：无告警。
 
-尚未做**真机端到端验证**（起 daemon + `oc http`，用真实 OpenAI SDK 打通）。
-按本仓历史，P0-1 / P1-1 的缺陷都是真机才暴露的，这一步不能省。
+**端到端**：2026-09-06 起原手册用例已自动化，见
+[oc-http/tests/gateway.rs](../../crates/oc-http/tests/gateway.rs)（真 axum + 真
+`ConnPool` + 真 daemon）与 [覆盖矩阵](../testing/README.md)。
+原 12 项里 9 项已有自动化断言；TC-H5（TUI 渲染）转人工探针，TC-H12（真 SDK）
+待 live lane。
+
+**已证实生效**：`c1f58e5` 的挂死修复、`93af20b` 的会话路由、`f1f3d0f` 的连接上限
+（`over_max_conns_returns_503`）、断连归还许可（`aborted_request_returns_permit`）、
+cancel 端点真打断（`cancel_endpoint_aborts_run` 断言车道释放而非只看 200）。
+
+**自动化后新发现的两个缺陷**（手册只跑了 3 项，都没暴露）：
+
+1. **SSE 双层 `data:` 前缀** 🔴 —— `event_to_sse` 产出的已是完整帧，axum 的
+   `Event::data()` 又包一层，线上发出 `data: data: {...}`，标准客户端（含 OpenAI
+   SDK）一个事件都解析不出来。41 个单测全绿也没发现：它们只看 `event_to_sse`
+   的返回值，碰不到 axum 封帧那一步。已在 `sse.rs` 修复（`split_sse_data`），
+   并由 `gateway.rs` 逐行断言「单层前缀 + 合法 JSON」钉住。
+2. **`ERROR_PIPE_BUSY` 未重试** 🟠 —— Windows 并发连接随机 500。server 的 accept
+   一次只备一个管道实例，客户端撞上空窗期即失败（`roundtrip.rs` 早就重试 20 次，
+   生产的 `ConnPool` 却没有）。已在 `conn_pool.rs` 补有界重试。
+
+**仍未修**：`usage.input_tokens` 并发下不可信（详见 §8）——单测的 41 项里没有一条
+能捕获它，因为它是两条 tokio 通道之间的调度竞态。修它要动 `oc-proto` 加 `run_id`，
+跨 crate，留待 P2。

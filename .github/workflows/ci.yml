@@ -1,0 +1,80 @@
+name: CI
+
+# 每次 push / PR 都跑。此前只有 build-ubuntu.yml，且仅在打 tag 时构建、不跑测试
+# ——262 个测试全绿却没有任何机制保证下次提交仍绿。
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # CI 里编译信息够用即可，不要 debug 符号，省时间和磁盘。
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂了也要看另一个的结果——跨平台差异正是这个 matrix 的目的。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # 传输层双平台实跑：Windows 走命名管道、Linux 走 unix socket。
+      # 计划里记的「unix socket 仅编译未在 Linux 实跑」由此闭合。
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+
+      # 暂不加 `cargo fmt --check`：本仓从未整体 rustfmt 过，现状有 82 个文件、
+      # 447 处待重排。全仓重排是一次独立的大 diff，不该混进测试自动化的改动里。
+      # 想启用就先单独跑一次 `cargo fmt --all` 并单独提交，再把下面两行放开：
+      #   - name: Format
+      #     run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # --locked：Cargo.lock 与 manifest 不一致时失败，而非悄悄改锁文件。
+      - name: Test
+        run: cargo test --workspace --locked
+
+  smoke:
+    name: 进程级冒烟 (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: smoke
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
+
+      - name: Build
+        run: cargo build --bin oc
+
+      # 覆盖 cargo test 碰不到的一层：clap 解析、config_loader、paths.rs、
+      # 真二进制启动。历史上 OC_HOME 路径格式那类坑就只在这一层暴露。
+      - name: Smoke
+        run: bash scripts/e2e/smoke.sh
+        env:
+          OC_BIN: target/debug/oc

@@ -12,6 +12,12 @@ Cargo.lock.orig
 *.sqlite-wal
 *.sqlite-shm
 
+# 早期用 OC_HOME 隔离测试留下的目录（现已改用默认 ~/.oc，见 docs/testing/）
+/.octest
+
+# 真机测试临时构造的请求体
+/.e2e_req*.json
+
 # 编辑器 / OS
 .DS_Store
 *.swp
