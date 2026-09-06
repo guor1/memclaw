@@ -324,9 +324,25 @@ async fn run_model_turn(
     };
 
     // 阶段：等待模型响应（诊断可见「卡在等模型」）。
+    //
+    // 这一段（建流 + 等首个 delta）是 run 的**静默期**：没有任何事件外发，
+    // 所以 `emit_inline` 的「send 失败 → 断连」探测在这里根本不会被调用。
+    // 客户端此时掉线，车道会一直占到空闲看门狗超时（生产默认 120s）。
+    // 故两处等待都叠 `sink.closed()`——与 ask_user / 审批等待同一套机制。
     ctx.diag.set_phase(oc_proto::RunPhase::AwaitingModel);
     let t_open = std::time::Instant::now();
-    let mut stream = match ctx.provider.stream_chat(req, ctx.cancel.clone()).await {
+    let opened = tokio::select! {
+        _ = ctx.sink.closed() => {
+            warn!(run_id = %ctx.run_id, "建流期间客户端断开，收敛 run");
+            ctx.cancel.cancel();
+            let (n, effs) = step(state.clone(), StepEvent::Abort, acc);
+            *state = n;
+            execute_effects(ctx, &effs, acc).await;
+            return TurnResult::Terminal(outcome_of(state));
+        }
+        r = ctx.provider.stream_chat(req, ctx.cancel.clone()) => r,
+    };
+    let mut stream = match opened {
         Ok(s) => s,
         Err(e) => {
             warn!(error = %e, "建流失败");
@@ -347,6 +363,15 @@ async fn run_model_turn(
     loop {
         let next_delta = tokio::select! {
             _ = ctx.cancel.cancelled() => {
+                let (n, effs) = step(state.clone(), StepEvent::Abort, acc);
+                *state = n;
+                execute_effects(ctx, &effs, acc).await;
+                return TurnResult::Terminal(outcome_of(state));
+            }
+            // 首个 delta 到来前这里是静默的（见上方说明）；delta 之间的间隙同理。
+            _ = ctx.sink.closed() => {
+                warn!(run_id = %ctx.run_id, acc_chars = acc.chars().count(), "等模型期间客户端断开，收敛 run");
+                ctx.cancel.cancel();
                 let (n, effs) = step(state.clone(), StepEvent::Abort, acc);
                 *state = n;
                 execute_effects(ctx, &effs, acc).await;

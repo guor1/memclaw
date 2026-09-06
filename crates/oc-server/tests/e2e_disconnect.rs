@@ -137,28 +137,26 @@ async fn disconnect_while_streaming_releases_lane() {
     assert!(started, "重连后新一轮应能起步，说明车道确实已释放");
 }
 
-/// 断连发生在**首个 delta 之前**（run 卡在等模型）时，靠空闲看门狗兜底。
+/// 断连发生在**首个 delta 之前**（run 卡在等模型）时，也应立即收敛。
 ///
-/// 这条记录的是当前**实际行为**，不是理想行为：
+/// 这是 TC-7 的**静默期版本**，与它互补：TC-7 断在流式途中，靠 `emit_inline`
+/// 发送失败探测；这条断在等模型期间——那段时间没有任何事件外发，
+/// send 探测**根本不会被调用**，只能靠 `RunSink::closed()` 主动等断连。
 ///
-/// 断连收敛依赖 `emit_inline` 发送失败来探测，而等模型期间没有任何事件外发，
-/// 所以这个窗口里的断连**探测不到**——车道会一直占到空闲看门狗超时
-/// （生产默认 `idle_cloud_secs = 120`，即最长 2 分钟）。
+/// 该窗口一度是真实缺口：车道要占到空闲看门狗超时才释放（生产默认
+/// `idle_cloud_secs = 120`，即最长 2 分钟）。现由等模型的 `select!` 叠
+/// `sink.closed()` 覆盖（与 ask_user / 审批等待同一套机制）。
 ///
-/// `RunSink::closed()` 正是为这类"静默等待期"准备的，但目前只用在
-/// ask_user / 审批的等待上，没有覆盖等模型这一段。要消除这 2 分钟窗口，
-/// 需要在等模型的 `select!` 里也叠上 `sink.closed()`。
-///
-/// 本用例把 `idle_timeout` 调到 2s 以便快速验证兜底确实生效；把它标为
-/// 待改进项而非失败项——毕竟车道最终**是**释放了，只是慢。
+/// `idle_timeout` **刻意设得远长于等待窗**：这样"车道空了"只可能来自断连
+/// 收敛，不可能是看门狗兜底——否则把收敛逻辑删掉本用例照样绿。
 #[tokio::test]
-async fn disconnect_before_first_delta_falls_back_to_watchdog() {
+async fn disconnect_before_first_delta_converges_fast() {
     let daemon = TestDaemon::builder(
         "disc-silent",
         // 60s 不吐字：整段等待期都没有事件外发。
         Arc::new(MockProvider::scripted(slow_reply(Duration::from_secs(60)))),
     )
-    .map_cfg(|c| c.with_idle_timeout(Duration::from_secs(2)))
+    .map_cfg(|c| c.with_idle_timeout(Duration::from_secs(120)))
     .start()
     .await;
 
@@ -166,11 +164,22 @@ async fn disconnect_before_first_delta_falls_back_to_watchdog() {
         let mut client = daemon.client().await;
         client.chat("讲个长故事", None).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let mut probe = daemon.client().await;
+        let diag = probe.diagnostics().await;
+        assert!(
+            diag.sessions
+                .iter()
+                .any(|s| s.session_id.as_str() == "main" && s.active.is_some()),
+            "断连前应有活跃 run 卡在等模型，否则本用例什么都没验到：{:?}",
+            diag.sessions
+        );
     } // 断连
 
     assert!(
-        wait_lane_idle(&daemon, Duration::from_secs(15)).await,
-        "空闲看门狗应最终释放车道"
+        wait_lane_idle(&daemon, Duration::from_secs(5)).await,
+        "等模型期间断连后车道应立即释放（sink.closed() → cancel），\
+         而非占到空闲看门狗超时"
     );
 }
 

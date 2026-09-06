@@ -163,17 +163,19 @@ axum 封一次），并由 `gateway.rs` 的 `sse_stream_emits_deltas_then_comple
 
 **2. `ERROR_PIPE_BUSY` 未重试 🟠 已修** —— 见上方网关表格下的说明。
 
-以下两处**未修**（超出本次范围），但已钉成用例：
-
-**3. 断连收敛盖不住「等模型」那段窗口。**
-断连靠 `emit_inline` 往 sink 发送失败来探测，而 run 在等首个 delta 期间
-没有任何事件外发——这段时间客户端断开是**探测不到**的，车道要一直占到
+**3. 断连收敛盖不住「等模型」那段窗口 🟠 已修（2026-09-06）。**
+断连靠 `emit_inline` 往 sink 发送失败来探测，而 run 在**建流 + 等首个 delta**
+期间没有任何事件外发——这段时间客户端断开是**探测不到**的，车道要一直占到
 空闲看门狗超时（生产默认 `idle_cloud_secs = 120`，最长 2 分钟）。
-`RunSink::closed()` 正是为这类静默等待期准备的，但目前只用在
-ask_user / 审批的等待上。修法是在等模型的 `select!` 里也叠 `sink.closed()`。
-现状由 `e2e_disconnect.rs` 的两条用例分别钉住：
-`disconnect_while_streaming_releases_lane`（流式中断连 → 立即释放，正常）与
-`disconnect_before_first_delta_falls_back_to_watchdog`（等模型时断连 → 靠看门狗兜底）。
+`RunSink::closed()` 本就是为这类静默等待期准备的，只是当时仅用在
+ask_user / 审批的等待上。已在 [run.rs](../../crates/oc-server/src/run.rs) 的两处
+等待（`stream_chat` 建流、`stream.next()` 取 delta）叠上 `sink.closed()`。
+`e2e_disconnect.rs` 的两条用例分别钉住两个窗口：
+`disconnect_while_streaming_releases_lane`（流式中断连，靠 send 失败探测）与
+`disconnect_before_first_delta_converges_fast`（静默期断连，靠 `closed()`）。
+后者的 `idle_timeout` 刻意设成 120s，确保断言到的收敛不可能来自看门狗兜底。
+
+以下一处**未修**（跨 crate，超出本次范围），已钉成用例：
 
 **4. `usage.input_tokens` 并发下不可信。**
 `Event::Usage` 只有 `session` 没有 `run_id`，同会话 N 个并发 run 无法归属；
