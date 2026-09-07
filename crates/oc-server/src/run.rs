@@ -591,6 +591,11 @@ fn render_prompt(ctx: &RunCtx) -> String {
     let rendered = render_system_prompt(&PromptInputs {
         soul,
         platform: PLATFORM_HINT,
+        // 模型身份取自进程内实际生效的值，不读配置文件：热改配置后文件与进程内可能
+        // 不一致，而这里的 model 就是发进请求体的那个串、endpoint 就是拼进 URL 的那个。
+        model: &ctx.model,
+        provider: ctx.provider.id(),
+        endpoint: ctx.provider.endpoint(),
         bootstrap: &ctx.bootstrap,
         skills: &ctx.skills,
         tools: &tools,

@@ -503,12 +503,16 @@ fn now_secs() -> i64 {
 }
 
 fn snapshot(state: &Arc<ServerState>, session: &SessionId) -> Snapshot {
+    let rt = state.runtime();
     Snapshot {
         active_run: None,
         queued_turns: 0,
         background_tasks: 0,
         session: session.clone(),
-        context_window: state.context_window(),
+        context_window: rt.context_window,
         last_input_tokens: state.last_input_tokens(session),
+        model: rt.model.clone(),
+        provider: rt.provider.clone(),
+        endpoint: rt.endpoint.clone(),
     }
 }

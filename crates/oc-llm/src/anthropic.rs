@@ -63,6 +63,10 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    fn endpoint(&self) -> Option<&str> {
+        Some(&self.base_url)
+    }
+
     async fn stream_chat(
         &self,
         req: ModelRequest,

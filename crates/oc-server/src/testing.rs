@@ -129,7 +129,12 @@ pub fn test_state(
 ) -> (Arc<crate::ServerState>, crate::registry::SessionRegistry, tokio::sync::broadcast::Receiver<Event>) {
     let (event_tx, event_rx) = tokio::sync::broadcast::channel(512);
     let diag = crate::diag::DiagRegistry::new();
-    let context_window = cfg.context_window;
+    let runtime = crate::state::RuntimeInfo {
+        provider: provider.id().to_string(),
+        model: cfg.model.clone(),
+        endpoint: provider.endpoint().map(str::to_string),
+        context_window: cfg.context_window,
+    };
     let intent_defaults = cfg.intent_defaults.clone();
     let registry = crate::registry::SessionRegistry::new(
         cfg,
@@ -145,7 +150,7 @@ pub fn test_state(
         Arc::new(dashmap::DashMap::new()),
         crate::ledger::TaskLedger::new(event_tx),
         store,
-        context_window,
+        runtime,
         diag,
         intent_defaults,
     ));

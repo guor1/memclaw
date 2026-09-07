@@ -201,6 +201,20 @@ pub struct Snapshot {
     /// 最近一轮 provider 报告的真实输入 token 数（已用上下文近似）；无则 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_input_tokens: Option<u32>,
+    /// 当前生效的模型名（实际发进请求体 `model` 字段的那个串）。
+    ///
+    /// 与 provider/endpoint 一起，让「换了 provider 有没有生效」不必开对话就能验证。
+    /// 老 daemon 不发这三项，故都带 serde default。
+    #[serde(default)]
+    pub model: String,
+    /// provider 标识（openai / anthropic / mock）。
+    ///
+    /// 单看它分不出 DeepSeek 与豆包——两者都是 `openai`，要连 `endpoint` 一起看。
+    #[serde(default)]
+    pub provider: String,
+    /// 实际请求的 API 基地址；mock provider 无端点则为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

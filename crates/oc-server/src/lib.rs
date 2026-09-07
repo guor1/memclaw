@@ -90,6 +90,16 @@ pub async fn serve_with(
     };
 
     let context_window = session_cfg.context_window;
+    // 模型运行时信息：provider/endpoint 取自 provider 实例本身（而非配置的 base_url，
+    // 那里 None 表示「用官方默认」，取用时得重复一遍默认值）。供 `oc status` 展示，
+    // 换 provider 后不必开对话就能验证生效。
+    let runtime = state::RuntimeInfo {
+        provider: provider.id().to_string(),
+        model: session_cfg.model.clone(),
+        endpoint: provider.endpoint().map(str::to_string),
+        context_window,
+    };
+
     // standing intent 的 anti-nagging 默认值：供 `intent.add` 未指定时填充。
     let intent_defaults = session_cfg.intent_defaults.clone();
     // dreaming 巩固模型轮要用的 soul 目录与模型名——须在 session_cfg/provider
@@ -113,7 +123,7 @@ pub async fn serve_with(
         inputs,
         ledger,
         store,
-        context_window,
+        runtime,
         diag,
         intent_defaults,
     ));

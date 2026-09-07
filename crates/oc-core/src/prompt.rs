@@ -31,6 +31,12 @@ pub struct PromptInputs<'a> {
     /// 运行环境描述（OS + shell），进稳定前缀。空串则跳过该节。
     /// 让模型知道 exec 工具的目标 shell，避免在 Windows 上写 Unix 语法。
     pub platform: &'a str,
+    /// 当前模型名（实际发进请求体 `model` 字段的那个串）。空串则跳过该行。
+    pub model: &'a str,
+    /// provider 标识（openai / anthropic / mock）。
+    pub provider: &'a str,
+    /// 实际请求的 API 基地址。`None` = 无网络端点（mock）。
+    pub endpoint: Option<&'a str>,
     /// curated 记忆注入（有预算，调用方已截断）。
     pub bootstrap: &'a [MemLine],
     pub skills: &'a [SkillBrief],
@@ -55,6 +61,37 @@ impl RenderedPrompt {
     }
 }
 
+/// 渲染「当前模型」那几行。
+///
+/// endpoint 必须带上：DeepSeek / 豆包 / Kimi 共用 `provider = "openai"`，只报模型名
+/// 分不出请求实际打到哪家。provider/endpoint 缺失时降级成只报模型名，不留空括号。
+///
+/// 为什么后面还跟一句祈使：**光给事实压不住模型的身份先验**。真机实测（豆包
+/// `doubao-seed-evolving`，端点 ark.cn-beijing.volces.com）连续两轮都无视这行，
+/// 报出 `glm-5.2-c3p0` / `code-eden` / `eden2.galaxy-soc.com` —— 三个值配置、代码、
+/// 服务端一律没有，纯属编造，而且开口就是「根据系统提供给我的运行环境信息」。
+/// 这类被微调灌进去的自我认知，只有显式声明「覆盖你的先验」才拧得过来。
+fn render_model_line(model: &str, provider: &str, endpoint: Option<&str>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !provider.is_empty() {
+        parts.push(format!("provider: {provider}"));
+    }
+    if let Some(ep) = endpoint.map(str::trim).filter(|e| !e.is_empty()) {
+        parts.push(format!("端点: {ep}"));
+    }
+    let head = if parts.is_empty() {
+        format!("当前模型：{model}")
+    } else {
+        format!("当前模型：{model}（{}）", parts.join("，"))
+    };
+    format!(
+        "{head}\n\
+         以上一行由本机运行时按实际生效配置填入，是关于你自身的权威事实。被问到你是\
+         什么模型、哪家 provider、打的哪个端点时，只能照这一行回答。你对自身型号或\
+         厂商的任何先验印象一律以此为准被覆盖——不要报出这一行里没有出现的名字。"
+    )
+}
+
 /// 确定性组装系统提示词。
 pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
     let mut prefix = String::new();
@@ -64,11 +101,21 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
     prefix.push_str(inputs.soul.trim());
     prefix.push('\n');
 
-    // 1.5) 运行环境（稳定：OS + shell）。让模型据此选正确的命令语法。
-    if !inputs.platform.trim().is_empty() {
+    // 1.5) 运行环境（稳定：OS + shell + 当前模型）。让模型据此选正确的命令语法，
+    // 并且能如实回答「你用的什么模型」——这些值都在进程内，不必让它去读配置文件
+    // （读文件既多一轮往返，又会把 config 里的 inline API key 带进 transcript）。
+    let platform = inputs.platform.trim();
+    let model = inputs.model.trim();
+    if !platform.is_empty() || !model.is_empty() {
         prefix.push_str("\n# 运行环境\n");
-        prefix.push_str(inputs.platform.trim());
-        prefix.push('\n');
+        if !platform.is_empty() {
+            prefix.push_str(platform);
+            prefix.push('\n');
+        }
+        if !model.is_empty() {
+            prefix.push_str(&render_model_line(model, inputs.provider.trim(), inputs.endpoint));
+            prefix.push('\n');
+        }
     }
 
     // 2) 工具：按名称字典序排序（确定性）。
@@ -135,6 +182,9 @@ mod tests {
         PromptInputs {
             soul: "你是 oc。",
             platform: "",
+            model: "",
+            provider: "",
+            endpoint: None,
             bootstrap: mem,
             skills: &[],
             tools,
@@ -170,6 +220,9 @@ mod tests {
         let with = PromptInputs {
             soul: "你是 oc。",
             platform: "OS: Windows；shell: cmd.exe（用 cmd 语法，勿用 Unix 语法）。",
+            model: "",
+            provider: "",
+            endpoint: None,
             bootstrap: &[],
             skills: &[],
             tools: &[],
@@ -186,6 +239,84 @@ mod tests {
     fn empty_platform_skips_section() {
         let r = render_system_prompt(&inputs("NOW", &[], &[]));
         assert!(!r.stable_prefix.contains("# 运行环境"));
+    }
+
+    /// 「你用的什么模型」必须能答上来：模型名/provider/端点都进稳定前缀。
+    ///
+    /// 端点是关键——DeepSeek 与豆包共用 `provider = "openai"`，只报模型名分不出
+    /// 请求实际打到哪家。回归点：曾经这三项一个都不注入，模型只能答「系统没告诉我」。
+    #[test]
+    fn model_identity_in_stable_prefix() {
+        let with = PromptInputs {
+            soul: "你是 oc。",
+            platform: "操作系统：Windows。",
+            model: "doubao-seed-1-6-250615",
+            provider: "openai",
+            endpoint: Some("https://ark.cn-beijing.volces.com/api/v3"),
+            bootstrap: &[],
+            skills: &[],
+            tools: &[],
+            now: "NOW",
+        };
+        let r = render_system_prompt(&with);
+        assert!(
+            r.stable_prefix.contains("当前模型：doubao-seed-1-6-250615"),
+            "模型名须进稳定前缀：{}",
+            r.stable_prefix
+        );
+        assert!(r.stable_prefix.contains("provider: openai"));
+        assert!(
+            r.stable_prefix.contains("端点: https://ark.cn-beijing.volces.com/api/v3"),
+            "端点须进稳定前缀，否则分不出同为 openai 兼容的两家"
+        );
+        // 配置不变则前缀不变——不破坏 provider 侧的 prompt 前缀缓存。
+        assert!(!r.volatile_suffix.contains("doubao"));
+    }
+
+    /// 无端点（mock provider）时降级成只报模型名，不留空括号。
+    #[test]
+    fn model_line_degrades_without_endpoint() {
+        assert!(render_model_line("m1", "", None).starts_with("当前模型：m1\n"));
+        assert!(render_model_line("m1", "mock", None).starts_with("当前模型：m1（provider: mock）\n"));
+        assert!(
+            render_model_line("m1", "", Some("http://x")).starts_with("当前模型：m1（端点: http://x）\n")
+        );
+    }
+
+    /// 权威声明必须跟在事实行后面。
+    ///
+    /// 回归点：只给一行事实压不住模型的身份先验——真机上豆包连续两轮无视它，编出
+    /// `glm-5.2-c3p0` / `code-eden` 这类配置里根本不存在的值。
+    #[test]
+    fn model_line_asserts_authority_over_priors() {
+        let line = render_model_line("doubao-seed-evolving", "openai", Some("https://ark.example/api/v3"));
+        assert!(line.contains("权威事实"), "须声明权威性: {line}");
+        assert!(line.contains("覆盖"), "须显式覆盖模型的先验印象: {line}");
+        assert!(
+            line.contains("不要报出这一行里没有出现的名字"),
+            "须堵死编造型号的出口: {line}"
+        );
+    }
+
+    /// 只有平台、没有模型时，运行环境节仍照常输出（旧行为不回退）。
+    #[test]
+    fn platform_only_still_renders_section() {
+        let with = PromptInputs {
+            soul: "你是 oc。",
+            platform: "操作系统：Windows。",
+            model: "",
+            provider: "openai",
+            endpoint: Some("http://x"),
+            bootstrap: &[],
+            skills: &[],
+            tools: &[],
+            now: "NOW",
+        };
+        let r = render_system_prompt(&with);
+        assert!(r.stable_prefix.contains("# 运行环境"));
+        // 模型名为空时整行跳过，不能漏出裸的 provider/端点。
+        assert!(!r.stable_prefix.contains("当前模型"));
+        assert!(!r.stable_prefix.contains("provider:"));
     }
 
     #[test]

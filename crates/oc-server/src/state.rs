@@ -67,6 +67,22 @@ pub type ApprovalRegistry = Arc<DashMap<ApprovalId, oneshot::Sender<bool>>>;
 /// 与 ToolExecutor 共享；`user.reply` 经 state 唤醒等待方。
 pub type InputRegistry = Arc<DashMap<InputId, oneshot::Sender<Option<String>>>>;
 
+/// 当前生效的模型运行时信息，供 `status` 展示。
+///
+/// 四项打包传是为了别让 `ServerState::new` 的位置参数继续膨胀（原本 9 个，散着加
+/// 会到 12 个、同类型相邻极易传错位）。
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeInfo {
+    /// provider 标识（openai / anthropic / mock）。
+    pub provider: String,
+    /// 模型名（实际发进请求体 `model` 字段的那个串）。
+    pub model: String,
+    /// 实际请求的 API 基地址；mock provider 为 None。
+    pub endpoint: Option<String>,
+    /// 模型上下文窗口（token）。
+    pub context_window: u32,
+}
+
 pub struct ServerState {
     /// 事件广播源。每个连接 `subscribe()` 得到独立接收端。
     event_tx: broadcast::Sender<Event>,
@@ -84,8 +100,8 @@ pub struct ServerState {
     store: oc_store::Store,
     /// 每会话最近一轮真实输入 token（status 查询 + 用量展示）。
     usage: Arc<DashMap<oc_proto::SessionId, u32>>,
-    /// 模型上下文窗口（token），供 status/事件展示。
-    context_window: u32,
+    /// 当前生效的模型运行时信息（provider/model/endpoint/窗口），供 status 展示。
+    runtime: RuntimeInfo,
     /// 运行时诊断注册表（`oc debug` 采样）。
     diag: crate::diag::DiagRegistry,
     /// standing intent 的 anti-nagging 默认值（`intent.add` 未指定时用）。
@@ -101,7 +117,7 @@ impl ServerState {
         inputs: InputRegistry,
         ledger: crate::ledger::TaskLedger,
         store: oc_store::Store,
-        context_window: u32,
+        runtime: RuntimeInfo,
         diag: crate::diag::DiagRegistry,
         intent_defaults: crate::session::IntentDefaults,
     ) -> Self {
@@ -114,7 +130,7 @@ impl ServerState {
             ledger,
             store,
             usage: Arc::new(DashMap::new()),
-            context_window,
+            runtime,
             diag,
             intent_defaults,
         }
@@ -127,7 +143,12 @@ impl ServerState {
 
     /// 模型上下文窗口（token）。
     pub fn context_window(&self) -> u32 {
-        self.context_window
+        self.runtime.context_window
+    }
+
+    /// 当前生效的模型运行时信息（provider/model/endpoint/窗口）。
+    pub fn runtime(&self) -> &RuntimeInfo {
+        &self.runtime
     }
 
     /// 运行时诊断注册表。

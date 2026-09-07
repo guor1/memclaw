@@ -88,6 +88,37 @@ async fn skills_reach_model_request() {
     assert!(system.contains("XXXPDFSKILL"), "技能正文应注入系统提示词: {system}");
 }
 
+/// 「你用的什么模型」必须能答上来：模型名与 provider 须到达 system 提示词。
+///
+/// 回归点：这三项（模型名/provider/端点）曾经一个都不注入，模型被问到只能答
+/// 「系统没告诉我」。它们全在进程内现成可取，不该让模型去读配置文件——读文件既多
+/// 一轮工具往返，又会把 config 里的 inline API key 带进 transcript 并逐轮回喂。
+#[tokio::test]
+async fn model_identity_reaches_model_request() {
+    let (tx, mut rx) = broadcast::channel(256);
+    let provider = Arc::new(CapturingMock::new("好"));
+    let captures = provider.captures();
+    let store = oc_store::Store::open_memory().unwrap();
+
+    let mut c = cfg("人格");
+    c.model = "doubao-seed-1-6-250615".into();
+
+    let handle = session::spawn(oc_proto::SessionId::main(), c, provider, tx, store, oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
+    handle.submit("你用的什么模型".into(), handle.broadcast_sink()).await.expect("run");
+    wait_terminal(&mut rx, Duration::from_secs(5)).await;
+
+    let reqs = captures.lock().unwrap();
+    let system = reqs[0].system.as_deref().unwrap_or("");
+    assert!(
+        system.contains("当前模型：doubao-seed-1-6-250615"),
+        "模型名应注入系统提示词: {system}"
+    );
+    // provider 取自 provider 实例本身，不是配置——回退成 mock 时也会如实显示。
+    assert!(system.contains("provider: mock-capture"), "provider 标识应注入: {system}");
+    // 发出去的请求体 model 字段与提示词里报的应是同一个串（不漂移）。
+    assert_eq!(reqs[0].model, "doubao-seed-1-6-250615");
+}
+
 #[tokio::test]
 async fn history_is_passed_as_messages() {
     let (tx, mut rx) = broadcast::channel(256);

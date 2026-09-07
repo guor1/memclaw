@@ -410,6 +410,17 @@ pub fn status() -> Result<()> {
                 s.background_tasks,
                 ctx
             );
+            // 模型单独一行：换 provider 后靠这行验证生效，不必开对话去问模型。
+            // endpoint 必须打——DeepSeek 与豆包同为 provider=openai，只看模型名分不出。
+            // 老 daemon 不发这三项（serde default），此时整行跳过而非打一堆空值。
+            if !s.model.is_empty() {
+                let ep = s
+                    .endpoint
+                    .as_deref()
+                    .map(|e| format!("  端点:{e}"))
+                    .unwrap_or_default();
+                println!("模型:{}  provider:{}{}", s.model, s.provider, ep);
+            }
         }
         Ok(())
     })

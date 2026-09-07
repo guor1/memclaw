@@ -266,6 +266,18 @@ fn run_serve(socket: Option<String>) -> anyhow::Result<()> {
     let cfg = config_loader::load()?;
     let (provider, session_cfg, heartbeat) = provider_setup::build(&cfg)?;
 
+    // 生效配置摘要：换 provider / 改 base_url 后，看一眼日志就知道有没有生效，
+    // 不必开对话去问模型。endpoint 打印的是 provider 实例真正拼进 URL 的那个串，
+    // 不是 config 里可能为 None 的 base_url。provider 回退成 mock（key 读不到）时
+    // 这里也会如实显示，那个静默回退曾经只有一行 stderr warn。
+    tracing::info!(
+        provider = provider.id(),
+        model = %session_cfg.model,
+        endpoint = provider.endpoint().unwrap_or("-"),
+        context_window = session_cfg.context_window,
+        "模型配置已生效"
+    );
+
     let db = paths::db_path()?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
