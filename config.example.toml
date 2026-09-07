@@ -45,6 +45,10 @@ intent_max_per_turn = 3        # 每轮最多注入几条待办（防一条消�
 exec_timeout_secs = 120
 [tools.approval]
 mode = "prompt"            # prompt | allow | deny
+# 等待审批回执的上限（秒），超时按拒绝处理；0 = 不超时。
+# 无人值守场景（cron / oc http）没有 TUI 响应审批，务必保持非 0，
+# 否则该轮会一直占着会话车道直到卡死诊断兜底（约 360s）。
+timeout_secs = 120
 
 [watchdog]
 idle_cloud_secs = 120

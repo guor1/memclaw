@@ -20,7 +20,7 @@ use oc_server::testing::{test_cfg, SessionConfigExt};
 fn tool_executor() -> ToolExecutor {
     let mut reg = ToolRegistry::new();
     // Allow 模式：命令直接执行，便于测试闭环（不弹审批）。
-    reg.register(Arc::new(ExecTool::new(ApprovalMode::Allow, Duration::from_secs(10))));
+    reg.register(Arc::new(ExecTool::new(ApprovalMode::Allow, Duration::from_secs(10), Duration::from_secs(30))));
     ToolExecutor::new(Arc::new(reg))
 }
 
@@ -100,7 +100,7 @@ async fn dangerous_command_triggers_approval_then_runs() {
 
     // Prompt 模式 + 共享审批 registry（审批事件经 per-run sink，回执经 registry）。
     let mut reg = ToolRegistry::new();
-    reg.register(StdArc::new(ExecTool::new(ApprovalMode::Prompt, Duration::from_secs(10))));
+    reg.register(StdArc::new(ExecTool::new(ApprovalMode::Prompt, Duration::from_secs(10), Duration::from_secs(30))));
     let registry: oc_server::state::ApprovalRegistry = StdArc::new(dashmap::DashMap::new());
     let executor = ToolExecutor::new(StdArc::new(reg)).with_approvals(StdArc::clone(&registry));
 

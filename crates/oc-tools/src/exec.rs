@@ -20,6 +20,8 @@ use crate::Tool;
 pub struct ExecTool {
     pub mode: ApprovalMode,
     pub timeout: Duration,
+    /// 等待用户审批回执的上限；`ZERO` = 不设上限。超时按拒绝处理。
+    pub approval_timeout: Duration,
 }
 
 #[derive(Deserialize)]
@@ -29,8 +31,8 @@ struct ExecArgs {
 }
 
 impl ExecTool {
-    pub fn new(mode: ApprovalMode, timeout: Duration) -> Self {
-        Self { mode, timeout }
+    pub fn new(mode: ApprovalMode, timeout: Duration, approval_timeout: Duration) -> Self {
+        Self { mode, timeout, approval_timeout }
     }
 }
 
@@ -78,9 +80,13 @@ impl Tool for ExecTool {
                 let summary = format!("请求执行命令（风险: {risk:?}）");
                 // 等审批期间必须响应取消：否则用户 abort / 看门狗判卡死时，
                 // run 会永久卡在 ask().await 上，车道不释放（P0-2）。
+                //
+                // `approval_timeout` 是**叠加**在 cancel 之上的第二重上限，不替代
+                // cancel 分支：cancel 覆盖「有人主动中止」，超时覆盖「根本没人来批」
+                // （cron / HTTP 网关无 TUI 可响应）。二者缺一都会留下无界等待。
                 let reply = tokio::select! {
                     _ = cx.cancel.cancelled() => return Err(ToolError::Aborted),
-                    r = gate.ask(summary, cmd.clone()) => r,
+                    r = gate.ask(summary, cmd.clone(), self.approval_timeout) => r,
                 };
                 if reply == ApprovalReply::Deny {
                     return Err(ToolError::Denied);

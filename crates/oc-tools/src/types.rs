@@ -111,13 +111,28 @@ pub enum ApprovalReply {
 }
 
 impl ApprovalGate {
-    /// 请求审批并等待回执。通道断开视为拒绝（保守）。
-    pub async fn ask(&self, summary: String, command: String) -> ApprovalReply {
+    /// 请求审批并等待回执。通道断开或**超时**视为拒绝（保守，fail-closed）。
+    ///
+    /// `timeout` 为等待回执的上限，`Duration::ZERO` = 不设上限。
+    ///
+    /// 超时是必需的：无人值守场景（cron、HTTP 网关）没有 TUI 来响应审批，
+    /// 若无上限，这条 run 会一直占着会话车道，直到心跳的**卡死诊断**兜底
+    /// （`abort_min_secs` 与 `3 × warn_secs` 取大，默认 360s）才被 abort。
+    /// 那条路径的语义是「run 病了」——打 warn 日志、走 abort、整轮标记为
+    /// 非正常终态，而不是「用户没批准，正常拒绝这次调用」。此处超时即拒，
+    /// 让工具调用拿到干净的 `Denied` 而非把整轮拖成错误终态。
+    pub async fn ask(&self, summary: String, command: String, timeout: Duration) -> ApprovalReply {
         let (reply, rx) = oneshot::channel();
         if self.request.send(ApprovalRequest { summary, command, reply }).is_err() {
             return ApprovalReply::Deny;
         }
-        rx.await.unwrap_or(ApprovalReply::Deny)
+        if timeout.is_zero() {
+            return rx.await.unwrap_or(ApprovalReply::Deny);
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(r) => r.unwrap_or(ApprovalReply::Deny),
+            Err(_) => ApprovalReply::Deny,
+        }
     }
 }
 

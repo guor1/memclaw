@@ -26,7 +26,7 @@ use oc_server::testing::{test_cfg, SessionConfigExt};
 
 fn tool_executor() -> ToolExecutor {
     let mut reg = ToolRegistry::new();
-    reg.register(Arc::new(ExecTool::new(ApprovalMode::Allow, Duration::from_secs(10))));
+    reg.register(Arc::new(ExecTool::new(ApprovalMode::Allow, Duration::from_secs(10), Duration::from_secs(30))));
     ToolExecutor::new(Arc::new(reg))
 }
 

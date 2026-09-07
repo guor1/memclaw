@@ -109,6 +109,7 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
         CfgApprovalMode::Deny => ApprovalMode::Deny,
     };
     let exec_timeout = Duration::from_secs(cfg.tools.exec_timeout_secs);
+    let approval_timeout = Duration::from_secs(cfg.tools.approval.timeout_secs);
 
     // file 允许根：当前工作目录 + OC_HOME。空环境下退回当前目录。
     let mut roots = Vec::new();
@@ -120,7 +121,7 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
     }
 
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(ExecTool::new(mode, exec_timeout)));
+    registry.register(Arc::new(ExecTool::new(mode, exec_timeout, approval_timeout)));
     registry.register(Arc::new(FileTool::new(roots.clone())));
     // sys：pwd/cd/now（cd 受同一组 allowed_roots 约束）。
     // 传本机时区：now 要与系统提示词的「当前时间」同口径，否则模型拿两个格式对账。

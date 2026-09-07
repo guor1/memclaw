@@ -44,6 +44,7 @@ intent_max_per_turn = 3
 exec_timeout_secs = 120
 [tools.approval]
 mode = "prompt"
+timeout_secs = 120
 
 [watchdog]
 idle_cloud_secs = 120

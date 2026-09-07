@@ -40,7 +40,13 @@ async fn abort_interrupts_pending_approval_and_cleans_registry() {
 
     // Prompt 模式：危险命令弹审批。共享 registry 供断言泄漏。
     let mut reg = ToolRegistry::new();
-    reg.register(Arc::new(ExecTool::new(ApprovalMode::Prompt, Duration::from_secs(30))));
+    // 审批超时刻意取大（30s）：本用例验证的是 **abort** 能打断等待，
+    // 超时若短于用例时长会抢先结束 run，就测不到 P0-2 那条路径了。
+    reg.register(Arc::new(ExecTool::new(
+        ApprovalMode::Prompt,
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    )));
     let registry: oc_server::state::ApprovalRegistry = Arc::new(dashmap::DashMap::new());
     let executor = ToolExecutor::new(Arc::new(reg)).with_approvals(Arc::clone(&registry));
 

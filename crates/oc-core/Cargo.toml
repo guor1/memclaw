@@ -12,6 +12,11 @@ garde = { version = "0.22", features = ["derive"] }
 time = { version = "0.3", features = ["macros", "serde"] }
 time-tz = "2"
 
+[dev-dependencies]
+# 仅测试用：验证 `#[serde(default)]` 在旧配置（缺 timeout_secs）下的行为。
+# 不进生产依赖图，不破坏「纯策略，无 IO」。
+toml = "0.8"
+
 [features]
 default = []
 tiktoken = []

@@ -182,6 +182,19 @@ pub struct ToolsConfig {
 pub struct ApprovalConfig {
     #[garde(skip)]
     pub mode: ApprovalMode,
+    /// 等待用户审批回执的上限（秒）；超时按**拒绝**处理。`0` = 不超时。
+    ///
+    /// `#[serde(default)]` 是必需的：现网 `~/.oc/config.toml` 都没有这一项，
+    /// 缺省必须能加载，否则升级即打断所有已有配置。
+    #[serde(default = "default_approval_timeout_secs")]
+    #[garde(skip)]
+    pub timeout_secs: u64,
+}
+
+/// 审批等待上限默认 120s。无人值守场景（cron / HTTP 网关）没有 TUI 响应审批，
+/// 无上限会让 run 占着车道直到卡死诊断兜底（默认 360s，且语义是「run 病了」）。
+fn default_approval_timeout_secs() -> u64 {
+    120
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +280,7 @@ impl Config {
                 exec_timeout_secs: 120,
                 approval: ApprovalConfig {
                     mode: ApprovalMode::Prompt,
+                    timeout_secs: default_approval_timeout_secs(),
                 },
             },
             watchdog: WatchdogConfig {
@@ -287,6 +301,22 @@ mod tests {
     fn default_local_is_valid() {
         let cfg = Config::default_local();
         assert!(cfg.validate_shape().is_ok(), "default config must validate");
+    }
+
+    /// 现网 `~/.oc/config.toml` 里没有 `timeout_secs`（该项后加的）。缺省必须
+    /// 能加载并取到默认值，否则升级会打断所有已有配置。
+    #[test]
+    fn approval_timeout_defaults_when_absent() {
+        let cfg: ApprovalConfig = toml::from_str(r#"mode = "prompt""#).expect("旧配置应能加载");
+        assert_eq!(cfg.mode, ApprovalMode::Prompt);
+        assert_eq!(cfg.timeout_secs, 120, "缺省应取默认 120s，而非 0（0 = 不超时）");
+    }
+
+    #[test]
+    fn approval_timeout_explicit_wins() {
+        let cfg: ApprovalConfig =
+            toml::from_str("mode = \"prompt\"\ntimeout_secs = 5").expect("显式值应能加载");
+        assert_eq!(cfg.timeout_secs, 5);
     }
 
     #[test]

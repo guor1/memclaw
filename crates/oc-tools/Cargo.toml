@@ -21,7 +21,9 @@ glob = "0.3"
 regex = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# test-util：审批超时用例用 `#[tokio::test(start_paused = true)]` 的虚拟时钟，
+# 否则要真睡 120s / 600s。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
 tempfile = "3"
 
 [features]

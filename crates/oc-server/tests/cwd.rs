@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 fn executor(roots: Vec<std::path::PathBuf>) -> ToolExecutor {
     let mut reg = ToolRegistry::new();
-    reg.register(Arc::new(ExecTool::new(ApprovalMode::Allow, Duration::from_secs(10))));
+    reg.register(Arc::new(ExecTool::new(ApprovalMode::Allow, Duration::from_secs(10), Duration::from_secs(30))));
     reg.register(Arc::new(SysTool::new(roots, "UTC")));
     ToolExecutor::new(Arc::new(reg))
 }
