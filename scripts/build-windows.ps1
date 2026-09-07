@@ -136,8 +136,9 @@ oc doctor
 ### 6. 启动使用
 
 ```powershell
-oc daemon start     # 启动守护进程
-oc tui              # 交互式 TUI
+oc serve            # 启动常驻进程（前台阻塞，Ctrl-C 停止）
+oc                  # 不带子命令 = 连上 daemon 进 TUI 对话
+oc http --port 8080 # OpenAI Responses API 兼容网关（仅监听 127.0.0.1）
 ```
 
 ## 卸载
@@ -179,7 +180,7 @@ Remove-Item "$env:USERPROFILE\.oc" -Recurse -Force
 
 **解决**：
 1. 关闭所有 PowerShell/Terminal 窗口，重新打开
-2. 或用临时环境变量：`$env:DEEPSEEK_API_KEY="sk-xxxx"; oc daemon start`
+2. 或用临时环境变量：`$env:DEEPSEEK_API_KEY="sk-xxxx"; oc serve`
 3. 或改用配置文件的 `api_key = { inline = "..." }`
 
 ### 问题 4：防火墙/杀毒软件拦截
@@ -290,8 +291,8 @@ if %errorLevel% neq 0 (
     echo      打开 PowerShell，运行：
     echo      [Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY", "sk-xxxx", "User"^)
     echo      然后重新打开 PowerShell/Terminal
-    echo   2. 启动守护进程: oc daemon start
-    echo   3. 交互式 TUI: oc tui
+    echo   2. 启动常驻进程: oc serve
+    echo   3. 另开终端进 TUI: oc
     echo.
     echo 完整说明见 INSTALL.txt
 )

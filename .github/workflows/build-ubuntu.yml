@@ -33,7 +33,90 @@ jobs:
           mkdir -p dist/oc-ubuntu
           cp target/release/oc dist/oc-ubuntu/
           cp config.example.toml dist/oc-ubuntu/
-          cp scripts/README.md dist/oc-ubuntu/INSTALL.txt
+
+          # INSTALL.txt 在此内联生成，**不要**再 cp scripts/README.md：
+          # 那份是「构建脚本说明」（讲怎么编译），不是「安装说明」（讲怎么跑），
+          # 且历史上长期写着 `oc daemon start` / `oc tui` 这两个并不存在的子命令
+          # （实际是 `oc serve` 和不带子命令的 `oc`），照抄必然失败。
+          cat > dist/oc-ubuntu/INSTALL.txt << 'EOF'
+          # oc Ubuntu 安装说明
+
+          ## 0. 运行时依赖
+          sudo apt-get update && sudo apt-get install -y libsqlite3-0
+
+          ## 1. 安装二进制
+          sudo install -m755 oc /usr/local/bin/oc
+
+          ## 2. 配置
+          mkdir -p ~/.oc
+          cp config.example.toml ~/.oc/config.toml
+          # Linux 必须改成 unix（示例配置里默认是 Windows 的 pipe）：
+          sed -i 's/transport = "pipe"/transport = "unix"/' ~/.oc/config.toml
+          # socket 落在 ~/.oc/run/oc.sock，该目录由 daemon 自动创建，无需手工 mkdir。
+
+          ## 3. API Key（走环境变量，不要写进配置文件）
+          export DEEPSEEK_API_KEY=sk-xxxx      # 或 ANTHROPIC_API_KEY
+
+          ## 4. 验证
+          oc doctor                # 建库 / 迁移 / 配置校验
+
+          ## 5. 命令一览（注意：没有 `oc daemon start`，也没有 `oc tui`）
+          oc serve                 # 启动常驻进程（前台阻塞，Ctrl-C 停止）
+          oc                       # 不带子命令 = 连上 daemon 进 TUI 对话
+          oc http --port 8080      # OpenAI Responses API 兼容网关
+          oc status / oc sessions / oc debug --watch
+          oc cron add / list / rm  # 定时任务
+          oc memory search         # 记忆检索
+
+          ## 6. 后台常驻（systemd）
+          sudo tee /etc/systemd/system/oc-daemon.service >/dev/null << 'UNIT'
+          [Unit]
+          Description=oc daemon
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=YOUR_USER
+          WorkingDirectory=/home/YOUR_USER/ocdata
+          Environment="DEEPSEEK_API_KEY=sk-xxxx"
+          ExecStart=/usr/local/bin/oc serve
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          sudo systemctl daemon-reload && sudo systemctl enable --now oc-daemon
+
+          # WorkingDirectory 不是随便填的：它与 ~/.oc 共同构成 file 工具的
+          # allowed_roots，指向仓库或家目录会让 agent 能读写那里的一切。
+          # 建议先 mkdir -p ~/ocdata 用一个专用空目录。
+
+          ## 7. 无人值守注意事项（cron / oc http）
+          # 这些场景没有 TUI 来响应审批弹窗。请确认 ~/.oc/config.toml 里：
+          #   [tools.approval]
+          #   mode = "prompt"      # 危险命令会请求审批
+          #   timeout_secs = 120   # 无人回执时超时按拒绝处理，务必保持非 0
+          # 若设为 0（不超时），无人值守下该轮会一直占着会话车道。
+
+          ## 8. oc http 的暴露边界（重要）
+          # 该端点仅监听 127.0.0.1 且**没有任何鉴权**，等同于对 daemon 的完全
+          # 访问权（可经 exec 工具起 shell）。需要远程访问时，必须在前面放一个
+          # 带认证的反向代理（Nginx/Caddy），不要直接把端口暴露到网络。
+          # Nginx 代理 SSE 必须写 `proxy_buffering off;`，否则流式输出会憋到最后
+          # 一次性吐出，表现得像卡死。
+
+          ## 环境变量
+          # OC_HOME            自定义配置根目录（默认 ~/.oc）
+          # DEEPSEEK_API_KEY   / ANTHROPIC_API_KEY
+          # RUST_LOG           日志级别，如 oc=info,oc_server=info
+
+          ## 日志
+          # daemon 同时落盘：~/.oc/logs/oc.log.YYYY-MM-DD（按天滚动）
+
+          ## 卸载
+          # sudo rm /usr/local/bin/oc && rm -rf ~/.oc
+          EOF
 
           # 创建安装脚本
           cat > dist/oc-ubuntu/install.sh << 'EOF'
@@ -41,19 +124,37 @@ jobs:
           set -e
           echo "=== oc 快速安装 ==="
           sudo apt-get update && sudo apt-get install -y libsqlite3-0
-          sudo cp oc /usr/local/bin/
-          sudo chmod +x /usr/local/bin/oc
+          sudo install -m755 oc /usr/local/bin/oc
           mkdir -p ~/.oc
           if [ ! -f ~/.oc/config.toml ]; then
               cp config.example.toml ~/.oc/config.toml
               sed -i 's/transport = "pipe"/transport = "unix"/' ~/.oc/config.toml
+              echo "  已生成 ~/.oc/config.toml（transport=unix）"
+          else
+              echo "  已存在 ~/.oc/config.toml，跳过覆盖"
           fi
-          echo "✅ 安装完成！运行 'oc doctor' 验证"
+          echo ""
+          echo "✅ 安装完成。下一步："
+          echo "  1. export DEEPSEEK_API_KEY=sk-xxxx"
+          echo "  2. oc doctor        # 验证配置"
+          echo "  3. oc serve         # 启动常驻进程（另开终端跑 oc 进 TUI）"
+          echo ""
+          echo "完整说明见 INSTALL.txt"
           EOF
           chmod +x dist/oc-ubuntu/install.sh
 
+          # 版本信息：产物脱离仓库后，这是唯一能追溯到具体提交的线索。
+          cat > dist/oc-ubuntu/VERSION.txt << EOF
+          构建时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          Git 提交: ${GITHUB_SHA}
+          Git 引用: ${GITHUB_REF_NAME}
+          目标平台: x86_64-unknown-linux-gnu
+          EOF
+
           cd dist
           tar -czf oc-ubuntu.tar.gz oc-ubuntu
+          echo "--- 产物内容 ---"
+          tar -tzf oc-ubuntu.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

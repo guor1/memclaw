@@ -81,11 +81,17 @@ cp config.example.toml ~/.oc/config.toml
 ## 4. 验证安装
 oc doctor
 
-## 5. 启动守护进程
-oc daemon start
+## 5. 命令一览（注意：没有 `oc daemon start`，也没有 `oc tui`）
+oc serve                 # 启动常驻进程（前台阻塞，Ctrl-C 停止）
+oc                       # 不带子命令 = 连上 daemon 进 TUI 对话
+oc http --port 8080      # OpenAI Responses API 兼容网关（仅监听 127.0.0.1）
+oc status / oc sessions / oc debug --watch
+oc cron add / list / rm
 
-## 6. 交互式 TUI
-oc tui
+## 6. 无人值守注意事项（cron / oc http）
+这些场景没有 TUI 响应审批弹窗。确认 ~/.oc/config.toml 里
+[tools.approval] 的 timeout_secs 非 0（默认 120），否则该轮会一直
+占着会话车道。
 
 ## 环境变量
 - OC_HOME: 自定义配置根目录（默认 ~/.oc）
@@ -150,8 +156,8 @@ if oc doctor; then
     echo ""
     echo "下一步："
     echo "  1. 设置 API Key: export DEEPSEEK_API_KEY=sk-xxxx"
-    echo "  2. 启动守护进程: oc daemon start"
-    echo "  3. 交互式 TUI: oc tui"
+    echo "  2. 启动常驻进程: oc serve"
+    echo "  3. 另开终端进 TUI: oc"
     echo ""
     echo "完整说明见 INSTALL.txt"
 else

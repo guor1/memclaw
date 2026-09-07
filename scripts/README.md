@@ -40,8 +40,8 @@ cd C:\dev\workspace\memclaw
    ```
 5. 启动：
    ```powershell
-   oc daemon start
-   oc tui
+   oc serve    # 前台阻塞，Ctrl-C 停止
+   oc          # 另开终端：不带子命令 = 进 TUI 对话
    ```
 
 #### 方式 2：手动安装
@@ -72,7 +72,7 @@ transport = "pipe"  # Windows 必须用 pipe（不是 unix）
 
 **环境变量生效**：
 - 设置环境变量后，**必须关闭所有 PowerShell/Terminal 窗口并重新打开**
-- 或用临时变量：`$env:DEEPSEEK_API_KEY="sk-xxxx"; oc daemon start`
+- 或用临时变量：`$env:DEEPSEEK_API_KEY="sk-xxxx"; oc serve`
 
 **防火墙/杀毒软件**：
 - 首次运行可能被 Windows Defender 拦截
@@ -164,9 +164,10 @@ nano ~/.oc/config.toml
 ### 4. 验证并启动
 
 ```bash
-oc doctor           # 验证配置
-oc daemon start     # 启动守护进程
-oc tui              # 交互式 TUI
+oc doctor              # 验证配置
+oc serve               # 启动常驻进程（前台阻塞，Ctrl-C 停止）
+oc                     # 另开终端：不带子命令 = 进 TUI 对话
+oc http --port 8080    # 可选：OpenAI 兼容网关（仅监听 127.0.0.1，无鉴权）
 ```
 
 ---
@@ -270,8 +271,11 @@ After=network.target
 [Service]
 Type=simple
 User=youruser
+# WorkingDirectory 与 ~/.oc 共同构成 file 工具的 allowed_roots：指向仓库或
+# 家目录会让 agent 能读写那里的一切。建议先 mkdir -p ~/ocdata 用专用空目录。
+WorkingDirectory=/home/youruser/ocdata
 Environment="DEEPSEEK_API_KEY=sk-xxxx"
-ExecStart=/usr/local/bin/oc daemon start
+ExecStart=/usr/local/bin/oc serve
 Restart=on-failure
 RestartSec=10
 
@@ -314,7 +318,7 @@ sudo systemctl status oc-daemon
 # 安装（右键 install.bat "以管理员身份运行"）
 [Environment]::SetEnvironmentVariable("DEEPSEEK_API_KEY", "sk-xxxx", "User")
 oc doctor
-oc daemon start
+oc serve
 ```
 
 ### Ubuntu
@@ -326,5 +330,5 @@ oc daemon start
 ./install.sh
 export DEEPSEEK_API_KEY=sk-xxxx
 oc doctor
-oc daemon start
+oc serve
 ```
