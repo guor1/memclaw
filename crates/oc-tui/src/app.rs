@@ -61,6 +61,20 @@ pub struct App {
 /// 「排队中…」去抖延迟：发送后超过此时长仍未起步才提示排队。
 const QUEUE_HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// 可用指令一览（`/help` 与未知指令提示共用）。
+///
+/// **这里列的必须都是真能用的**：只在实现了的地方才对外宣传，否则用户按提示
+/// 敲进去却没反应，比不提示更糟。新增指令时同步加一行。
+const HELP_LINES: &[&str] = &[
+    "/help              显示本说明",
+    "/clear             清空当前会话上下文（历史保留在库中，不再进提示词）",
+    "/new               开一个新会话（旧会话保留）",
+    "/session <id>      切换到指定会话（不存在则首次发送时创建）",
+    "/sessions          列出所有会话",
+    "/compact           压缩当前上下文（摘要旧历史，保留语义）",
+    "/stop              中止当前进行中的回合",
+];
+
 impl App {
     pub async fn connect(to: &ConnectTo) -> Result<Self> {
         let mut client = ClientTransport::connect(to).await?;
@@ -97,7 +111,7 @@ impl App {
                 ResResult::Ok(_) => {
                     app.connected = true;
                     app.status = "已连接".to_string();
-                    app.push_sys("已连接到 oc daemon。输入消息回车发送，Ctrl-C 退出。");
+                    app.push_sys("已连接到 oc daemon。输入消息回车发送，/help 看指令，Ctrl-C 退出。");
                 }
                 ResResult::Err(e) => {
                     app.status = format!("连接被拒: {}", e.message);
@@ -215,35 +229,71 @@ impl App {
             }
             KeyCode::Enter => {
                 let text = self.input.trim().to_string();
-                if text == "/stop" {
-                    // 完整 /stop：hard abort（先 drain 排队轮再中止活跃 run）。
-                    if let Some(run_id) = self.active_run.clone() {
-                        self.abort_run(run_id, true).await?;
-                        self.msgs.push(Msg { who: "系统", text: "已请求停止".into() });
+                match parse_input(&text) {
+                    Input::Empty => {}
+                    Input::Cmd(Cmd::Stop) => {
+                        // 完整 /stop：hard abort（先 drain 排队轮再中止活跃 run）。
+                        if let Some(run_id) = self.active_run.clone() {
+                            self.abort_run(run_id, true).await?;
+                            self.msgs.push(Msg { who: "系统", text: "已请求停止".into() });
+                        }
                     }
-                } else if text == "/sessions" {
-                    self.list_sessions().await?;
-                } else if text == "/compact" {
-                    self.compact().await?;
-                    self.push_sys("已请求压缩上下文…");
-                } else if let Some(arg) = text.strip_prefix("/session ") {
-                    // 切换/新建会话：后续 chat.send 归属该会话，事件按此过滤。
-                    let id = arg.trim();
-                    if !id.is_empty() {
-                        self.current_session = SessionId::new(id.to_string());
+                    Input::Cmd(Cmd::Sessions) => self.list_sessions().await?,
+                    Input::Cmd(Cmd::Compact) => {
+                        self.compact().await?;
+                        self.push_sys("已请求压缩上下文…");
+                    }
+                    Input::Cmd(Cmd::Clear) => {
+                        // 清当前会话上下文：推进 reset_at，之前的对话不再进任何提示词
+                        // （transcript 保留供审计；server 侧会先沉淀 episodic 记忆）。
+                        self.reset_session().await?;
+                        self.msgs.clear();
+                        self.push_sys("已清空当前会话上下文（历史保留在库中，不再进入提示词）");
+                    }
+                    Input::Cmd(Cmd::New) => {
+                        // 开一个新会话（当前会话原样留着，可用 /session 切回）。
+                        let id = new_session_id();
+                        self.current_session = SessionId::new(id.clone());
+                        self.active_run = None;
+                        self.msgs.clear();
+                        self.push_sys(&format!(
+                            "已切到新会话「{id}」（旧会话保留，可用 /session 切回）"
+                        ));
+                    }
+                    Input::Cmd(Cmd::Session(id)) => {
+                        // 切换/新建会话：后续 chat.send 归属该会话，事件按此过滤。
+                        self.current_session = SessionId::new(id.clone());
                         self.active_run = None;
                         self.msgs.push(Msg {
                             who: "系统",
                             text: format!("已切换到会话「{id}」（新 id 将在首次发送时创建）"),
                         });
                     }
-                } else if !text.is_empty() && self.connected {
-                    self.msgs.push(Msg { who: "你", text: text.clone() });
-                    self.send_chat(text).await?;
-                    // 去抖：不立即显示「排队中…」，只记一个截止点。若 150ms 内收到本轮
-                    // Lifecycle::Start（车道空、秒起步），直接进「助手思考中…」，排队提示
-                    // 从不出现；只有超时仍未起步（真在排队）才显示，避免一闪而过。
-                    self.pending_queue_hint = Some(std::time::Instant::now() + QUEUE_HINT_DELAY);
+                    Input::Cmd(Cmd::Help) => {
+                        for line in HELP_LINES {
+                            self.push_sys(line);
+                        }
+                    }
+                    Input::UnknownCmd => {
+                        // 未知指令**不能**当聊天发出去：打错一个字（/sesion）会变成
+                        // 发给模型的一句话，既浪费一轮，又把噪声写进 transcript。
+                        self.push_sys(&format!("未知指令「{text}」。可用指令："));
+                        for line in HELP_LINES {
+                            self.push_sys(line);
+                        }
+                    }
+                    Input::Chat(msg) => {
+                        if self.connected {
+                            self.msgs.push(Msg { who: "你", text: msg.clone() });
+                            self.send_chat(msg).await?;
+                            // 去抖：不立即显示「排队中…」，只记一个截止点。若 150ms 内收到
+                            // 本轮 Lifecycle::Start（车道空、秒起步），直接进「助手思考中…」，
+                            // 排队提示从不出现；只有超时仍未起步（真在排队）才显示，
+                            // 避免一闪而过。
+                            self.pending_queue_hint =
+                                Some(std::time::Instant::now() + QUEUE_HINT_DELAY);
+                        }
+                    }
                 }
                 // 发送后回到底部跟随，确保看到自己的消息与后续回复。
                 self.scroll_back = 0;
@@ -343,6 +393,24 @@ impl App {
         let req = Req {
             id: ReqId::new(id),
             method: Method::Compact(oc_proto::CompactParams {
+                session: Some(self.current_session.clone()),
+            }),
+            idempotency_key: None,
+        };
+        self.client.send(&Frame::Req(req)).await?;
+        Ok(())
+    }
+
+    /// 清当前会话上下文（`/clear`）：推进上下文起点，transcript 保留。
+    ///
+    /// server 侧在推进起点**之前**会先沉淀 episodic 记忆（设计 §11.5）——
+    /// 那是这段对话进入长期记忆的最后机会，故此处不需要客户端做任何前置动作。
+    async fn reset_session(&mut self) -> Result<()> {
+        let id = format!("req-{}", self.next_req);
+        self.next_req += 1;
+        let req = Req {
+            id: ReqId::new(id),
+            method: Method::SessionReset(oc_proto::SessionResetParams {
                 session: Some(self.current_session.clone()),
             }),
             idempotency_key: None,
@@ -631,9 +699,82 @@ fn event_session(ev: &Event) -> Option<&SessionId> {
     })
 }
 
+/// 一条输入被解释成什么。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Input {
+    /// 空行：什么都不做。
+    Empty,
+    /// 一条已识别的指令。
+    Cmd(Cmd),
+    /// 以 `/` 开头但不认识：提示可用指令，**不发给模型**。
+    UnknownCmd,
+    /// 普通聊天文本。
+    Chat(String),
+}
+
+/// 已实现的 TUI 指令。
+///
+/// 加新变体时必须同步：① [`parse_input`] 的分支 ② [`HELP_LINES`] 一行
+/// ③ `on_key` 的处理。测试 `every_advertised_command_parses` 锁住 ①②
+/// 不脱节——宣传了却没实现，比不宣传更糟。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Cmd {
+    Help,
+    Clear,
+    New,
+    Session(String),
+    Sessions,
+    Compact,
+    Stop,
+}
+
+/// 解析一行输入（纯函数，便于单测）。传入的 `text` 应已 trim。
+fn parse_input(text: &str) -> Input {
+    if text.is_empty() {
+        return Input::Empty;
+    }
+    if !text.starts_with('/') {
+        return Input::Chat(text.to_string());
+    }
+    // `/session <id>` 带参数，单独先判。
+    if let Some(arg) = text.strip_prefix("/session ") {
+        let id = arg.trim();
+        // 空 id（`/session   `）是打错了，别静默吞掉。
+        return if id.is_empty() {
+            Input::UnknownCmd
+        } else {
+            Input::Cmd(Cmd::Session(id.to_string()))
+        };
+    }
+    match text {
+        "/help" => Input::Cmd(Cmd::Help),
+        // `/reset` 是别名：设计文档 §259 用的是这个名字，而 `/clear` 更符合
+        // 用户直觉（也与 zeroclaw 一致）。两个都收，帮助里只列 `/clear`。
+        "/clear" | "/reset" => Input::Cmd(Cmd::Clear),
+        "/new" => Input::Cmd(Cmd::New),
+        "/sessions" => Input::Cmd(Cmd::Sessions),
+        "/compact" => Input::Cmd(Cmd::Compact),
+        "/stop" => Input::Cmd(Cmd::Stop),
+        _ => Input::UnknownCmd,
+    }
+}
+
 /// 简易唯一键（避免为 TUI 引入 uuid 依赖）。
 fn uuid_like(n: u64) -> String {
     format!("tui-{}-{}", std::process::id(), n)
+}
+
+/// `/new` 的新会话 id。
+///
+/// 用本地时间戳而非随机串：`/sessions` 列出来时能一眼看出先后，切回旧会话时
+/// 不必去猜哪个是哪个。秒级精度足够——同一秒内连按两次 `/new` 属于误操作，
+/// 撞了也只是复用同一个空会话，无害。
+fn new_session_id() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("s{secs}")
 }
 
 /// select 辅助：到给定时刻醒来；`None` 则永久挂起（该 select 分支不参与）。
@@ -680,6 +821,72 @@ mod tests {
         assert_eq!(
             normalize_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
             KeyCode::Char('c') // Ctrl-C 退出，不改写
+        );
+    }
+
+    /// HELP_LINES 里宣传的每条指令都必须真能解析出来。
+    ///
+    /// 这是本次修复的核心纪律：`/new` 和 `/clear` 之前从没实现过，输入后被当成
+    /// 聊天消息发给模型——既没清上下文，还往历史里塞了噪声。宣传与实现脱节
+    /// 比不宣传更糟，故用测试锁住。
+    #[test]
+    fn every_advertised_command_parses() {
+        for line in HELP_LINES {
+            // 每行形如 "/clear             说明…"，取第一个空格前的 token。
+            let usage = line.split_whitespace().next().expect("帮助行非空");
+            // 带参数的指令补一个占位参数再解析。
+            let probe = if usage == "/session" {
+                "/session demo".to_string()
+            } else {
+                usage.to_string()
+            };
+            assert!(
+                matches!(parse_input(&probe), Input::Cmd(_)),
+                "帮助里宣传了 {usage}，但 parse_input 不认识它"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_slash_command_is_not_sent_as_chat() {
+        // 打错字不能变成发给模型的一句话。
+        assert_eq!(parse_input("/sesion"), Input::UnknownCmd);
+        assert_eq!(parse_input("/clea"), Input::UnknownCmd);
+        // 空 id 也算打错，别静默吞掉。
+        assert_eq!(parse_input("/session"), Input::UnknownCmd);
+        assert_eq!(parse_input("/session    "), Input::UnknownCmd);
+    }
+
+    /// `/reset` 是 `/clear` 的别名（设计文档用的是这个名字）。
+    #[test]
+    fn reset_is_alias_for_clear() {
+        assert_eq!(parse_input("/reset"), Input::Cmd(Cmd::Clear));
+        assert_eq!(parse_input("/clear"), Input::Cmd(Cmd::Clear));
+    }
+
+    #[test]
+    fn plain_text_is_chat() {
+        assert_eq!(parse_input("生成一份 PPT"), Input::Chat("生成一份 PPT".into()));
+        assert_eq!(parse_input(""), Input::Empty);
+        // 不以 / 开头就是聊天，即便中间有斜杠。
+        assert_eq!(parse_input("a/b"), Input::Chat("a/b".into()));
+    }
+
+    #[test]
+    fn session_command_takes_id() {
+        assert_eq!(parse_input("/session ppt2"), Input::Cmd(Cmd::Session("ppt2".into())));
+        // 多余空格要吃掉。
+        assert_eq!(parse_input("/session  ppt2  "), Input::Cmd(Cmd::Session("ppt2".into())));
+    }
+
+    /// `/new` 生成的 id 要能被 `/session` 切回去（不含空格等会被解析吃掉的字符）。
+    #[test]
+    fn new_session_id_round_trips_through_session_command() {
+        let id = new_session_id();
+        assert_eq!(
+            parse_input(&format!("/session {id}")),
+            Input::Cmd(Cmd::Session(id.clone())),
+            "生成的 id {id} 无法用 /session 切回"
         );
     }
 
