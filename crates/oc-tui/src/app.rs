@@ -164,16 +164,17 @@ impl App {
     }
 
     async fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) -> Result<()> {
+        let code = normalize_key(code, mods);
         // 审批模式：y/n 优先处理（Ctrl-C 仍可退出）。
         if self.pending_approval.is_some()
             && !(matches!(code, KeyCode::Char('c')) && mods.contains(KeyModifiers::CONTROL))
         {
             match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                KeyCode::Char('y') | KeyCode::Char('Y') if is_text_char(mods) => {
                     self.reply_approval(true).await?;
                     return Ok(());
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') => {
+                KeyCode::Char('n') | KeyCode::Char('N') if is_text_char(mods) => {
                     self.reply_approval(false).await?;
                     return Ok(());
                 }
@@ -201,7 +202,7 @@ impl App {
                     self.input.pop();
                     return Ok(());
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if is_text_char(mods) => {
                     self.input.push(c);
                     return Ok(());
                 }
@@ -265,7 +266,7 @@ impl App {
             KeyCode::End if mods.contains(KeyModifiers::CONTROL) => {
                 self.scroll_back = 0;
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if is_text_char(mods) => {
                 self.input.push(c);
             }
             _ => {}
@@ -581,6 +582,41 @@ fn short_k(n: u32) -> String {
     }
 }
 
+/// 非文本修饰键（Ctrl/Alt/Super/Hyper/Meta）；带这些的 `Char` 不是可输入字符。
+const NON_TEXT_MODS: KeyModifiers = KeyModifiers::CONTROL
+    .union(KeyModifiers::ALT)
+    .union(KeyModifiers::SUPER)
+    .union(KeyModifiers::HYPER)
+    .union(KeyModifiers::META);
+
+/// 该 `Char` 事件是否为可插入输入框的字面字符（只允许无修饰或 Shift）。
+///
+/// 不判这个的话，Ctrl/Alt 组合会漏成字面字母塞进输入框——Linux 下退格
+/// 变 `h` 就是这么来的（见 [`normalize_key`]）。
+fn is_text_char(mods: KeyModifiers) -> bool {
+    !mods.intersects(NON_TEXT_MODS)
+}
+
+/// 归一化平台差异的按键上报。
+///
+/// Linux/Unix 下 crossterm 逐字节解析 stdin：DEL(`0x7F`) → `Backspace`，但
+/// BS(`0x08`) 落在 `0x01..=0x1A` 控制码区间，被解析成 `Ctrl+H`；Ctrl+I/Ctrl+M
+/// 同理会变成 `Ctrl+I`/`Ctrl+M` 而非 Tab/Enter。而 xterm（`backarrowKey`）、
+/// tmux、部分串口/远程会话的退格键发的正是 BS，于是退格在 Linux 上不删字符、
+/// 反而输入一个 `h`。Windows 走 winapi 路径直接上报 `Backspace`，所以只在
+/// Linux 复现。这里把这三个控制码还原成对应的功能键。
+fn normalize_key(code: KeyCode, mods: KeyModifiers) -> KeyCode {
+    if !mods.contains(KeyModifiers::CONTROL) {
+        return code;
+    }
+    match code {
+        KeyCode::Char('h') | KeyCode::Char('H') => KeyCode::Backspace, // BS 0x08
+        KeyCode::Char('i') | KeyCode::Char('I') => KeyCode::Tab,       // HT 0x09
+        KeyCode::Char('m') | KeyCode::Char('M') => KeyCode::Enter,     // CR 0x0D
+        other => other,
+    }
+}
+
 /// 取事件归属的会话 id（所有变体都带 session）。
 fn event_session(ev: &Event) -> Option<&SessionId> {
     Some(match ev {
@@ -605,5 +641,53 @@ async fn sleep_until_opt(deadline: Option<std::time::Instant>) {
     match deadline {
         Some(t) => tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Linux 下退格发 BS(0x08)，crossterm 报成 Ctrl+H：必须还原成 Backspace，
+    /// 否则退格会往输入框里塞一个 `h`。
+    #[test]
+    fn ctrl_h_normalizes_to_backspace() {
+        assert_eq!(
+            normalize_key(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            KeyCode::Backspace
+        );
+        assert_eq!(
+            normalize_key(KeyCode::Char('i'), KeyModifiers::CONTROL),
+            KeyCode::Tab
+        );
+        assert_eq!(
+            normalize_key(KeyCode::Char('m'), KeyModifiers::CONTROL),
+            KeyCode::Enter
+        );
+    }
+
+    /// 无 Ctrl 时 `h` 仍是可输入字符，不能被吞掉。
+    #[test]
+    fn plain_chars_pass_through() {
+        assert_eq!(
+            normalize_key(KeyCode::Char('h'), KeyModifiers::NONE),
+            KeyCode::Char('h')
+        );
+        assert_eq!(
+            normalize_key(KeyCode::Char('H'), KeyModifiers::SHIFT),
+            KeyCode::Char('H')
+        );
+        assert_eq!(
+            normalize_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyCode::Char('c') // Ctrl-C 退出，不改写
+        );
+    }
+
+    #[test]
+    fn only_unmodified_or_shifted_chars_are_text() {
+        assert!(is_text_char(KeyModifiers::NONE));
+        assert!(is_text_char(KeyModifiers::SHIFT));
+        assert!(!is_text_char(KeyModifiers::CONTROL));
+        assert!(!is_text_char(KeyModifiers::ALT));
     }
 }
