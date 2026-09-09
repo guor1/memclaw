@@ -275,6 +275,9 @@ fn run_serve(socket: Option<String>) -> anyhow::Result<()> {
         model = %session_cfg.model,
         endpoint = provider.endpoint().unwrap_or("-"),
         context_window = session_cfg.context_window,
+        // None = 请求体不发 max_tokens，输出上限由服务端默认值定。撞 Length 时
+        // 第一个要看的就是这项到底有没有配上。
+        max_output_tokens = ?session_cfg.max_output_tokens,
         "模型配置已生效"
     );
 

@@ -120,6 +120,9 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
     let mut tool_rounds = 0usize;
     // 本 run 内输出被 max_tokens 截断的次数（不与 tool_rounds 混算：续写不是工具轮）。
     let mut truncations = 0usize;
+    // 截断轮已产出的可见文本，攒到收尾时与末轮拼成一条完整回复落库。
+    // 逐轮各落一条会在历史里留下一串读不通的碎片。
+    let mut carried = String::new();
     // 最近一次 provider 报告的真实输入 token 数（compaction 优先用它校准估算）。
     let mut last_input_tokens: Option<i64> = None;
 
@@ -139,21 +142,27 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
         match turn {
             TurnResult::Completed => {
                 // 落库最终 assistant 回复（重启不失忆）。
-                persist(ctx, oc_store::Role::Assistant, &acc, None, None).await;
+                // 前面若有截断轮，把攒下的残段与末轮拼成**一条**完整回复——
+                // 分成几条落库，重放时就是几段各自读不通的碎片。
+                let full = format!("{carried}{acc}");
+                persist(ctx, oc_store::Role::Assistant, &full, None, None).await;
                 return outcome_of(&state);
             }
             TurnResult::Terminal(outcome) => return outcome,
             TurnResult::Truncated => {
                 truncations += 1;
                 if truncations > MAX_TRUNCATION_CONTINUATIONS {
-                    // 半句话也要落库：用户在界面上已经看见它了，历史里凭空少一段
-                    // 比留一段截断更难对账。
-                    persist(ctx, oc_store::Role::Assistant, &acc, None, None).await;
                     warn!(
                         run_id = %ctx.run_id,
                         truncations,
-                        "输出反复被截断，续写次数用尽"
+                        dropped_chars = carried.chars().count() + acc.chars().count(),
+                        "输出反复被截断，续写次数用尽；残片不落库"
                     );
+                    // 残片一个都不落库。此前是「半句话也落，界面上已经看见了」，
+                    // 结果失败的 run 在 entry 表里留下 ast:38,ast:1,ast:11 三条
+                    // 读不通的碎片，后面每一轮都拿它们当上下文——排队轮据此回
+                    // 「PPT 还没做完，我这就继续生成」，把一次失败变成了持续的
+                    // 上下文污染（对齐 openclaw：失败的 attempt 不进 transcript）。
                     emit_error(
                         ctx,
                         RunErrorKind::Truncated,
@@ -166,11 +175,14 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                     return RunOutcome::Failed("输出被 max_tokens 截断".into());
                 }
 
-                // 截断轮怎么进历史，取决于它有没有留下可用的东西：
-                // - 有可见文本：保留，续写要接着它写；
+                // 截断轮怎么进**本轮上下文**，取决于它有没有留下可用的东西：
+                // - 有可见文本：带进续写，模型要接着它写；
                 // - 只有 reasoning（thinking 模型烧光预算的典型形状）：丢弃。
                 //   那是一段被砍断的模型内部状态，回喂过去既教不会模型什么，
                 //   又占着下一轮的输入预算。
+                //
+                // 注意这里**不落库**：续写还没成功，成不成还不知道。落库统一推到
+                // 终点做（见上方失败分支与 Completed/ToolCall 分支）。
                 if acc.is_empty() {
                     tracing::debug!(
                         run_id = %ctx.run_id,
@@ -178,7 +190,6 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                         "截断轮无可见文本，丢弃不回喂"
                     );
                 } else {
-                    persist(ctx, oc_store::Role::Assistant, &acc, None, None).await;
                     messages.push(Message {
                         role: MsgRole::Assistant,
                         content: acc.clone(),
@@ -186,6 +197,9 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                         tool_calls: vec![],
                         reasoning: None,
                     });
+                    // 攒起来：续写成功后与末轮拼成一条完整回复落库，而不是留下
+                    // 一串各自读不通的碎片。
+                    carried.push_str(&acc);
                 }
 
                 // 续写指令只进本 run 的上下文，不落库：它是给模型的传输层提示，
@@ -223,8 +237,12 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                 });
                 // 带 tool_calls 落库：`acc` 为空也要落，否则纯工具调用轮在历史里
                 // 彻底消失，重放时又退回「只有宣告、没有调用」的坏样例（P2-4）。
+                // 截断轮攒下的文本并进这一条：模型先说半句被砍、续写后才发出
+                // 调用，那半句属于同一条 assistant 消息。
                 let tc_json = serde_json::to_string(&specs).ok();
-                persist(ctx, oc_store::Role::Assistant, &acc, tc_json, None).await;
+                let full = format!("{carried}{acc}");
+                carried.clear();
+                persist(ctx, oc_store::Role::Assistant, &full, tc_json, None).await;
 
                 // loop detection。
                 fingerprints.push(ToolFingerprint {
@@ -445,6 +463,14 @@ async fn run_model_turn(
     let mut tc_name = String::new();
     let mut tc_args = String::new();
 
+    // 本轮流的仪表：模型的输出有三个去处（acc / reasoning / tc_args），
+    // 只统计前两个会得出「75 秒才产出 111 字符」这种读不懂的数——生成脚本类
+    // 任务的绝大部分输出其实在 tc_args 里。三个都记，再配上 provider 自报的
+    // output_tokens，截断时才判得出到底是谁把预算吃掉了。
+    let mut deltas = 0usize;
+    let mut ttfb_ms: Option<u128> = None;
+    let mut out_tokens: Option<u32> = None;
+
     loop {
         let next_delta = tokio::select! {
             _ = ctx.cancel.cancelled() => {
@@ -493,6 +519,11 @@ async fn run_model_turn(
             }
         };
 
+        deltas += 1;
+        if ttfb_ms.is_none() {
+            ttfb_ms = Some(t_open.elapsed().as_millis());
+        }
+
         match delta {
             Delta::Text(t) => {
                 let (n, effs) = step(state.clone(), StepEvent::ModelText(t), acc);
@@ -516,6 +547,11 @@ async fn run_model_turn(
                 tc_args.push_str(&tc.args_chunk);
             }
             Delta::Usage(u) => {
+                // 输出 token：provider 自报的权威值。截断诊断的关键——它与我们
+                // 累计的字符数一对比，就知道输出到底是被谁吃掉的。此前完全没读。
+                if u.output_tokens > 0 {
+                    out_tokens = Some(u.output_tokens);
+                }
                 // 记录真实输入 token（含本轮完整 prompt），供下一轮 compaction 校准。
                 if u.input_tokens > 0 {
                     *last_input_tokens = Some(u.input_tokens as i64);
@@ -529,6 +565,15 @@ async fn run_model_turn(
             }
             Delta::Done(FinishReason::ToolUse) => {
                 // 有工具调用。
+                tracing::debug!(
+                    tool = %tc_name,
+                    tool_args_chars = tc_args.chars().count(),
+                    acc_chars = acc.chars().count(),
+                    output_tokens = ?out_tokens,
+                    deltas,
+                    stream_ms = t_open.elapsed().as_millis(),
+                    "模型轮结束（工具调用）"
+                );
                 let (n, _) = step(
                     state.clone(),
                     StepEvent::ModelToolCall {
@@ -553,12 +598,30 @@ async fn run_model_turn(
                     run_id = %ctx.run_id,
                     acc_chars = acc.chars().count(),
                     reasoning_chars = reasoning.chars().count(),
+                    // 生成脚本类任务的输出大头在这里：模型把整个脚本当作 exec 的
+                    // arguments 流式吐出来，撞上限时 JSON 断在半路。
+                    tool_args_chars = tc_args.chars().count(),
+                    tool_name = %tc_name,
+                    output_tokens = ?out_tokens,
+                    deltas,
+                    ttfb_ms = ?ttfb_ms,
+                    stream_ms = t_open.elapsed().as_millis(),
                     "模型输出被 max_tokens 截断"
                 );
                 return TurnResult::Truncated;
             }
             Delta::Done(reason) => {
-                tracing::debug!(?reason, acc_chars = acc.chars().count(), "模型轮结束");
+                tracing::debug!(
+                    ?reason,
+                    acc_chars = acc.chars().count(),
+                    reasoning_chars = reasoning.chars().count(),
+                    tool_args_chars = tc_args.chars().count(),
+                    output_tokens = ?out_tokens,
+                    deltas,
+                    ttfb_ms = ?ttfb_ms,
+                    stream_ms = t_open.elapsed().as_millis(),
+                    "模型轮结束"
+                );
                 let (n, effs) = step(state.clone(), StepEvent::ModelDone, acc);
                 *state = n;
                 execute_effects(ctx, &effs, acc).await;

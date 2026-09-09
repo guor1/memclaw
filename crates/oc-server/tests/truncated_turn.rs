@@ -60,22 +60,31 @@ async fn collect_until_terminal(
 }
 
 async fn run_scripts(scripts: Vec<Vec<ScriptStep>>) -> Vec<Event> {
+    run_scripts_with_store(scripts).await.0
+}
+
+/// 同上，另外把 store 交回来供落库侧断言。
+async fn run_scripts_with_store(
+    scripts: Vec<Vec<ScriptStep>>,
+) -> (Vec<Event>, oc_store::Store) {
     let (tx, mut rx) = broadcast::channel(512);
     let provider = Arc::new(SequencedMock::new(scripts));
     let sid = oc_proto::SessionId::main();
+    let store = oc_store::Store::open_memory().unwrap();
     let handle = session::spawn(
         sid.clone(),
         test_cfg(),
         provider,
         tx,
-        oc_store::Store::open_memory().unwrap(),
+        store.clone(),
         oc_server::diag::DiagRegistry::new().for_session(&sid),
     );
     let _run = handle
         .submit("生成一份大话西游人物介绍PPT".into(), handle.broadcast_sink())
         .await
         .expect("run");
-    collect_until_terminal(&mut rx, Duration::from_secs(5)).await
+    let evs = collect_until_terminal(&mut rx, Duration::from_secs(5)).await;
+    (evs, store)
 }
 
 fn assistant_text(evs: &[Event]) -> String {
@@ -149,5 +158,59 @@ async fn reasoning_only_truncation_still_continues() {
     assert!(
         text.contains("已生成 slides.pptx"),
         "纯 reasoning 截断轮也要续写，实际：{text}"
+    );
+}
+
+/// 续写成功后，几段残句在库里必须合成**一条**完整回复。
+///
+/// 分成几条落库的话，重放时就是几段各自读不通的碎片，模型照着学，
+/// 下一轮接着说半句。
+#[tokio::test]
+async fn successful_continuation_persists_one_merged_reply() {
+    let (_evs, store) = run_scripts_with_store(vec![
+        truncated_step("环境就绪，我来写脚本。"),
+        text_step("已生成 slides.pptx。"),
+    ])
+    .await;
+
+    let hist = store.writer().load_transcript("main".into(), 100).await.unwrap();
+    let replies: Vec<&str> = hist
+        .iter()
+        .filter(|e| e.role == oc_store::Role::Assistant)
+        .map(|e| e.content.as_str())
+        .collect();
+
+    assert_eq!(replies.len(), 1, "应只落一条合并后的回复，实际：{replies:?}");
+    assert!(
+        replies[0].contains("环境就绪") && replies[0].contains("slides.pptx"),
+        "合并后的回复应含两段，实际：{}",
+        replies[0]
+    );
+}
+
+/// 续写用尽而失败的 run，一个残片都不该留在库里。
+///
+/// 真机上留下了 ast:38 / ast:1 / ast:11 三条碎片，后面每一轮都拿它们当上下文，
+/// 于是排队轮回「PPT 还没做完，我这就继续生成」——一次失败变成了持续污染。
+#[tokio::test]
+async fn exhausted_continuation_persists_no_fragments() {
+    let (_evs, store) = run_scripts_with_store(vec![
+        truncated_step("半句"),
+        truncated_step("又半句"),
+        truncated_step("还是半句"),
+        truncated_step("永远半句"),
+    ])
+    .await;
+
+    let hist = store.writer().load_transcript("main".into(), 100).await.unwrap();
+    let replies: Vec<&str> = hist
+        .iter()
+        .filter(|e| e.role == oc_store::Role::Assistant)
+        .map(|e| e.content.as_str())
+        .collect();
+
+    assert!(
+        replies.is_empty(),
+        "失败的截断 run 不得在库里留下残片，实际：{replies:?}"
     );
 }
