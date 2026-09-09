@@ -34,13 +34,25 @@ const MAX_TOOL_ROUNDS: usize = 24;
 /// 继续只是烧钱。
 const MAX_TRUNCATION_CONTINUATIONS: usize = 2;
 
-/// 续写指令：附在截断轮之后，要求接着写而非重述。
+/// 续写指令：附在**文本**被截断之后，要求接着写而非重述。
 ///
 /// 不加这句的话模型倾向从头组织答案，于是每轮都在同一个位置被砍——真机上
 /// 「我来设计并生成这份 PPT」重复了三轮就是这个形状。
 const CONTINUATION_INSTRUCTION: &str = "上一轮回复因输出长度上限被截断，没有说完。\
 请紧接着截断处继续写完，不要重述已经说过的内容、不要从头开始。\
 如果任务需要调用工具才能完成，现在直接发起工具调用。";
+
+/// 续写指令：附在**工具调用参数**被截断之后。
+///
+/// 与上一条的区别是这里不能说「接着写」：残缺的 arguments 是非法 JSON，没进
+/// 历史，模型看不到自己刚写了什么，"接着"无从谈起。它唯一能做的是重来，
+/// 所以必须告诉它换个写法——否则它会原样再写一遍，在同一处再被砍。
+/// 真机上连续三轮都是这么废掉的。
+const TOOL_TRUNCATION_INSTRUCTION: &str = "上一轮你发起的工具调用因为参数太长，\
+在传输中被输出长度上限截断了，没有执行。参数内容已丢失，你看不到它。\
+不要原样重写一遍——那样会在同一个位置再次被截断。\
+请把工作拆小后重做：需要写长文件就分多次追加（先写前一部分，再逐段补），\
+或先把内容写进文件再执行，不要把大段内容塞进单次调用的参数里。";
 
 /// run 驱动所需的上下文。
 pub struct RunCtx {
@@ -149,7 +161,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                 return outcome_of(&state);
             }
             TurnResult::Terminal(outcome) => return outcome,
-            TurnResult::Truncated => {
+            TurnResult::Truncated { partial_tool } => {
                 truncations += 1;
                 if truncations > MAX_TRUNCATION_CONTINUATIONS {
                     warn!(
@@ -204,14 +216,34 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
 
                 // 续写指令只进本 run 的上下文，不落库：它是给模型的传输层提示，
                 // 不是用户说过的话，落库会污染以后每一轮的历史。
+                //
+                // 截断在工具调用参数上时换另一套说法：那种情况没法「接着写」，
+                // 只能让模型换个拆分方式重做。
+                let instruction = match &partial_tool {
+                    Some(pt) => {
+                        warn!(
+                            run_id = %ctx.run_id,
+                            tool = %pt.name,
+                            args_chars = pt.args_chars,
+                            "工具调用参数写到一半被截断，指导模型拆小重做"
+                        );
+                        TOOL_TRUNCATION_INSTRUCTION
+                    }
+                    None => CONTINUATION_INSTRUCTION,
+                };
                 messages.push(Message {
                     role: MsgRole::User,
-                    content: CONTINUATION_INSTRUCTION.to_string(),
+                    content: instruction.to_string(),
                     tool_call_id: None,
                     tool_calls: vec![],
                     reasoning: None,
                 });
-                tracing::debug!(run_id = %ctx.run_id, truncations, "截断后续写");
+                tracing::debug!(
+                    run_id = %ctx.run_id,
+                    truncations,
+                    partial_tool = partial_tool.is_some(),
+                    "截断后续写"
+                );
                 acc.clear();
             }
             TurnResult::ToolCall { call_id, name, args } => {
@@ -298,9 +330,24 @@ enum TurnResult {
     ///
     /// 与 `Completed` 分开是本模块的关键区分：二者曾走同一条路，于是被砍断的
     /// 半句话被当成最终答案，run 静默"完成"（见 tests/truncated_turn.rs）。
-    Truncated,
+    Truncated {
+        /// 截断发生在流式吐工具调用参数的过程中（`tc_args` 非空）。
+        ///
+        /// 这种截断和「文本说到一半」性质不同，得区别对待：残缺的 arguments 是
+        /// 非法 JSON，回喂过去违反协议，所以模型**看不到**自己刚写了什么，
+        /// 「接着写」对它没有意义——它只能从头再写一遍，然后在同一处再被砍。
+        partial_tool: Option<PartialToolCall>,
+    },
     /// 直接终态（错误/中止/超时）。
     Terminal(RunOutcome),
+}
+
+/// 被截断在半路的工具调用（arguments 是残缺 JSON，不可回喂）。
+struct PartialToolCall {
+    name: String,
+    /// 已收到的 arguments 字符数。只留长度不留内容——内容是残缺 JSON，
+    /// 唯一的用途是告诉模型「你刚才那个调用写太长了」。
+    args_chars: usize,
 }
 
 /// 跑一次模型流，消费 Delta 直到该轮结束。
@@ -608,7 +655,16 @@ async fn run_model_turn(
                     stream_ms = t_open.elapsed().as_millis(),
                     "模型输出被 max_tokens 截断"
                 );
-                return TurnResult::Truncated;
+                return TurnResult::Truncated {
+                    partial_tool: (!tc_args.is_empty()).then(|| PartialToolCall {
+                        name: if tc_name.is_empty() {
+                            "(未命名)".to_string()
+                        } else {
+                            tc_name.clone()
+                        },
+                        args_chars: tc_args.chars().count(),
+                    }),
+                };
             }
             Delta::Done(reason) => {
                 tracing::debug!(

@@ -128,15 +128,25 @@ impl Provider for CapturingMock {
 
 /// 多轮 mock：每次 `stream_chat` 调用返回序列中的下一个脚本。
 /// 用于测试"模型请求工具 → 执行 → 再次调用模型 → 完成"的多轮循环。
+///
+/// 同时记录每次收到的 [`ModelRequest`]：多轮场景里「上层第 N 轮到底发了什么」
+/// 常常就是被测对象本身（如截断后回喂的续写指令）。
 pub struct SequencedMock {
     scripts: std::sync::Mutex<std::collections::VecDeque<Vec<ScriptStep>>>,
+    captured: std::sync::Arc<std::sync::Mutex<Vec<ModelRequest>>>,
 }
 
 impl SequencedMock {
     pub fn new(scripts: Vec<Vec<ScriptStep>>) -> Self {
         Self {
             scripts: std::sync::Mutex::new(scripts.into_iter().collect()),
+            captured: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// 共享的捕获句柄：按调用顺序存放每一轮的请求。
+    pub fn captures(&self) -> std::sync::Arc<std::sync::Mutex<Vec<ModelRequest>>> {
+        std::sync::Arc::clone(&self.captured)
     }
 }
 
@@ -148,9 +158,10 @@ impl Provider for SequencedMock {
 
     async fn stream_chat(
         &self,
-        _req: ModelRequest,
+        req: ModelRequest,
         cancel: CancellationToken,
     ) -> LlmResult<BoxStream<'static, LlmResult<Delta>>> {
+        self.captured.lock().unwrap().push(req);
         // 取下一个脚本；用尽则返回一个直接结束的脚本。
         let steps = self
             .scripts

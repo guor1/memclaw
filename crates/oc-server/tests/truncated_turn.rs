@@ -161,7 +161,71 @@ async fn reasoning_only_truncation_still_continues() {
     );
 }
 
-/// 续写成功后，几段残句在库里必须合成**一条**完整回复。
+/// 工具调用参数写到一半被截断，续写指令必须换成「拆小重做」。
+///
+/// 这是真机上 PPT 任务的真实形状：模型把整个 Python 脚本当作 exec 的
+/// arguments 流式吐出，75 秒后撞上限，JSON 断在半路。残缺参数是非法 JSON、
+/// 进不了历史，模型看不到自己刚写了什么，「接着写」对它没有意义——它只会
+/// 原样重写，在同一处再被砍。真机上连续三轮就是这么废掉的。
+#[tokio::test]
+async fn tool_arg_truncation_tells_model_to_split_work() {
+    let (tx, mut rx) = broadcast::channel(512);
+    // 第一轮：吐一段超长 exec 参数后被截断；第二轮：改用小步骤，正常收尾。
+    let scripts = vec![
+        vec![
+            ScriptStep {
+                delay: Duration::ZERO,
+                delta: Delta::Text("我来写脚本生成 PPT。".into()),
+            },
+            ScriptStep {
+                delay: Duration::ZERO,
+                delta: Delta::ToolCall(oc_llm::types::ToolCallDelta {
+                    call_id: "call-huge".into(),
+                    name: Some("exec".into()),
+                    // 半截 JSON：真机上就是这样断的。
+                    args_chunk: "{\"command\": \"python3 -c \\\"from pptx import".into(),
+                }),
+            },
+            ScriptStep { delay: Duration::ZERO, delta: Delta::Done(FinishReason::Length) },
+        ],
+        text_step("我改成分步写文件。"),
+    ];
+    let provider = Arc::new(SequencedMock::new(scripts));
+    let captures = provider.captures();
+    let sid = oc_proto::SessionId::main();
+    let handle = session::spawn(
+        sid.clone(),
+        test_cfg(),
+        provider,
+        tx,
+        oc_store::Store::open_memory().unwrap(),
+        oc_server::diag::DiagRegistry::new().for_session(&sid),
+    );
+    handle
+        .submit("生成一份大话西游人物介绍PPT".into(), handle.broadcast_sink())
+        .await
+        .expect("run");
+    collect_until_terminal(&mut rx, Duration::from_secs(5)).await;
+
+    // 第二次请求里应带「拆小重做」的指令，而不是「接着写完」。
+    let reqs = captures.lock().unwrap();
+    let second = reqs.get(1).expect("应有续写请求");
+    let nudge = second
+        .messages
+        .last()
+        .expect("续写请求末尾应是指令");
+    assert!(
+        nudge.content.contains("拆小") || nudge.content.contains("分多次"),
+        "工具参数截断应指导拆小重做，实际：{}",
+        nudge.content
+    );
+    assert!(
+        !nudge.content.contains("紧接着截断处继续写完"),
+        "不该让模型「接着写」——残缺参数它根本看不到：{}",
+        nudge.content
+    );
+}
+
 ///
 /// 分成几条落库的话，重放时就是几段各自读不通的碎片，模型照着学，
 /// 下一轮接着说半句。
