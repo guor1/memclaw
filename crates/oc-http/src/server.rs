@@ -326,6 +326,7 @@ fn error_code(kind: oc_proto::RunErrorKind) -> &'static str {
         K::Panicked => "internal_error",
         K::LoopDetected => "loop_detected",
         K::Timeout => "timeout",
+        K::Truncated => "truncated",
     }
 }
 

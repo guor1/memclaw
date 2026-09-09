@@ -92,6 +92,11 @@ pub enum RunErrorKind {
     Panicked,
     LoopDetected,
     Timeout,
+    /// 模型输出被 max_tokens 截断，且续写次数用尽仍未产出完整回答。
+    ///
+    /// 与 `Failed` 分开：这不是模型或工具出错，是输出预算不够——用户的处置动作
+    /// 不同（调大 `max_output_tokens`，或换个不把预算烧在 reasoning 上的模型）。
+    Truncated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

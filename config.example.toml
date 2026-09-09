@@ -20,6 +20,14 @@ base_url = "https://api.deepseek.com"     # DeepSeek 端点
 # 上下文窗口(token)。省略则按 model 名查内置默认表(deepseek=65536)。
 # 压缩预算据此派生(budget = window − 16384 预留，保底 8000)。
 # context_window = 65536
+# 单轮「输出」上限(token)，即请求体的 max_tokens。与 context_window（输入侧）
+# 是两回事。省略 = 不发该字段，由服务端挑默认值。
+#
+# thinking / reasoning 类模型建议显式调大：推理内容也算在这个预算里，服务端
+# 默认值常常只够一段普通回复，模型把预算烧在推理上就会被硬截断——表现为
+# 「说了半句话就结束、该调的工具一个没调」。截断时日志会打 reason=Length，
+# 界面上报 truncated 错误。
+# max_output_tokens = 16384
 # API key 三选一：
 #   { env = "DEEPSEEK_API_KEY" }  从环境变量读（推荐）
 #   { file = "C:\\Users\\你\\.oc\\deepseek.key" }  从文件读

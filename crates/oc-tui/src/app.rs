@@ -45,6 +45,11 @@ pub struct App {
     pending_input: Option<oc_proto::InputId>,
     /// 最近一次 chat.send 分配的 run_id（用于 /stop）。
     active_run: Option<RunId>,
+    /// `msgs` 末尾那条助手消息所属的 run。
+    ///
+    /// 流式增量据此判断是追加还是新起一条——排队的多轮会连续吐回复，
+    /// 中间没有别的消息类型分隔，只看 `who` 会把它们拼成一行。
+    last_assistant_run: Option<RunId>,
     /// 当前活跃会话（chat.send 归属；事件按此过滤显示）。
     current_session: SessionId,
     /// 上下文用量提示（已用/窗口），随 Usage 事件更新，显示在状态栏。
@@ -100,6 +105,7 @@ impl App {
             pending_approval: None,
             pending_input: None,
             active_run: None,
+            last_assistant_run: None,
             current_session: SessionId::main(),
             usage_hint: None,
             scroll_back: 0,
@@ -503,14 +509,23 @@ impl App {
                     self.status = format!("错误: {message}");
                 }
             },
-            Event::Assistant { delta, .. } => {
-                // 流式增量：追加到最后一条 assistant 消息，或新建。
-                if let Some(last) = self.msgs.last_mut() {
-                    if last.who == "助手" {
+            Event::Assistant { delta, run_id, .. } => {
+                // 流式增量：只追加到**同一个 run** 的最后一条助手消息，否则新起一条。
+                //
+                // 只判 `who == "助手"` 会把不同 run 的回复拼成一段读不通的话：
+                // 排队的几轮依次起步，之间没有别的消息类型插进 msgs，于是三条
+                // 回复首尾相接挤在一行里（真机上「…生成这份 PPT。OLD你好！…」）。
+                let same_run = self
+                    .msgs
+                    .last()
+                    .is_some_and(|m| m.who == "助手" && self.last_assistant_run.as_ref() == Some(&run_id));
+                if same_run {
+                    if let Some(last) = self.msgs.last_mut() {
                         last.text.push_str(&delta);
-                        return;
                     }
+                    return;
                 }
+                self.last_assistant_run = Some(run_id);
                 self.msgs.push(Msg { who: "助手", text: delta });
             }
             Event::Proactive { text, .. } => {

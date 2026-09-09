@@ -84,9 +84,15 @@ impl OpenAiProvider {
             "stream": true,
             // 流式返回 token 用量（末尾附一个带 usage 的 chunk）。DeepSeek/OpenAI 支持。
             "stream_options": { "include_usage": true },
-            "max_tokens": req.max_tokens,
-            "temperature": req.temperature,
         });
+        // 未配置就整个键不发。曾经这里恒发 `"max_tokens": null`——多数 OpenAI 兼容
+        // 端点容忍，但有的严格校验类型，且 null 与缺键在个别实现上默认值不同。
+        if let Some(mt) = req.max_tokens {
+            body["max_tokens"] = json!(mt);
+        }
+        if let Some(t) = req.temperature {
+            body["temperature"] = json!(t);
+        }
         // 关键：把可用工具告知模型，否则模型只能把工具语法当纯文本吐出。
         if !req.tools.is_empty() {
             body["tools"] = json!(req
@@ -239,7 +245,14 @@ fn parse_chunk(payload: &str) -> Vec<Delta> {
             done = Some(Delta::Done(match reason {
                 "tool_calls" => FinishReason::ToolUse,
                 "length" => FinishReason::Length,
-                _ => FinishReason::Stop,
+                "stop" => FinishReason::Stop,
+                // 归成 Stop 是"当它说完了"，代价是任何**新的**非正常结束原因
+                // （content_filter、各家自定义值）都会静默变成一次成功的短回复。
+                // 兜底保留，但留个日志——否则查起来只能靠猜。
+                other => {
+                    tracing::warn!(finish_reason = other, "未知 finish_reason，按 Stop 处理");
+                    FinishReason::Stop
+                }
             }));
         }
     }

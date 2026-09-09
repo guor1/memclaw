@@ -156,6 +156,7 @@ pub fn event_to_sse(ev: &Event, state: &mut SseState) -> Option<(String, bool)> 
                             oc_proto::RunErrorKind::Aborted => "cancelled",
                             oc_proto::RunErrorKind::LoopDetected => "loop_detected",
                             oc_proto::RunErrorKind::Timeout => "timeout",
+                            oc_proto::RunErrorKind::Truncated => "truncated",
                             _ => "internal_error",
                         }
                         .into(),

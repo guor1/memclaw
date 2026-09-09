@@ -48,6 +48,8 @@ pub struct SessionConfig {
     pub trigger_max_per_turn: usize,
     /// 模型上下文窗口（token），随 Usage 事件推给 client 显示。
     pub context_window: u32,
+    /// 单轮输出上限（token）→ 请求体 `max_tokens`。`None` = 不发，服务端定。
+    pub max_output_tokens: Option<u32>,
     /// standing intent 的 anti-nagging 参数（设计 §12.5）。
     pub intent_defaults: IntentDefaults,
     /// `~/.oc/soul/` 目录（SOUL/USER/MEMORY.md 所在）。
@@ -506,6 +508,7 @@ fn start_run(
             ..Default::default()
         },
         context_window: cfg.context_window,
+        max_output_tokens: cfg.max_output_tokens,
         default_tz: cfg.default_tz.clone(),
         diag: diag.clone(),
     };

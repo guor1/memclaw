@@ -68,6 +68,16 @@ pub struct ModelConfig {
     #[garde(skip)]
     #[serde(default)]
     pub context_window: Option<u32>,
+    /// 单轮**输出**上限（token），即请求体里的 `max_tokens`。
+    ///
+    /// 与 `context_window`（输入侧预算）是两回事，别混：这一项管模型一轮能吐多长。
+    /// `None` = 不发该字段，由服务端挑默认值。
+    ///
+    /// thinking 类模型要留意：reasoning 也算在这个预算里。服务端默认值往往只够
+    /// 一段普通回复，模型把预算烧在推理上就会被硬截断，一个工具都调不出来。
+    #[garde(skip)]
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
 }
 
 /// 保守默认上下文窗口（内置表与手填都缺时兜底）。
@@ -262,6 +272,7 @@ impl Config {
                 api_key: SecretRef::Env("ANTHROPIC_API_KEY".to_string()),
                 base_url: None,
                 context_window: None,
+                max_output_tokens: None,
             }],
             memory: MemoryConfig {
                 vec: true,

@@ -55,6 +55,7 @@ pub fn test_cfg() -> SessionConfig {
         soul_dir: None,
         default_tz: "UTC".into(),
         context_window: 65536,
+        max_output_tokens: None,
     }
 }
 
