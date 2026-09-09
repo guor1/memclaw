@@ -1,4 +1,4 @@
-name: Build Ubuntu Release
+name: Build Release (Ubuntu + macOS)
 
 on:
   push:
@@ -167,6 +167,169 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: dist/oc-ubuntu.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-macos:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-13 = Intel x86_64，macos-14 = Apple Silicon arm64。两个都打，
+        # 覆盖新老 Mac Mini；成本几乎为零。
+        os: [macos-13, macos-14]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90
+
+      # 无需装依赖：rusqlite 用 bundled（Xcode 自带 clang 编译），reqwest 走
+      # rustls（不碰 OpenSSL）。这是 macOS 相比 Ubuntu 更省的一步。
+
+      - name: Build release
+        run: cargo build --release --bin oc
+
+      - name: Package
+        run: |
+          ARCH=$(uname -m)   # x86_64 或 arm64
+          mkdir -p "dist/oc-macos-$ARCH"
+          cp target/release/oc "dist/oc-macos-$ARCH/"
+          cp config.example.toml "dist/oc-macos-$ARCH/"
+
+          cat > "dist/oc-macos-$ARCH/INSTALL.txt" << 'EOF'
+          # oc macOS 安装说明
+
+          ## 0. 运行时依赖
+          # 无。SQLite 已静态编译进二进制，无需 brew install。
+
+          ## 1. 安装二进制
+          sudo install -m755 oc /usr/local/bin/oc
+
+          ## 2. 配置
+          mkdir -p ~/.oc
+          cp config.example.toml ~/.oc/config.toml
+          # macOS 必须改成 unix（示例配置里默认是 Windows 的 pipe）：
+          sed -i '' 's/transport = "pipe"/transport = "unix"/' ~/.oc/config.toml
+          # 注意 macOS 的 sed 是 BSD 版，-i 后面要跟空串 ''；GNU sed 则不需要。
+
+          ## 3. API Key（走环境变量，不要写进配置文件）
+          export DEEPSEEK_API_KEY=sk-xxxx      # 或 ANTHROPIC_API_KEY
+
+          ## 4. 验证
+          oc doctor                # 建库 / 迁移 / 配置校验
+
+          ## 5. 命令一览（注意：没有 `oc daemon start`，也没有 `oc tui`）
+          oc serve                 # 启动常驻进程（前台阻塞，Ctrl-C 停止）
+          oc                       # 不带子命令 = 连上 daemon 进 TUI 对话
+          oc http --port 8080      # OpenAI Responses API 兼容网关
+          oc status / oc sessions / oc debug --watch
+          oc cron add / list / rm  # 定时任务
+          oc memory search         # 记忆检索
+
+          ## 6. 后台常驻（launchd）
+          # 把下面内容存到 ~/Library/LaunchAgents/com.oc.daemon.plist：
+          #   <?xml version="1.0" encoding="UTF-8"?>
+          #   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          #   <plist version="1.0"><dict>
+          #     <key>Label</key><string>com.oc.daemon</string>
+          #     <key>ProgramArguments</key><array>
+          #       <string>/usr/local/bin/oc</string><string>serve</string>
+          #     </array>
+          #     <key>EnvironmentVariables</key><dict>
+          #       <key>DEEPSEEK_API_KEY</key><string>sk-xxxx</string>
+          #     </dict>
+          #     <key>RunAtLoad</key><true/>
+          #     <key>KeepAlive</key><true/>
+          #   </dict></plist>
+          # 然后：
+          #   launchctl load ~/Library/LaunchAgents/com.oc.daemon.plist
+          #   launchctl start com.oc.daemon
+
+          # agent 能读写的范围是 ~/.oc/workspace + ~/.oc，与启动目录无关。
+          # 要换位置就换 OC_HOME。`oc doctor` 会打印实际生效的工作区。
+
+          ## 7. 无人值守注意事项（cron / oc http）
+          # 这些场景没有 TUI 来响应审批弹窗。请确认 ~/.oc/config.toml 里：
+          #   [tools.approval]
+          #   mode = "prompt"      # 危险命令会请求审批
+          #   timeout_secs = 120   # 无人回执时超时按拒绝处理，务必保持非 0
+          # 若设为 0（不超时），无人值守下该轮会一直占着会话车道。
+
+          ## 8. oc http 的暴露边界（重要）
+          # 该端点仅监听 127.0.0.1 且**没有任何鉴权**，等同于对 daemon 的完全
+          # 访问权（可经 exec 工具起 shell）。需要远程访问时，必须在前面放一个
+          # 带认证的反向代理（Nginx/Caddy），不要直接把端口暴露到网络。
+
+          ## 9. Gatekeeper（首次运行提示）
+          # 从 GitHub Release 下载的未签名二进制会带 com.apple.quarantine 隔离，
+          # 首次启动若被拦，执行一次：
+          #   xattr -dr com.apple.quarantine /usr/local/bin/oc
+          # （arm64 二进制已由链接器打上 ad-hoc 签名，能直接跑。）
+
+          ## 环境变量
+          # OC_HOME            自定义配置根目录（默认 ~/.oc）
+          # DEEPSEEK_API_KEY   / ANTHROPIC_API_KEY
+          # RUST_LOG           日志级别，如 oc=info,oc_server=info
+
+          ## 日志
+          # daemon 同时落盘：~/.oc/logs/oc.log.YYYY-MM-DD（按天滚动）
+
+          ## 卸载
+          # sudo rm /usr/local/bin/oc && rm -rf ~/.oc
+          EOF
+
+          cat > "dist/oc-macos-$ARCH/install.sh" << 'EOF'
+          #!/bin/bash
+          set -e
+          echo "=== oc 快速安装 ==="
+          sudo install -m755 oc /usr/local/bin/oc
+          mkdir -p ~/.oc
+          if [ ! -f ~/.oc/config.toml ]; then
+              cp config.example.toml ~/.oc/config.toml
+              sed -i '' 's/transport = "pipe"/transport = "unix"/' ~/.oc/config.toml
+              echo "  已生成 ~/.oc/config.toml（transport=unix）"
+          else
+              echo "  已存在 ~/.oc/config.toml，跳过覆盖"
+          fi
+          echo ""
+          echo "✅ 安装完成。下一步："
+          echo "  1. export DEEPSEEK_API_KEY=sk-xxxx"
+          echo "  2. oc doctor        # 验证配置"
+          echo "  3. oc serve         # 启动常驻进程（另开终端跑 oc 进 TUI）"
+          echo ""
+          echo "完整说明见 INSTALL.txt"
+          EOF
+          chmod +x "dist/oc-macos-$ARCH/install.sh"
+
+          cat > "dist/oc-macos-$ARCH/VERSION.txt" << EOF
+          构建时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          Git 提交: ${GITHUB_SHA}
+          Git 引用: ${GITHUB_REF_NAME}
+          目标平台: $ARCH-apple-darwin
+          EOF
+
+          cd dist
+          tar -czf "oc-macos-$ARCH.tar.gz" "oc-macos-$ARCH"
+          echo "--- 产物内容 ---"
+          tar -tzf "oc-macos-$ARCH.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oc-macos-${{ matrix.os }}
+          path: dist/oc-macos-*.tar.gz
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/oc-macos-*.tar.gz
           draft: false
           prerelease: false
         env:

@@ -19,7 +19,7 @@ jobs:
       # 一个平台挂了也要看另一个的结果——跨平台差异正是这个 matrix 的目的。
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -33,8 +33,8 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
-      # 传输层双平台实跑：Windows 走命名管道、Linux 走 unix socket。
-      # 计划里记的「unix socket 仅编译未在 Linux 实跑」由此闭合。
+      # 传输层三平台实跑：Windows 走命名管道、Linux/macOS 走 unix socket。
+      # macOS 无需装依赖（SQLite bundled + reqwest rustls）；只有 Linux 要 libsqlite3-dev。
       - name: Install Linux deps
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
