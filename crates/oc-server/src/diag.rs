@@ -75,31 +75,17 @@ impl DiagRegistry {
         self.inner.remove(session);
     }
 
+    /// 采样单个会话为对外视图；该会话尚无 actor（或已被淘汰）时返回 `None`。
+    ///
+    /// `status` 只关心自己那一格，不必为此扫全表。
+    pub fn snapshot_session(&self, session: &SessionId) -> Option<SessionDiagView> {
+        self.inner.get(session).map(|e| view(e.key(), e.value()))
+    }
+
     /// 采样全部会话为对外视图。
     pub fn snapshot_sessions(&self) -> Vec<SessionDiagView> {
-        let mut out: Vec<SessionDiagView> = self
-            .inner
-            .iter()
-            .map(|e| {
-                let s = e.value();
-                SessionDiagView {
-                    session_id: e.key().clone(),
-                    queue_depth: s.queue_depth,
-                    active: s.active.as_ref().map(|r| RunSnapshot {
-                        run_id: oc_proto::RunId::new(r.run_id.clone()),
-                        phase: r.phase,
-                        started_at: r.started_at,
-                        last_delta_at: r.last_delta_at,
-                        tool_rounds: r.tool_rounds,
-                        acc_chars: r.acc_chars,
-                    }),
-                    lane_busy_since: s.lane_busy_since,
-                    total_runs: s.total_runs,
-                    last_finish_reason: s.last_finish_reason.clone(),
-                    last_error: s.last_error.clone(),
-                }
-            })
-            .collect();
+        let mut out: Vec<SessionDiagView> =
+            self.inner.iter().map(|e| view(e.key(), e.value())).collect();
         // 稳定排序：main 优先，其余按 id。
         out.sort_by(|a, b| {
             let ka = (a.session_id != SessionId::main(), a.session_id.as_str().to_string());
@@ -107,6 +93,26 @@ impl DiagRegistry {
             ka.cmp(&kb)
         });
         out
+    }
+}
+
+/// 内部状态 → 对外视图。单会话与全表两条采样路径共用。
+fn view(id: &SessionId, s: &DiagState) -> SessionDiagView {
+    SessionDiagView {
+        session_id: id.clone(),
+        queue_depth: s.queue_depth,
+        active: s.active.as_ref().map(|r| RunSnapshot {
+            run_id: oc_proto::RunId::new(r.run_id.clone()),
+            phase: r.phase,
+            started_at: r.started_at,
+            last_delta_at: r.last_delta_at,
+            tool_rounds: r.tool_rounds,
+            acc_chars: r.acc_chars,
+        }),
+        lane_busy_since: s.lane_busy_since,
+        total_runs: s.total_runs,
+        last_finish_reason: s.last_finish_reason.clone(),
+        last_error: s.last_error.clone(),
     }
 }
 

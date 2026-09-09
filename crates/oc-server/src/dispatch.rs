@@ -504,10 +504,16 @@ fn now_secs() -> i64 {
 
 fn snapshot(state: &Arc<ServerState>, session: &SessionId) -> Snapshot {
     let rt = state.runtime();
+    // 活跃 run 与排队深度的活数据源是诊断注册表——session actor 在每个状态迁移点
+    // （起步 / 入队 / 出队 / 完成）更新它。会话还没起 actor（或已被空闲淘汰）时
+    // 没有格位，按「空闲、无排队」处理。
+    let diag = state.diag().snapshot_session(session);
     Snapshot {
-        active_run: None,
-        queued_turns: 0,
-        background_tasks: 0,
+        active_run: diag.as_ref().and_then(|d| d.active.as_ref().map(|r| r.run_id.clone())),
+        queued_turns: diag.as_ref().map(|d| d.queue_depth).unwrap_or(0) as u32,
+        // 台账按任务键组织、不记来源会话，故这是**全局**未结束数，与
+        // `Event::Task` 一律归属 main 的现状一致。
+        background_tasks: state.ledger().unfinished_count() as u32,
         session: session.clone(),
         context_window: rt.context_window,
         last_input_tokens: state.last_input_tokens(session),

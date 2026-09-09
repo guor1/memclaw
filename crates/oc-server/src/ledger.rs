@@ -91,6 +91,17 @@ impl TaskLedger {
             .collect()
     }
 
+    /// 未结束（排队中 / 执行中）的任务数，供 `status` 展示。
+    ///
+    /// 不能用 `tasks.len()` 代替：台账完成后不删条目（`task.list` 要能看到结果与
+    /// 退出码），拿总数当「在跑几个」会把这个 daemon 生命周期里跑过的全算进来。
+    pub fn unfinished_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|e| matches!(e.state, TaskState::Queued | TaskState::Running))
+            .count()
+    }
+
     /// 取消一个任务。
     pub fn cancel(&self, id: &TaskId) -> bool {
         if let Some(e) = self.tasks.get(id) {
