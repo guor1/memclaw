@@ -6,6 +6,11 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# 建 Release 要写仓库内容。不显式声明的话，GITHUB_TOKEN 是只读的，
+# softprops/action-gh-release 会一路 403 重试到 "Too many retries"。
+permissions:
+  contents: write
+
 jobs:
   build-ubuntu:
     runs-on: ubuntu-latest
@@ -164,7 +169,7 @@ jobs:
 
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/oc-ubuntu.tar.gz
           draft: false
@@ -327,7 +332,7 @@ jobs:
 
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/oc-macos-*.tar.gz
           draft: false
