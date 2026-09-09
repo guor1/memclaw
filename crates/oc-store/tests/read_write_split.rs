@@ -30,14 +30,9 @@ async fn seed(store: &Store, session: &str, n: usize) {
     let w = store.writer();
     w.ensure_session(session.into(), "main".into()).await.unwrap();
     for i in 0..n {
-        w.append_entry(NewEntry {
-            session_id: session.into(),
-            role: Role::User,
-            content: format!("第 {i} 条"),
-            tokens_est: 2,
-        })
-        .await
-        .unwrap();
+        w.append_entry(NewEntry::text(session, Role::User, format!("第 {i} 条"), 2))
+            .await
+            .unwrap();
     }
 }
 
@@ -64,12 +59,7 @@ async fn read_is_not_queued_behind_pending_writes() {
         let s = store.clone();
         pending.push(tokio::spawn(async move {
             s.writer()
-                .append_entry(NewEntry {
-                    session_id: "main".into(),
-                    role: Role::User,
-                    content: format!("积压 {i}"),
-                    tokens_est: 2,
-                })
+                .append_entry(NewEntry::text("main", Role::User, format!("积压 {i}"), 2))
                 .await
         }));
     }
@@ -112,12 +102,7 @@ async fn concurrent_reads_and_write_all_succeed() {
     let s = store.clone();
     let write = tokio::spawn(async move {
         s.writer()
-            .append_entry(NewEntry {
-                session_id: "main".into(),
-                role: Role::Assistant,
-                content: "并发写".into(),
-                tokens_est: 2,
-            })
+            .append_entry(NewEntry::text("main", Role::Assistant, "并发写", 2))
             .await
     });
 

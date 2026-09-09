@@ -430,12 +430,12 @@ async fn begin_run(
     let est = estimate_tokens(&turn.text);
     if let Err(e) = store
         .writer()
-        .append_entry(oc_store::NewEntry {
-            session_id: sid.clone(),
-            role: oc_store::Role::User,
-            content: turn.text.clone(),
-            tokens_est: est,
-        })
+        .append_entry(oc_store::NewEntry::text(
+            sid.clone(),
+            oc_store::Role::User,
+            turn.text.clone(),
+            est,
+        ))
         .await
     {
         warn!(error = %e, "落库用户消息失败");
@@ -577,32 +577,108 @@ async fn load_history(store: &oc_store::Store, cfg: &SessionConfig, session_id: 
             break;
         }
         budget -= cost;
-        // 历史重放降级：entry 表只存了扁平 role+content，没有工具调用的关联
-        // id。原生 `tool` 消息要求前面有带匹配 tool_calls 的 assistant，且自身
-        // 需 tool_call_id——这些库里都没有。因此把历史里的工具结果降级为普通
-        // 文本消息，保证重放序列对 provider 合法。实时那一轮的原生工具调用不走
-        // 这里（见 run.rs），不受影响。
-        let (role, content) = match e.role {
-            oc_store::Role::Assistant => (oc_llm::MsgRole::Assistant, e.content.clone()),
-            oc_store::Role::System => (oc_llm::MsgRole::System, e.content.clone()),
-            oc_store::Role::User => (oc_llm::MsgRole::User, e.content.clone()),
-            // 工具结果降级为 user 文本，避免产出缺 tool_call_id 的裸 tool 消息。
-            oc_store::Role::Tool => (
-                oc_llm::MsgRole::User,
-                format!("【历史工具结果】\n{}", e.content),
-            ),
-        };
-        kept.push(oc_llm::Message {
-            role,
-            content,
-            tool_call_id: None,
-            tool_calls: vec![],
-            // 历史重放不带 reasoning（thinking 内容不落库，仅实时轮回喂）。
-            reasoning: None,
-        });
+        kept.push(entry_to_message(e));
     }
     kept.reverse(); // 变回正序
+    // 预算截断可能正好切在 assistant(tool_calls) 与其结果之间，留下孤儿。
+    drop_orphan_tool_msgs(&mut kept);
     kept
+}
+
+/// 把一条库记录还原成模型消息。
+///
+/// **工具结构优先，降级兜底**（P2-4）：库里存了 `tool_calls` / `tool_call_id` 时
+/// 还原成原生结构，模型才能在自己的历史里看到「我发起过工具调用」的样例。缺列的
+/// 老记录（该列引入之前落的）仍走降级：工具结果变成带前缀的 user 文本——因为
+/// 原生 `tool` 消息必须有 `tool_call_id` 且前面有匹配的 assistant，硬造会让
+/// provider 400。
+///
+/// 降级路径以前是**无条件**的，那正是模型学会「宣布完就等人贴结果」的原因。
+fn entry_to_message(e: &oc_store::Entry) -> oc_llm::Message {
+    let plain = |role| oc_llm::Message {
+        role,
+        content: e.content.clone(),
+        tool_call_id: None,
+        tool_calls: vec![],
+        // 历史重放不带 reasoning（thinking 内容不落库，仅实时轮回喂）。
+        reasoning: None,
+    };
+    match e.role {
+        oc_store::Role::System => plain(oc_llm::MsgRole::System),
+        oc_store::Role::User => plain(oc_llm::MsgRole::User),
+        oc_store::Role::Assistant => {
+            // 反序列化失败（脏数据/手改库）按无工具调用处理，不让整轮历史丢失。
+            let specs: Vec<oc_llm::ToolCallSpec> = e
+                .tool_calls
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            oc_llm::Message {
+                tool_calls: specs,
+                ..plain(oc_llm::MsgRole::Assistant)
+            }
+        }
+        oc_store::Role::Tool => match &e.tool_call_id {
+            Some(id) => oc_llm::Message {
+                tool_call_id: Some(id.clone()),
+                ..plain(oc_llm::MsgRole::Tool)
+            },
+            // 兜底降级：无 id 的工具结果只能当普通文本重放。
+            None => oc_llm::Message {
+                content: format!("【历史工具结果】\n{}", e.content),
+                ..plain(oc_llm::MsgRole::User)
+            },
+        },
+    }
+}
+
+/// 清理配对断裂的工具消息：`assistant(tool_calls)` 与 `tool(result)` 是协议上的
+/// 原子对，只剩一半就会让 provider 400。
+///
+/// 两种断法都要管：预算截断从中间切开（留下孤儿 tool 打头），或 run 在落了调用、
+/// 还没落结果时崩了（留下尾部悬空的 dispatch）。孤儿 tool 整条删；悬空 dispatch
+/// 保留文本、只摘掉 `tool_calls`（那句话本身是模型说过的，删了反而丢上下文）。
+fn drop_orphan_tool_msgs(msgs: &mut Vec<oc_llm::Message>) {
+    // 一条 tool 结果合法 ⟺ 前一条是带匹配 id 的 assistant dispatch。
+    let mut keep: Vec<bool> = vec![true; msgs.len()];
+    for i in 0..msgs.len() {
+        if msgs[i].role != oc_llm::MsgRole::Tool || msgs[i].tool_call_id.is_none() {
+            continue;
+        }
+        let id = msgs[i].tool_call_id.as_deref().unwrap();
+        let paired = i > 0
+            && keep[i - 1]
+            && msgs[i - 1].role == oc_llm::MsgRole::Assistant
+            && msgs[i - 1].tool_calls.iter().any(|c| c.id == id);
+        keep[i] = paired;
+    }
+    let mut i = 0;
+    msgs.retain(|_| {
+        let k = keep[i];
+        i += 1;
+        k
+    });
+
+    // 反向：dispatch 后面没跟上匹配的结果 → 摘掉 tool_calls。
+    for i in 0..msgs.len() {
+        if msgs[i].tool_calls.is_empty() {
+            continue;
+        }
+        let answered = msgs.get(i + 1).is_some_and(|n| {
+            n.role == oc_llm::MsgRole::Tool
+                && n.tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| msgs[i].tool_calls.iter().any(|c| c.id == id))
+        });
+        if !answered {
+            msgs[i].tool_calls.clear();
+        }
+    }
+    // 摘空 tool_calls 后 content 也空的 assistant 是纯噪音（且部分 provider 拒收
+    // content 与 tool_calls 双空的消息），一并去掉。
+    msgs.retain(|m| {
+        m.role != oc_llm::MsgRole::Assistant || !m.content.is_empty() || !m.tool_calls.is_empty()
+    });
 }
 
 /// 手动/自动摘要压缩：把 reset 之后、除最近 keep_recent 条以外的历史总结成一条

@@ -544,6 +544,11 @@ pub fn extract_episode_candidates(entries: &[ConversationEntry]) -> Vec<EpisodeC
                 }
                 pending_user = Some(entry);
             }
+            // 空文本的 assistant 是纯工具调用轮（模型一个字不说直接调工具，P2-4 起
+            // 这种轮次也会落库，因为历史重放需要那条 tool_calls）。它不是「人际
+            // 情节」的一半：跳过且**保持 pending_user 挂起**，让待配对的提问去等
+            // 工具轮结束后真正回答它的那条 assistant。取走它只会配出一条空回答。
+            "assistant" if entry.content.trim().is_empty() => {}
             "assistant" => {
                 match pending_user.take() {
                     Some(u) => {
@@ -674,6 +679,21 @@ mod episode_tests {
         assert!(cands[0].content.contains("怎么安装"));
         assert!(cands[0].content.contains("rustup"));
         assert!(cands[0].importance > 0.5, "成对交互重要度应较高");
+    }
+
+    /// 纯工具调用轮（空文本 assistant，P2-4 起会落库）不该抢走待配对的提问，
+    /// 否则配出「问题 + 空回答」，而真正的回答反倒成了无配对的孤立条目。
+    #[test]
+    fn empty_assistant_tool_dispatch_does_not_consume_pending_user() {
+        let entries = vec![
+            user("帮我看看这个项目的依赖装全了没？"),
+            asst(""), // 一个字不说直接调工具
+            tool("Successfully installed 42 packages"),
+            asst("依赖都装全了，一共 42 个包，没有缺失。"),
+        ];
+        let cands = extract_episode_candidates(&entries);
+        assert_eq!(cands.len(), 1, "应只出一条完整情节: {cands:?}");
+        assert!(cands[0].content.contains("依赖都装全了"), "配的应是真正的回答");
     }
 
     #[test]

@@ -21,12 +21,12 @@ async fn compact_summarizes_old_history() {
     // 预置 10 条历史（足够超过 keep_recent）。
     for i in 0..10 {
         let role = if i % 2 == 0 { oc_store::Role::User } else { oc_store::Role::Assistant };
-        w.append_entry(oc_store::NewEntry {
-            session_id: "main".into(),
+        w.append_entry(oc_store::NewEntry::text(
+            "main",
             role,
-            content: format!("历史消息 {i}"),
-            tokens_est: 5,
-        })
+            format!("历史消息 {i}"),
+            5,
+        ))
         .await
         .unwrap();
     }
@@ -62,14 +62,9 @@ async fn compact_short_history_notifies_instead_of_silent() {
     w.ensure_session("main".into(), "main".into()).await.unwrap();
     // 只放 2 条（不足 keep_recent+1），应跳过压缩但给反馈。
     for (role, text) in [(oc_store::Role::User, "hi"), (oc_store::Role::Assistant, "在")] {
-        w.append_entry(oc_store::NewEntry {
-            session_id: "main".into(),
-            role,
-            content: text.into(),
-            tokens_est: 1,
-        })
-        .await
-        .unwrap();
+        w.append_entry(oc_store::NewEntry::text("main", role, text, 1))
+            .await
+            .unwrap();
     }
 
     let provider = Arc::new(CapturingMock::new("不应被调用"));

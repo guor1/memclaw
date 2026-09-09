@@ -16,6 +16,13 @@ pub struct MsgMeta {
     pub tokens: i64,
     /// 是否为工具结果（剪枝优先级最高）。
     pub is_tool_result: bool,
+    /// 该条 assistant 是否发起了工具调用。
+    ///
+    /// `assistant(tool_calls)` 与紧随其后的 `tool(result)` 是协议上的原子对，
+    /// 拆开任一半都会让 provider 400，故丢弃时必须成对进出（见
+    /// [`plan_compaction`] 第 2 步）。本项目每轮恒定只有一个工具调用且结果紧跟
+    /// 其后入队，所以配对是位置相邻的，不必按 id 匹配。
+    pub is_tool_dispatch: bool,
 }
 
 /// 压缩计划：server 按此执行。
@@ -123,20 +130,51 @@ pub fn plan_compaction(metas: &[MsgMeta], cfg: &CompactCfg) -> CompactPlan {
     }
 
     // 第 2 步：仍超预算 → 丢弃最早消息。
+    //
+    // 工具对成对进出：丢 dispatch 就连带丢它后面的结果，丢结果就连带丢前面的
+    // dispatch。留下半个对子会让 provider 400。
     if projected > trigger {
-        for m in metas[..movable_end].iter() {
-            if projected <= trigger {
-                break;
-            }
-            // 已剪枝的按剪枝后大小计。
-            let effective = if plan.prune_tool_results.contains(&m.index) {
+        // 已剪枝的按剪枝后大小计。
+        let effective = |m: &MsgMeta| {
+            if plan.prune_tool_results.contains(&m.index) {
                 cfg.prune_tool_to_tokens
             } else {
                 m.tokens
+            }
+        };
+        for (i, m) in metas[..movable_end].iter().enumerate() {
+            if projected <= trigger {
+                break;
+            }
+            if plan.drop.contains(&m.index) {
+                continue; // 已作为配对的另一半被丢过
+            }
+
+            // 配对的另一半：dispatch 看后一条，结果看前一条。
+            let mate_pos = if m.is_tool_dispatch {
+                Some(i + 1).filter(|&j| metas.get(j).is_some_and(|n| n.is_tool_result))
+            } else if m.is_tool_result {
+                i.checked_sub(1).filter(|&j| metas[j].is_tool_dispatch)
+            } else {
+                None
             };
+
+            // 另一半落在 keep_recent 保护区里 → 整对都不动。keep_recent 是硬承诺，
+            // 不能为了腾预算把近期消息拽走；只丢这一半又会留下孤儿。
+            if mate_pos.is_some_and(|j| j >= movable_end) {
+                continue;
+            }
+
             plan.drop.push(m.index);
-            projected -= effective;
+            projected -= effective(m);
+            if let Some(mate) = mate_pos.map(|j| &metas[j]) {
+                if !plan.drop.contains(&mate.index) {
+                    plan.drop.push(mate.index);
+                    projected -= effective(mate);
+                }
+            }
         }
+        plan.drop.sort_unstable();
     }
 
     // 第 3 步：若启用摘要，把被丢弃的区间标记为待摘要（保留语义）。
@@ -154,7 +192,20 @@ mod tests {
     use super::*;
 
     fn meta(index: usize, tokens: i64, is_tool: bool) -> MsgMeta {
-        MsgMeta { index, tokens, is_tool_result: is_tool }
+        MsgMeta { index, tokens, is_tool_result: is_tool, is_tool_dispatch: false }
+    }
+
+    /// `assistant(tool_calls)` → `tool(result)` 相邻一对。
+    fn pair(dispatch_index: usize, dispatch_tokens: i64, result_tokens: i64) -> [MsgMeta; 2] {
+        [
+            MsgMeta {
+                index: dispatch_index,
+                tokens: dispatch_tokens,
+                is_tool_result: false,
+                is_tool_dispatch: true,
+            },
+            meta(dispatch_index + 1, result_tokens, true),
+        ]
     }
 
     #[test]
@@ -225,6 +276,56 @@ mod tests {
         // 小窗口：保底不低于 MIN_BUDGET_TOKENS。
         let c = CompactCfg::from_window(10_000, DEFAULT_RESERVE_TOKENS);
         assert_eq!(c.budget, MIN_BUDGET_TOKENS);
+    }
+
+    /// 工具对成对进出：丢了 dispatch 必须连带丢它的结果，反之亦然。
+    /// 留下半个对子（孤儿 tool，或指向不存在结果的 tool_calls）会让 provider 400。
+    #[test]
+    fn drops_tool_pairs_together() {
+        // [0]=usr, [1..2]=工具对, [3..4]=工具对, [5..9]=普通消息
+        let mut metas = vec![meta(0, 500, false)];
+        metas.extend(pair(1, 300, 4000));
+        metas.extend(pair(3, 300, 4000));
+        for i in 5..10 {
+            metas.push(meta(i, 500, false));
+        }
+        let cfg = CompactCfg {
+            budget: 2000,
+            trigger_ratio: 0.8,
+            prune_tool_to_tokens: 200,
+            keep_recent: 2,
+            enable_summary: false,
+        };
+        let plan = plan_compaction(&metas, &cfg);
+
+        for (dispatch, result) in [(1usize, 2usize), (3, 4)] {
+            assert_eq!(
+                plan.drop.contains(&dispatch),
+                plan.drop.contains(&result),
+                "工具对 ({dispatch},{result}) 必须成对进出，实际 drop={:?}",
+                plan.drop
+            );
+        }
+    }
+
+    /// 结果落在 keep_recent 保护区时，整对都不丢——只丢 dispatch 会留下孤儿，
+    /// 而把结果一起拽走就破了 keep_recent 的硬承诺。
+    #[test]
+    fn never_orphans_result_inside_keep_recent() {
+        // [0..3]=普通消息, [4]=dispatch, [5]=结果（落在 keep_recent=2 里）
+        let mut metas: Vec<MsgMeta> = (0..4).map(|i| meta(i, 3000, false)).collect();
+        metas.extend(pair(4, 300, 3000));
+        let cfg = CompactCfg {
+            budget: 1000,
+            trigger_ratio: 0.8,
+            prune_tool_to_tokens: 200,
+            keep_recent: 2,
+            enable_summary: false,
+        };
+        let plan = plan_compaction(&metas, &cfg);
+        assert!(!plan.drop.contains(&4), "dispatch 的结果在保护区，整对都不该动: {plan:?}");
+        assert!(!plan.drop.contains(&5), "keep_recent 内的消息不该被丢: {plan:?}");
+        assert!(!plan.drop.is_empty(), "前面的普通消息仍应被丢以腾预算");
     }
 
     #[test]

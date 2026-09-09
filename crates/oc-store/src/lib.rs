@@ -211,14 +211,7 @@ mod tests {
         w.ensure_session("main".into(), "main".into()).await.unwrap();
 
         for (role, text) in [(Role::User, "你好"), (Role::Assistant, "在的")] {
-            w.append_entry(NewEntry {
-                session_id: "main".into(),
-                role,
-                content: text.into(),
-                tokens_est: 2,
-            })
-            .await
-            .unwrap();
+            w.append_entry(NewEntry::text("main", role, text, 2)).await.unwrap();
         }
 
         let hist = w.load_transcript("main".into(), 100).await.unwrap();
@@ -230,6 +223,42 @@ mod tests {
         w.reset_session("main".into()).await.unwrap();
         let after = w.load_transcript("main".into(), 100).await.unwrap();
         assert!(after.is_empty(), "reset 后上下文应为空");
+    }
+
+    /// 工具调用结构可写可读（P2-4）。这两列缺了，重放就只能把工具结果降级成
+    /// user 文本，模型学会「宣布完就等人贴结果」。
+    #[tokio::test]
+    async fn entry_roundtrip_keeps_tool_structure() {
+        use crate::types::{NewEntry, Role};
+        let store = Store::open_memory().expect("open");
+        let w = store.writer();
+        w.ensure_session("main".into(), "main".into()).await.unwrap();
+
+        // 纯工具调用轮：content 为空，只有 tool_calls。
+        w.append_entry(NewEntry {
+            tool_calls: Some(r#"[{"id":"call_1","name":"sys","args":"{}"}]"#.into()),
+            ..NewEntry::text("main", Role::Assistant, "", 1)
+        })
+        .await
+        .unwrap();
+        w.append_entry(NewEntry {
+            tool_call_id: Some("call_1".into()),
+            ..NewEntry::text("main", Role::Tool, "输出", 1)
+        })
+        .await
+        .unwrap();
+        // 普通消息两列都该是 NULL。
+        w.append_entry(NewEntry::text("main", Role::Assistant, "干完了", 2))
+            .await
+            .unwrap();
+
+        let hist = w.load_transcript("main".into(), 100).await.unwrap();
+        assert_eq!(hist.len(), 3, "纯工具调用轮（空 content）也必须落库: {hist:?}");
+        assert!(hist[0].tool_calls.as_deref().unwrap().contains("call_1"));
+        assert_eq!(hist[0].tool_call_id, None);
+        assert_eq!(hist[1].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(hist[2].tool_calls, None, "普通消息不该有工具结构");
+        assert_eq!(hist[2].tool_call_id, None);
     }
 
     #[tokio::test]
@@ -247,14 +276,7 @@ mod tests {
             (Role::Assistant, "第二个回答"),
             (Role::User, "最近的问题"),
         ] {
-            w.append_entry(NewEntry {
-                session_id: "main".into(),
-                role,
-                content: text.into(),
-                tokens_est: 2,
-            })
-            .await
-            .unwrap();
+            w.append_entry(NewEntry::text("main", role, text, 2)).await.unwrap();
         }
 
         // 压缩前 4 条（seq 1..=4）成摘要，保留第 5 条。

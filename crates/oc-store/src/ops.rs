@@ -38,14 +38,17 @@ pub fn append_entry(conn: &Connection, e: &NewEntry) -> StoreResult<i64> {
         .unwrap_or(1);
 
     conn.execute(
-        "INSERT INTO entry(session_id, seq, role, content, tokens_est, created_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO entry(session_id, seq, role, content, tokens_est,
+                           tool_calls, tool_call_id, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             e.session_id,
             next_seq,
             e.role.as_str(),
             e.content,
             e.tokens_est,
+            e.tool_calls,
+            e.tool_call_id,
             now_millis()
         ],
     )?;
@@ -102,7 +105,8 @@ pub fn load_transcript(conn: &Connection, session_id: &str, max_entries: i64) ->
 
     // 取最近 max_entries 条（seq > reset_at），再正序返回。
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, seq, role, content, tokens_est, created_at
+        "SELECT id, session_id, seq, role, content, tokens_est,
+                tool_calls, tool_call_id, created_at
          FROM entry
          WHERE session_id = ?1 AND seq > ?2
          ORDER BY seq DESC
@@ -116,7 +120,9 @@ pub fn load_transcript(conn: &Connection, session_id: &str, max_entries: i64) ->
             role: Role::from_db_str(&r.get::<_, String>(3)?),
             content: r.get(4)?,
             tokens_est: r.get(5)?,
-            created_at: r.get(6)?,
+            tool_calls: r.get(6)?,
+            tool_call_id: r.get(7)?,
+            created_at: r.get(8)?,
         })
     })?;
     let mut out: Vec<Entry> = rows.collect::<Result<_, _>>()?;

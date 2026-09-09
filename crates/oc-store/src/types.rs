@@ -95,6 +95,28 @@ pub struct NewEntry {
     pub role: Role,
     pub content: String,
     pub tokens_est: i64,
+    /// assistant 发起的工具调用（`Vec<ToolCallSpec>` 的 JSON 数组文本）；
+    /// `None` = 该条没发起调用。见 [`NewEntry::tool_call_id`]。
+    pub tool_calls: Option<String>,
+    /// 该条工具结果关联的调用 id；`None` = 不是工具结果。
+    ///
+    /// 这两列一起让重放能还原原生工具结构（P2-4）：没有它们，`Role::Tool` 只能
+    /// 降级成 user 文本，历史里就永远不出现「assistant 发起调用」的样例。
+    pub tool_call_id: Option<String>,
+}
+
+impl NewEntry {
+    /// 纯文本记录（无工具结构）——绝大多数 user/assistant/system 条目走这里。
+    pub fn text(session_id: impl Into<String>, role: Role, content: impl Into<String>, tokens_est: i64) -> Self {
+        Self {
+            session_id: session_id.into(),
+            role,
+            content: content.into(),
+            tokens_est,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
 }
 
 /// 已存储的一条会话记录（session.list 用）。
@@ -116,6 +138,10 @@ pub struct Entry {
     pub role: Role,
     pub content: String,
     pub tokens_est: i64,
+    /// 见 [`NewEntry::tool_calls`]。
+    pub tool_calls: Option<String>,
+    /// 见 [`NewEntry::tool_call_id`]。
+    pub tool_call_id: Option<String>,
     pub created_at: i64,
 }
 

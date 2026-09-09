@@ -131,6 +131,12 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
         // 「等待未来某时刻」这条是 P1-5 真机缺陷的直接修法：模型原本会拿 `sys:now` +
         // `Start-Sleep` 在一次 run 里硬等到点，撞 loop detection 且提醒根本没设上。
         // 措辞刻意点明「不占用当前对话」，因为模型的错误前提是「必须自己等着才能提醒」。
+        //
+        // 末尾「宣布完要真的调用」是 P2-4 的纵深防御。真正的修法在历史重放（工具
+        // 调用结构不再被降级成 user 文本，见 session.rs），因为病根是 in-context
+        // learning：上下文里最一致的模式压倒提示词。正常情况下不需要这句，但同一个
+        // 模型（豆包）已有无视系统提示词、编造自身型号的前科（见 render_model_line），
+        // 它对上下文模式的依赖强于对指令的服从，加一句成本极低。
         prefix.push_str(
             "\n优先使用结构化工具完成任务：查看/切换目录用 sys（pwd/cd/now），\
              读写/检索文件用 file（read/write/list/stat/head/tail/grep/glob）。\
@@ -141,7 +147,9 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
              应当立刻告知用户已设好并结束本轮。绝不要用 shell 睡眠\
              （Start-Sleep / sleep / timeout / ping）或反复查时间来等待——\
              那会卡住整个对话且提醒不会生效。用户问起已设的提醒时用 op=list 查证，\
-             不要凭猜测答复。\n",
+             不要凭猜测答复。\n\
+             \n宣布要做某件事之后，必须在同一轮里真的发起工具调用，不要说完就停下\
+             等用户把结果贴回来——工具由你自己调用、结果会直接回到你手里。\n",
         );
     }
 

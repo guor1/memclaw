@@ -41,12 +41,12 @@ async fn long_history_gets_compacted_before_model() {
         } else {
             oc_store::Role::Assistant
         };
-        w.append_entry(oc_store::NewEntry {
-            session_id: "main".into(),
+        w.append_entry(oc_store::NewEntry::text(
+            "main",
             role,
-            content: format!("{big}#{i}"),
-            tokens_est: 100,
-        })
+            format!("{big}#{i}"),
+            100,
+        ))
         .await
         .unwrap();
     }

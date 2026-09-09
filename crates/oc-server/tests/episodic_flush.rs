@@ -28,20 +28,20 @@ fn cfg() -> SessionConfig {
 async fn seed_history(w: &oc_store::Writer, session: &str, pairs: usize) {
     w.ensure_session(session.into(), "main".into()).await.unwrap();
     for i in 0..pairs {
-        w.append_entry(oc_store::NewEntry {
-            session_id: session.into(),
-            role: oc_store::Role::User,
-            content: format!("第 {i} 个问题：这个项目的记忆分层是怎么设计的？"),
-            tokens_est: 12,
-        })
+        w.append_entry(oc_store::NewEntry::text(
+            session,
+            oc_store::Role::User,
+            format!("第 {i} 个问题：这个项目的记忆分层是怎么设计的？"),
+            12,
+        ))
         .await
         .unwrap();
-        w.append_entry(oc_store::NewEntry {
-            session_id: session.into(),
-            role: oc_store::Role::Assistant,
-            content: format!("回答 {i}：分 curated 与 episodic 两层，前者会话起始注入，后者按需检索。"),
-            tokens_est: 20,
-        })
+        w.append_entry(oc_store::NewEntry::text(
+            session,
+            oc_store::Role::Assistant,
+            format!("回答 {i}：分 curated 与 episodic 两层，前者会话起始注入，后者按需检索。"),
+            20,
+        ))
         .await
         .unwrap();
     }
@@ -129,20 +129,20 @@ async fn explicit_memory_not_duplicated_as_episodic() {
 
     // 「记住…」由 persist_explicit_memory 写成 curated；不该再以 episodic 存一份，
     // 否则同一条事实在库里两个 tier 各一份，dreaming 会把它再"巩固"一次。
-    w.append_entry(oc_store::NewEntry {
-        session_id: "main".into(),
-        role: oc_store::Role::User,
-        content: "记住：我喜欢简洁直接的回复，不要铺垫".into(),
-        tokens_est: 10,
-    })
+    w.append_entry(oc_store::NewEntry::text(
+        "main",
+        oc_store::Role::User,
+        "记住：我喜欢简洁直接的回复，不要铺垫",
+        10,
+    ))
     .await
     .unwrap();
-    w.append_entry(oc_store::NewEntry {
-        session_id: "main".into(),
-        role: oc_store::Role::Assistant,
-        content: "好的，已经记下了，之后我会直接给结论。".into(),
-        tokens_est: 12,
-    })
+    w.append_entry(oc_store::NewEntry::text(
+        "main",
+        oc_store::Role::Assistant,
+        "好的，已经记下了，之后我会直接给结论。",
+        12,
+    ))
     .await
     .unwrap();
 
@@ -183,14 +183,9 @@ async fn short_chitchat_produces_no_candidates() {
         (oc_store::Role::User, "谢谢"),
         (oc_store::Role::Assistant, "不客气"),
     ] {
-        w.append_entry(oc_store::NewEntry {
-            session_id: "main".into(),
-            role,
-            content: text.into(),
-            tokens_est: 2,
-        })
-        .await
-        .unwrap();
+        w.append_entry(oc_store::NewEntry::text("main", role, text, 2))
+            .await
+            .unwrap();
     }
 
     session::flush_before_reset(&store, "main", 200).await;

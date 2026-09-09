@@ -122,7 +122,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
         match turn {
             TurnResult::Completed => {
                 // 落库最终 assistant 回复（重启不失忆）。
-                persist(ctx, oc_store::Role::Assistant, &acc).await;
+                persist(ctx, oc_store::Role::Assistant, &acc, None, None).await;
                 return outcome_of(&state);
             }
             TurnResult::Terminal(outcome) => return outcome,
@@ -130,15 +130,16 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                 // 记录本轮 assistant（可能含文本）+ 本次工具调用到历史。
                 // 必须携带 tool_calls：OpenAI 协议要求 tool 结果消息前有一条
                 // 带匹配 tool_calls 的 assistant 消息，否则回喂时 400。
+                let specs = vec![oc_llm::ToolCallSpec {
+                    id: call_id.clone(),
+                    name: name.clone(),
+                    args: args.clone(),
+                }];
                 messages.push(Message {
                     role: MsgRole::Assistant,
                     content: acc.clone(),
                     tool_call_id: None,
-                    tool_calls: vec![oc_llm::ToolCallSpec {
-                        id: call_id.clone(),
-                        name: name.clone(),
-                        args: args.clone(),
-                    }],
+                    tool_calls: specs.clone(),
                     // thinking 模式：带回本轮 reasoning_content，否则回喂 400。
                     reasoning: if reasoning.is_empty() {
                         None
@@ -146,9 +147,10 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                         Some(reasoning.clone())
                     },
                 });
-                if !acc.is_empty() {
-                    persist(ctx, oc_store::Role::Assistant, &acc).await;
-                }
+                // 带 tool_calls 落库：`acc` 为空也要落，否则纯工具调用轮在历史里
+                // 彻底消失，重放时又退回「只有宣告、没有调用」的坏样例（P2-4）。
+                let tc_json = serde_json::to_string(&specs).ok();
+                persist(ctx, oc_store::Role::Assistant, &acc, tc_json, None).await;
 
                 // loop detection。
                 fingerprints.push(ToolFingerprint {
@@ -173,7 +175,7 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                 let output = exec_tool(ctx, &call_id, &name, &args).await;
 
                 // 结果回喂历史 → 状态机回 AwaitingModel。
-                persist(ctx, oc_store::Role::Tool, &output).await;
+                persist(ctx, oc_store::Role::Tool, &output, None, Some(call_id.clone())).await;
                 messages.push(Message {
                     role: MsgRole::Tool,
                     content: output,
@@ -237,6 +239,8 @@ fn apply_compaction(
             index: i,
             tokens: ((est[i] as f64 * scale).round() as i64).max(1),
             is_tool_result: matches!(m.role, MsgRole::Tool),
+            // 发起过工具调用的 assistant：丢弃时必须连带它的结果（成对进出）。
+            is_tool_dispatch: matches!(m.role, MsgRole::Assistant) && !m.tool_calls.is_empty(),
         })
         .collect();
 
@@ -636,9 +640,19 @@ fn now_local(tz: &str) -> String {
     oc_core::proactive::fmt_now_local(secs, tz).unwrap_or_else(|| format!("unix:{secs}"))
 }
 
-/// 落库一条消息（空文本跳过）。失败仅告警，不阻断 run。
-async fn persist(ctx: &RunCtx, role: oc_store::Role, content: &str) {
-    if content.is_empty() {
+/// 落库一条消息。失败仅告警，不阻断 run。
+///
+/// 空文本**不一定**跳过：纯工具调用轮（模型一个字不说直接调工具）的 `content`
+/// 就是空的，但它带 `tool_calls`——丢了这条，历史里就缺了「assistant 发起调用」
+/// 的那一半，重放出来的序列既不合协议，也教不会模型该调工具（P2-4）。
+async fn persist(
+    ctx: &RunCtx,
+    role: oc_store::Role,
+    content: &str,
+    tool_calls: Option<String>,
+    tool_call_id: Option<String>,
+) {
+    if content.is_empty() && tool_calls.is_none() {
         return;
     }
     let est = (content.chars().count() as i64 / 4).max(1);
@@ -650,6 +664,8 @@ async fn persist(ctx: &RunCtx, role: oc_store::Role, content: &str) {
             role,
             content: content.to_string(),
             tokens_est: est,
+            tool_calls,
+            tool_call_id,
         })
         .await
     {

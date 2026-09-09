@@ -17,6 +17,11 @@ CREATE TABLE entry (
   role          TEXT NOT NULL,
   content       TEXT NOT NULL,
   tokens_est    INTEGER NOT NULL,
+  -- 工具调用结构（P2-4）。缺了这两列，历史重放只能把工具结果降级成 user 文本，
+  -- 模型在自己的上下文里从没见过「我发起工具调用」的样例，于是学会宣布完就等
+  -- 用户贴结果（in-context learning 压倒系统提示词）。
+  tool_calls    TEXT,          -- assistant 发起的调用（JSON 数组），NULL = 无
+  tool_call_id  TEXT,          -- tool 结果关联的调用 id，NULL = 非工具结果
   created_at    INTEGER NOT NULL,
   UNIQUE(session_id, seq)
 );

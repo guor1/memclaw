@@ -420,13 +420,8 @@ mod tests {
         w.tx.send(WriteCmd::Shutdown).expect("投 shutdown");
         assert!(wait_dead(&w).await, "关停后健康位应翻假");
         assert!(matches!(
-            w.append_entry(NewEntry {
-                session_id: "main".into(),
-                role: crate::types::Role::User,
-                content: "x".into(),
-                tokens_est: 1,
-            })
-            .await,
+            w.append_entry(NewEntry::text("main", crate::types::Role::User, "x", 1))
+                .await,
             Err(StoreError::WriterDead)
         ));
     }
