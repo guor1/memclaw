@@ -179,6 +179,40 @@ impl SessionDiag {
         });
     }
 
+    /// 打一次「有进展」的时间戳，不动 phase 与文本长度。
+    ///
+    /// 给非文本的进展用：reasoning delta、工具调用参数分片、工具轮结束。这些都
+    /// 说明 run 活着，但都不该改 phase（阶段由 set_phase 显式管），也不该动
+    /// acc_chars（那是可见文本的长度）。
+    ///
+    /// 卡死诊断读的就是这个时间戳。曾经只有 `delta_seen` 会刷新它，而它只在
+    /// `Delta::Text` 上调用——于是模型流式吐一个 15000 字符的工具参数（真机上
+    /// 耗时 157 秒）期间，诊断看到的是「一直没动静」，把正常干活的 run 掐了。
+    pub fn progress(&self) {
+        let at = now_ms();
+        self.with(|s| {
+            if let Some(r) = s.active.as_mut() {
+                r.last_delta_at = Some(at);
+            }
+        });
+    }
+
+    /// 距最近一次进展的秒数。`None` = 无活跃 run，或该 run 还没有过任何进展。
+    ///
+    /// 后者（`last_delta_at` 为 `None`）的含义是「建流中/等首个 delta」，此时
+    /// 调用方应退回 run 总时长来判断——那段确实可能卡在网络上。
+    pub fn idle_secs(&self) -> Option<u64> {
+        let now = now_ms();
+        let at = self
+            .inner
+            .get(&self.session)?
+            .value()
+            .active
+            .as_ref()
+            .and_then(|r| r.last_delta_at)?;
+        Some(now.saturating_sub(at).max(0) as u64 / 1000)
+    }
+
     /// 更新工具轮数。
     pub fn set_tool_rounds(&self, n: usize) {
         self.with(|s| {

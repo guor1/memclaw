@@ -362,17 +362,28 @@ async fn actor_loop(
             SessionCmd::HealthScan => {
                 if let Some(a) = &active {
                     let elapsed = a.started_at.elapsed().as_secs();
-                    match diagnose(elapsed, cfg.warn_secs, cfg.abort_min_secs) {
+                    // 判据是「多久没动静」，不是「跑了多久」：合法的长任务会连续
+                    // 调工具、流式吐参数，按总时长判会把正在干活的 run 掐掉。
+                    // 拿不到进展时间戳（建流中/还没收到首个 delta）时退回总时长——
+                    // 那一段确实可能卡在网络上。
+                    let idle = diag.idle_secs().unwrap_or(elapsed);
+                    match diagnose(idle, cfg.warn_secs, cfg.abort_min_secs) {
                         RunHealth::Stuck => {
                             warn!(
                                 run_id = %a.run_id,
+                                idle,
                                 elapsed,
                                 "卡死诊断：run 卡死，中止以释放车道"
                             );
                             a.cancel.cancel();
                         }
                         RunHealth::LongRunning => {
-                            warn!(run_id = %a.run_id, elapsed, "run 慢(long_running)，暂不中止");
+                            warn!(
+                                run_id = %a.run_id,
+                                idle,
+                                elapsed,
+                                "run 慢(long_running)，暂不中止"
+                            );
                         }
                         RunHealth::Healthy => {}
                     }

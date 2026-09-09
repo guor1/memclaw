@@ -293,10 +293,15 @@ async fn drive_inner(ctx: &RunCtx) -> RunOutcome {
                     return RunOutcome::LoopDetected;
                 }
 
-                // 执行工具。
+                // 执行工具。工具轮本身就是进展——长命令（pip install、跑脚本）
+                // 期间没有模型 delta，不打点会被诊断当成没动静。
+                ctx.diag.progress();
                 ctx.diag.set_phase(oc_proto::RunPhase::ToolExec);
                 tracing::debug!(tool = %name, "执行工具");
                 let output = exec_tool(ctx, &call_id, &name, &args).await;
+                // 工具刚跑完，重新计时：接下来是新一轮建流 + 等首个 delta，
+                // 那段静默不该继承工具执行前的时间戳。
+                ctx.diag.progress();
 
                 // 结果回喂历史 → 状态机回 AwaitingModel。
                 persist(ctx, oc_store::Role::Tool, &output, None, Some(call_id.clone())).await;
@@ -570,6 +575,10 @@ async fn run_model_turn(
         if ttfb_ms.is_none() {
             ttfb_ms = Some(t_open.elapsed().as_millis());
         }
+        // 任何 delta 都算「run 还活着」，卡死诊断据此判定。
+        // 只在 Delta::Text 上打点是不够的：流式吐工具调用参数时一个 Text 都没有，
+        // 而那一段可以持续两分半（真机 157 秒），会被误判成卡死。
+        ctx.diag.progress();
 
         match delta {
             Delta::Text(t) => {

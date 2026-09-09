@@ -85,8 +85,9 @@ pub enum SubmitResult {
 
 /// 卡死诊断（设计 §10.2 / §6）。纯判定，供心跳扫描调用。
 ///
-/// `warn_secs` 为警告阈值；abort 需同时满足 `elapsed ≥ abort_min_secs`
-/// 且 `elapsed ≥ 3 × warn_secs`（慢 ≠ 卡）。
+/// **判据是「多久没动静」，不是「跑了多久」。** 一个连续调工具、模型持续吐字的
+/// run 可以合法地跑很久（生成 PPT 那种任务里，光写一个脚本就流式吐了 157 秒），
+/// 按总时长判会把它当卡死掐掉——真机上就是这么误杀的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunHealth {
     Healthy,
@@ -96,10 +97,14 @@ pub enum RunHealth {
     Stuck,
 }
 
-pub fn diagnose(elapsed_secs: u64, warn_secs: u64, abort_min_secs: u64) -> RunHealth {
-    if elapsed_secs < warn_secs {
+/// `idle_secs`：距最近一次进展（模型 delta / 工具轮结束）的秒数。
+/// 拿不到进展时间戳时由调用方退回 run 总时长——那是保守值，宁可晚杀不可错杀。
+///
+/// abort 需同时满足 `idle ≥ abort_min_secs` 且 `idle ≥ 3 × warn_secs`（慢 ≠ 卡）。
+pub fn diagnose(idle_secs: u64, warn_secs: u64, abort_min_secs: u64) -> RunHealth {
+    if idle_secs < warn_secs {
         RunHealth::Healthy
-    } else if elapsed_secs >= abort_min_secs && elapsed_secs >= warn_secs.saturating_mul(3) {
+    } else if idle_secs >= abort_min_secs && idle_secs >= warn_secs.saturating_mul(3) {
         RunHealth::Stuck
     } else {
         RunHealth::LongRunning
@@ -160,7 +165,26 @@ mod tests {
 
     #[test]
     fn slow_is_not_stuck() {
-        // 慢 run：warn=100, abort_min=300, elapsed=280 → 未达 abort_min
+        // 慢 run：warn=100, abort_min=300, idle=280 → 未达 abort_min
         assert_eq!(diagnose(280, 100, 300), RunHealth::LongRunning);
+    }
+
+    /// 长任务只要有动静就不算卡：判据是 idle，不是总时长。
+    ///
+    /// 真机回归（2026-09-09）：生成 PPT 的 run 连续调工具、其中一轮流式吐了
+    /// 15353 字符的工具参数耗时 157 秒，总时长累到 395 秒被判「卡死」掐掉。
+    /// 那个 run 一直在推进，掐它是纯误杀。
+    #[test]
+    fn long_task_with_recent_progress_is_healthy() {
+        // 总时长 395 秒（旧实现在此判 Stuck），但 12 秒前刚有 delta。
+        assert_eq!(diagnose(12, 60, 300), RunHealth::Healthy);
+        // 连续吐工具参数：每轮 delta 间隔很短，始终 Healthy。
+        assert_eq!(diagnose(3, 60, 300), RunHealth::Healthy);
+    }
+
+    /// 真没动静才判卡死——这是本诊断存在的意义，不能因上面的修复而失效。
+    #[test]
+    fn genuinely_silent_run_is_stuck() {
+        assert_eq!(diagnose(400, 60, 300), RunHealth::Stuck);
     }
 }
