@@ -83,5 +83,66 @@ abort_min_secs = 300
             "缺键应回落到 serde 默认 3（设计 §12.5 ≤3）"
         );
         assert!(cfg.validate_shape().is_ok(), "回落后的配置应通过校验");
+
+        // 同一份老配置也没有 max_output_tokens / max_tokens_field：
+        // 它们必须回落到「自动推导」，而不是解析失败。
+        let m = &cfg.models[0];
+        assert_eq!(m.max_output_tokens, None);
+        assert_eq!(m.max_tokens_field, None);
+        // 未配置也要推出一个值——留空等于把上限交给服务端默认（常见 4k），
+        // 模型写稍长的脚本就被截断。
+        assert_eq!(m.clamped_max_output_tokens(), 8_192);
+    }
+
+    /// 新增的两个模型键能被真实解析路径接受（示例配置里就是这么写的）。
+    #[test]
+    fn model_output_limit_keys_parse() {
+        let toml_text = r#"proto_version = 1
+
+[server]
+transport = "pipe"
+
+[[models]]
+alias = "default"
+provider = "openai"
+model = "doubao-seed-evolving"
+hosting = "cloud"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+api_key = { env = "ARK_API_KEY" }
+context_window = 32768
+max_output_tokens = 16384
+max_tokens_field = "max_completion_tokens"
+
+[memory]
+vec = false
+halflife_days = 30
+trigger_threshold = 0.72
+trigger_max_per_turn = 3
+
+[proactive]
+heartbeat_secs = 60
+intent_cooldown_secs = 86400
+intent_budget = 3
+intent_expiry_days = 90
+
+[tools]
+exec_timeout_secs = 120
+[tools.approval]
+mode = "prompt"
+timeout_secs = 120
+
+[watchdog]
+idle_cloud_secs = 120
+idle_self_secs = 300
+run_timeout_secs = 0
+abort_min_secs = 300
+"#;
+        let cfg: Config = toml::from_str(toml_text).expect("新键应可解析");
+        let m = &cfg.models[0];
+        assert_eq!(m.max_output_tokens, Some(16_384));
+        assert_eq!(m.max_tokens_field.as_deref(), Some("max_completion_tokens"));
+        // 手填 16384 未超窗口 32768，原样生效。
+        assert_eq!(m.clamped_max_output_tokens(), 16_384);
+        assert!(cfg.validate_shape().is_ok());
     }
 }

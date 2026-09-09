@@ -16,6 +16,12 @@ pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
     client: reqwest::Client,
+    /// 强制指定输出上限字段名，覆盖 [`max_tokens_field`] 的自动判断。
+    ///
+    /// 各家对这个字段的取舍在变（OpenAI 已废弃 `max_tokens`、方舟两个都收但语义
+    /// 不同、DeepSeek 只认老名字），自动判断必然滞后于现实。留个逃生舱，撞上时
+    /// 改配置即可，不用等改代码。
+    max_tokens_field: Option<&'static str>,
 }
 
 impl OpenAiProvider {
@@ -24,10 +30,22 @@ impl OpenAiProvider {
             api_key,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             client: reqwest::Client::new(),
+            max_tokens_field: None,
         }
     }
 
-    fn body(req: &ModelRequest) -> serde_json::Value {
+    /// 覆盖输出上限的字段名。识别 `max_tokens` / `max_completion_tokens`，
+    /// 其余值忽略（保持自动判断）。
+    pub fn with_max_tokens_field(mut self, field: &str) -> Self {
+        self.max_tokens_field = match field {
+            "max_tokens" => Some("max_tokens"),
+            "max_completion_tokens" => Some("max_completion_tokens"),
+            _ => None,
+        };
+        self
+    }
+
+    fn body(&self, req: &ModelRequest) -> serde_json::Value {
         let mut messages: Vec<serde_json::Value> = Vec::new();
         if let Some(sys) = &req.system {
             messages.push(json!({"role": "system", "content": sys}));
@@ -87,16 +105,12 @@ impl OpenAiProvider {
         });
         // 未配置就整个键不发。曾经这里恒发 `"max_tokens": null`——多数 OpenAI 兼容
         // 端点容忍，但有的严格校验类型，且 null 与缺键在个别实现上默认值不同。
-        //
-        // 字段名按模型选（对齐 openclaw 的 compat.maxTokensField）：OpenAI 的推理
-        // 模型（o1/o3/o4）硬性拒收 `max_tokens`，只认 `max_completion_tokens`。
-        //
-        // 其余一律 `max_tokens`，包括方舟的 thinking 模型——那边两个字段语义不同：
-        // `max_tokens` 不含思维链、`max_completion_tokens` 含。对 thinking 模型用
-        // 前者更好：可见输出（工具调用的 arguments 也算在内）独享这份预算，不会被
-        // 推理挤掉。
+        // 字段名见 [`max_tokens_field`]（各家不统一，且 OpenAI 已废弃老名字）。
         if let Some(mt) = req.max_tokens {
-            body[max_tokens_field(&req.model)] = json!(mt);
+            let field = self
+                .max_tokens_field
+                .unwrap_or_else(|| max_tokens_field(&req.model, &self.base_url));
+            body[field] = json!(mt);
         }
         if let Some(t) = req.temperature {
             body["temperature"] = json!(t);
@@ -141,7 +155,7 @@ impl Provider for OpenAiProvider {
             .client
             .post(&url)
             .bearer_auth(&self.api_key)
-            .json(&Self::body(&req))
+            .json(&self.body(&req))
             .send()
             .await
             .map_err(|e| ProviderErr::Transient(e.to_string()))?;
@@ -198,25 +212,47 @@ impl Provider for OpenAiProvider {
 
 /// 输出上限该用哪个请求字段。
 ///
-/// OpenAI 的推理模型系列（o1/o3/o4）拒收 `max_tokens`，报
-/// `Unsupported parameter: 'max_tokens' is not supported with this model`，
-/// 必须用 `max_completion_tokens`。其余模型（含各家 OpenAI 兼容端点）用
-/// `max_tokens`——它是普遍支持的那个。
+/// **默认 `max_completion_tokens`，`max_tokens` 是白名单**（与 openclaw 的
+/// `compat.maxTokensField` 同向）。理由是这三条事实：
 ///
-/// 按模型名判，不按 base_url：同一个端点可以同时服务两类模型。
-fn max_tokens_field(model: &str) -> &'static str {
+/// - OpenAI 官方 spec 里 chat/completions 的 `max_tokens` 已标 `deprecated: true`，
+///   原文：「This value is now deprecated in favor of `max_completion_tokens`,
+///   and is not compatible with o-series models.」
+/// - 方舟两个都收，但语义不同：`max_tokens` **不含**思维链、`max_completion_tokens`
+///   **含**。对 thinking 模型必须用后者——只限可见输出的话，思维链不受约束，
+///   实际输出和计费都会超出预期。
+/// - DeepSeek 文档只写 `max_tokens`。
+///
+/// 两种猜错的代价不对称，这决定了默认值该往哪边偏：
+/// - 该发 `max_completion_tokens` 却发了 `max_tokens`：OpenAI o 系列直接 400
+///   （响亮，一眼看见）；方舟则是**静默**只约束可见输出，思维链照样放飞。
+/// - 该发 `max_tokens` 却发了 `max_completion_tokens`：兼容端点普遍忽略未知字段，
+///   于是**静默**退回服务端默认值（4k），下次照样截断。
+///
+/// 两边都有静默失败，所以按各家文档逐一指定，不靠猜。判据用模型名 + base_url：
+/// 同一端点可同时服务两类模型，但 DeepSeek 这类是整个端点统一的。
+fn max_tokens_field(model: &str, base_url: &str) -> &'static str {
     let m = model.to_ascii_lowercase();
-    // 只认「o<数字>」开头这种形状（o1 / o3-mini / o4-mini），避免误伤名字里
-    // 恰好带 o 的模型。gpt-5 系列走 responses API，不在本函数覆盖范围。
-    let is_openai_reasoning = m
-        .strip_prefix('o')
-        .and_then(|rest| rest.chars().next())
-        .is_some_and(|c| c.is_ascii_digit());
-    if is_openai_reasoning {
-        "max_completion_tokens"
-    } else {
-        "max_tokens"
+    let u = base_url.to_ascii_lowercase();
+
+    // DeepSeek：官方文档只有 max_tokens。按端点判——它家所有模型一致。
+    if u.contains("deepseek") || m.starts_with("deepseek") {
+        return "max_tokens";
     }
+    // Moonshot/Kimi、智谱、Mistral：同属只认 max_tokens 的一类
+    // （对齐 openclaw 的 usesMaxTokens 白名单）。
+    if u.contains("moonshot")
+        || m.starts_with("kimi")
+        || m.starts_with("moonshot")
+        || u.contains("bigmodel")
+        || m.starts_with("glm")
+        || m.starts_with("mistral")
+    {
+        return "max_tokens";
+    }
+    // 其余走 OpenAI 现行规范：方舟（thinking 要靠它约束思维链）、OpenAI 自家
+    // （o 系列硬性要求，非推理模型也已废弃 max_tokens）、以及未知端点。
+    "max_completion_tokens"
 }
 
 /// 解析一条 OpenAI SSE chunk 为若干 [`Delta`]。
@@ -388,38 +424,83 @@ mod tests {
         Message { role: MsgRole::User, content: text.into(), tool_call_id: None, tool_calls: vec![], reasoning: None }
     }
 
-    /// 输出上限的字段名按模型选：OpenAI 推理系列只认 `max_completion_tokens`，
-    /// 发 `max_tokens` 会被硬拒（Unsupported parameter）。
-    #[test]
-    fn max_tokens_field_per_model() {
-        assert_eq!(max_tokens_field("o1"), "max_completion_tokens");
-        assert_eq!(max_tokens_field("o3-mini"), "max_completion_tokens");
-        assert_eq!(max_tokens_field("o4-mini-2025-04-16"), "max_completion_tokens");
-        // 其余一律 max_tokens——含各家 OpenAI 兼容端点。
-        assert_eq!(max_tokens_field("gpt-4o"), "max_tokens");
-        assert_eq!(max_tokens_field("deepseek-reasoner"), "max_tokens");
-        assert_eq!(max_tokens_field("doubao-seed-evolving"), "max_tokens");
-        // 名字里带 o 但不是「o+数字」开头的，不能误伤。
-        assert_eq!(max_tokens_field("openai-mystery"), "max_tokens");
-        assert_eq!(max_tokens_field("qwen-omni"), "max_tokens");
+    /// 组装请求体用的 provider（endpoint 取 OpenAI 官方，便于测默认分支）。
+    fn test_provider() -> OpenAiProvider {
+        OpenAiProvider::new("k".into(), None)
     }
 
-    /// 未配置输出上限时整个键不发；配了才发，且发到正确的字段上。
+    /// 输出上限的字段名：默认现行的 `max_completion_tokens`，只有明确只认老名字
+    /// 的几家走 `max_tokens`。
+    ///
+    /// 依据三条事实：OpenAI 官方 spec 里 chat/completions 的 `max_tokens` 已标
+    /// `deprecated: true`（且 o 系列硬拒）；方舟两个都收但 `max_tokens` 不含
+    /// 思维链、约束不住 thinking 模型；DeepSeek 文档只有 `max_tokens`。
+    #[test]
+    fn max_tokens_field_per_provider() {
+        let openai = "https://api.openai.com/v1";
+        // OpenAI：o 系列硬性要求，非推理模型也已废弃老名字。
+        assert_eq!(max_tokens_field("o3-mini", openai), "max_completion_tokens");
+        assert_eq!(max_tokens_field("gpt-4o", openai), "max_completion_tokens");
+
+        // 方舟：thinking 模型必须用它才能把思维链算进预算。
+        let ark = "https://ark.cn-beijing.volces.com/api/v3";
+        assert_eq!(
+            max_tokens_field("doubao-seed-evolving", ark),
+            "max_completion_tokens"
+        );
+
+        // DeepSeek：文档只写 max_tokens。端点和模型名两条路都要认。
+        assert_eq!(
+            max_tokens_field("deepseek-chat", "https://api.deepseek.com"),
+            "max_tokens"
+        );
+        assert_eq!(max_tokens_field("deepseek-reasoner", openai), "max_tokens");
+
+        // 其余只认老名字的几家。
+        assert_eq!(max_tokens_field("kimi-k2", "https://api.moonshot.cn/v1"), "max_tokens");
+        assert_eq!(max_tokens_field("glm-4.6", "https://open.bigmodel.cn/api/paas/v4"), "max_tokens");
+        assert_eq!(max_tokens_field("mistral-large", openai), "max_tokens");
+
+        // 未知端点走现行规范，不退回废弃字段。
+        assert_eq!(max_tokens_field("some-model", "https://example.com/v1"), "max_completion_tokens");
+    }
+
+    /// 配置可强制覆盖字段名——各家仍在变，留个不用改代码的出口。
+    #[test]
+    fn max_tokens_field_override_wins() {
+        let mut r = req_with(vec![user("hi")], vec![]);
+        r.max_tokens = Some(4096);
+        r.model = "gpt-4o".into();
+
+        let forced = OpenAiProvider::new("k".into(), None).with_max_tokens_field("max_tokens");
+        let body = forced.body(&r);
+        assert_eq!(body["max_tokens"], 4096);
+        assert!(body.get("max_completion_tokens").is_none());
+
+        // 无法识别的值忽略，回到自动判断。
+        let bogus = OpenAiProvider::new("k".into(), None).with_max_tokens_field("nonsense");
+        let body = bogus.body(&r);
+        assert_eq!(body["max_completion_tokens"], 4096);
+    }
+
+    /// 未配置输出上限时整个键不发；配了才发，且只发一个字段。
     #[test]
     fn max_tokens_omitted_when_unset() {
         let mut r = req_with(vec![user("hi")], vec![]);
-        let body = OpenAiProvider::body(&r);
+        let body = test_provider().body(&r);
         assert!(body.get("max_tokens").is_none(), "未配置不该发该键: {body}");
         assert!(body.get("max_completion_tokens").is_none());
 
+        // req_with 的模型是 deepseek-chat → 老名字。
         r.max_tokens = Some(8192);
-        let body = OpenAiProvider::body(&r);
+        let body = test_provider().body(&r);
         assert_eq!(body["max_tokens"], 8192);
+        assert!(body.get("max_completion_tokens").is_none(), "不得两个都发: {body}");
 
-        r.model = "o3-mini".into();
-        let body = OpenAiProvider::body(&r);
+        r.model = "gpt-4o".into();
+        let body = test_provider().body(&r);
         assert_eq!(body["max_completion_tokens"], 8192);
-        assert!(body.get("max_tokens").is_none(), "推理模型不得发 max_tokens: {body}");
+        assert!(body.get("max_tokens").is_none(), "不得两个都发: {body}");
     }
 
     #[test]
@@ -429,7 +510,7 @@ mod tests {
             description: "运行命令".into(),
             parameters: serde_json::json!({"type": "object"}),
         }];
-        let body = OpenAiProvider::body(&req_with(vec![user("现在几点")], tools));
+        let body = test_provider().body(&req_with(vec![user("现在几点")], tools));
         let arr = body["tools"].as_array().expect("tools 应存在");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["type"], "function");
@@ -484,7 +565,7 @@ mod tests {
 
     #[test]
     fn body_includes_usage_option() {
-        let body = OpenAiProvider::body(&req_with(vec![user("hi")], vec![]));
+        let body = test_provider().body(&req_with(vec![user("hi")], vec![]));
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
@@ -499,7 +580,7 @@ mod tests {
 
     #[test]
     fn no_tools_field_when_empty() {
-        let body = OpenAiProvider::body(&req_with(vec![user("hi")], vec![]));
+        let body = test_provider().body(&req_with(vec![user("hi")], vec![]));
         assert!(body.get("tools").is_none(), "无工具时不应出现 tools 字段");
         assert!(body.get("tool_choice").is_none());
     }
@@ -527,7 +608,7 @@ mod tests {
                 reasoning: None,
             },
         ];
-        let body = OpenAiProvider::body(&req_with(messages, vec![]));
+        let body = test_provider().body(&req_with(messages, vec![]));
         let msgs = body["messages"].as_array().unwrap();
         // [0]=system, [1]=user, [2]=assistant(tool_calls), [3]=tool
         let asst = &msgs[2];

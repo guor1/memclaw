@@ -33,6 +33,15 @@ base_url = "https://api.deepseek.com"     # DeepSeek 端点
 # 且模型支持更大的输出上限。撞上限时日志打 WARN「模型输出被 max_tokens 截断」，
 # 带 tool_args_chars 与 output_tokens 两个字段，据此判断该调到多大。
 # max_output_tokens = 16384
+#
+# 上限用哪个请求字段。省略 = 按 provider 自动判断，一般不用配。
+#   max_completion_tokens  OpenAI 现行规范（其 max_tokens 已标记废弃，o 系列直接
+#                          拒收）；方舟也用它——那边 max_tokens 不含思维链，
+#                          约束不住深度思考模型
+#   max_tokens             DeepSeek / Moonshot / 智谱 / Mistral 只认这个
+# 两种猜错都是静默失败（发错名字多半被忽略，于是退回服务端的小默认值），
+# 所以换了新端点若发现输出总被截断，可以拿这一项试。
+# max_tokens_field = "max_completion_tokens"
 # API key 三选一：
 #   { env = "DEEPSEEK_API_KEY" }  从环境变量读（推荐）
 #   { file = "C:\\Users\\你\\.oc\\deepseek.key" }  从文件读

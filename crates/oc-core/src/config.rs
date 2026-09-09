@@ -78,6 +78,14 @@ pub struct ModelConfig {
     #[garde(skip)]
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    /// 强制指定输出上限的请求字段名：`max_tokens` 或 `max_completion_tokens`。
+    ///
+    /// `None` = 按 provider 自动判断（见 oc-llm::openai::max_tokens_field）。
+    /// 各家对这两个名字的取舍还在变，自动判断必然滞后；撞上时改这一项即可，
+    /// 不用等改代码。填别的值忽略。
+    #[garde(skip)]
+    #[serde(default)]
+    pub max_tokens_field: Option<String>,
 }
 
 /// 保守默认上下文窗口（内置表与手填都缺时兜底）。
@@ -303,6 +311,7 @@ impl Config {
                 base_url: None,
                 context_window: None,
                 max_output_tokens: None,
+                max_tokens_field: None,
             }],
             memory: MemoryConfig {
                 vec: true,

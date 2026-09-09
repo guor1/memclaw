@@ -81,7 +81,12 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
     let key = resolve_secret(&model.api_key);
 
     let provider: Arc<dyn Provider> = match key {
-        Some(k) if !k.is_empty() => make_real(model.provider, k, model.base_url.clone()),
+        Some(k) if !k.is_empty() => make_real(
+            model.provider,
+            k,
+            model.base_url.clone(),
+            model.max_tokens_field.as_deref(),
+        ),
         _ => {
             eprintln!("[warn] 未找到 API key，回退到 mock provider（离线演示）");
             Arc::new(MockProvider::echo_text(
@@ -173,10 +178,21 @@ fn resolve_secret(s: &SecretRef) -> Option<String> {
     }
 }
 
-fn make_real(kind: ProviderKind, key: String, base_url: Option<String>) -> Arc<dyn Provider> {
+fn make_real(
+    kind: ProviderKind,
+    key: String,
+    base_url: Option<String>,
+    max_tokens_field: Option<&str>,
+) -> Arc<dyn Provider> {
     match kind {
         #[cfg(feature = "provider-openai")]
-        ProviderKind::Openai => Arc::new(oc_llm::openai::OpenAiProvider::new(key, base_url)),
+        ProviderKind::Openai => {
+            let mut p = oc_llm::openai::OpenAiProvider::new(key, base_url);
+            if let Some(f) = max_tokens_field {
+                p = p.with_max_tokens_field(f);
+            }
+            Arc::new(p)
+        }
         #[cfg(feature = "provider-anthropic")]
         ProviderKind::Anthropic => Arc::new(oc_llm::anthropic::AnthropicProvider::new(key, base_url)),
         // 未启用对应 feature 时回退 mock（不 panic）。
