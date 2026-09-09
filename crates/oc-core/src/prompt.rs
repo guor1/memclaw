@@ -139,8 +139,14 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
         // 它对上下文模式的依赖强于对指令的服从，加一句成本极低。
         prefix.push_str(
             "\n优先使用结构化工具完成任务：查看/切换目录用 sys（pwd/cd/now），\
-             读写/检索文件用 file（read/write/list/stat/head/tail/grep/glob）。\
+             读写/检索文件用 file（read/write/edit/append/list/stat/head/tail/grep/glob）。\
              仅当这些工具都覆盖不到时才用 exec 执行 shell 命令。\n\
+             \n修改已有文件用 file 的 edit（只发要改的那一小段），不要用 write \
+             重发整个文件：工具参数是逐字符流式传输的，重发一个几十 KB 的文件要\
+             好几分钟，而且长参数容易撞上输出长度上限被截断。\
+             edit 的 old_string 必须与文件内容逐字符一致（含缩进），\
+             且默认要唯一——拿不准就先 read 回来照抄，出现多次时多带几行上下文。\
+             写很长的新文件时分多次 append 追加，不要挤在单次调用里。\n\
              \n涉及「未来某个时刻」的请求（定时提醒、延时提醒、每天/每周重复提醒），\
              一律用 cron 工具登记：op=delay 表示「N 秒后」，op=add 表示重复。\
              登记后系统会在到点时主动推送给用户，**不占用当前对话**，你无需等待，\

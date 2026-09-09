@@ -28,6 +28,23 @@ pub struct FileTool {
 enum FileArgs {
     Read { path: String },
     Write { path: String, content: String },
+    /// 精确替换一段文本。`old_string` 默认必须唯一匹配。
+    ///
+    /// 存在的意义是省流量：模型改一行也走 `write` 的话得重发整个文件，而参数
+    /// 长度直接决定流式耗时（真机量到约 48 字符/秒，20KB 文件覆写要 7 分钟）。
+    Edit {
+        path: String,
+        old_string: String,
+        new_string: String,
+        /// 允许替换全部出现处。默认 false（歧义时报错，不猜）。
+        #[serde(default)]
+        replace_all: bool,
+    },
+    /// 追加到文件末尾，文件不存在则创建。
+    ///
+    /// 长内容分多次追加可以避开单次工具参数撞 max_tokens 被截断
+    /// （见 run.rs 的 TOOL_TRUNCATION_INSTRUCTION）。
+    Append { path: String, content: String },
     List { path: String },
     /// 文件元信息：大小/是否目录/修改时间。
     Stat { path: String },
@@ -57,14 +74,18 @@ impl Tool for FileTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "file".to_string(),
-            description: "文件操作（优先于 exec）。op=read|write|list|stat|head|tail|grep|glob。\
+            description: "文件操作（优先于 exec）。op=read|write|edit|append|list|stat|head|tail|grep|glob。\
+                修改已有文件用 edit（只发要改的片段）而不是 write 重发整个文件。\
                 路径可相对当前工作目录。".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "op": { "type": "string", "enum": ["read", "write", "list", "stat", "head", "tail", "grep", "glob"] },
-                    "path": { "type": "string", "description": "文件/目录路径（read/write/list/stat/head/tail/grep 用）" },
-                    "content": { "type": "string", "description": "write 时的内容" },
+                    "op": { "type": "string", "enum": ["read", "write", "edit", "append", "list", "stat", "head", "tail", "grep", "glob"] },
+                    "path": { "type": "string", "description": "文件/目录路径（read/write/edit/append/list/stat/head/tail/grep 用）" },
+                    "content": { "type": "string", "description": "write/append 时的内容" },
+                    "old_string": { "type": "string", "description": "edit：要被替换的原文，必须与文件内容逐字符一致（含缩进）。默认须唯一匹配，出现多次时请多带上下文" },
+                    "new_string": { "type": "string", "description": "edit：替换成的新内容" },
+                    "replace_all": { "type": "boolean", "description": "edit：替换全部出现处（默认 false）" },
                     "lines": { "type": "integer", "description": "head/tail 的行数（默认 20）" },
                     "pattern": { "type": "string", "description": "grep 的正则 / glob 的模式（如 **/*.rs）" }
                 },
@@ -100,6 +121,75 @@ impl Tool for FileTool {
                 tokio::fs::write(&p, content.as_bytes()).await?;
                 cx.update(format!("写入 {} ({} 字节)\n", p.display(), content.len()));
                 Ok(ToolOutput::ok(format!("已写入 {}", p.display())))
+            }
+            FileArgs::Edit { path, old_string, new_string, replace_all } => {
+                // 这两种参数是模型出错，不是「改写没匹配上」，归 BadArgs：
+                // 空 old_string 会匹配任意位置；old == new 是无操作。
+                if old_string.is_empty() {
+                    return Err(ToolError::BadArgs(
+                        "old_string 不能为空（空串匹配任意位置）".into(),
+                    ));
+                }
+                if old_string == new_string {
+                    return Err(ToolError::BadArgs(
+                        "old_string 与 new_string 相同，这次调用不会改变任何内容".into(),
+                    ));
+                }
+                let p = self.check(Path::new(&path), &cx.cwd)?;
+                let content = tokio::fs::read_to_string(&p).await?;
+
+                // 匹配失败一律返回 ToolOutput::err 而非 ToolError：前者的文案会被
+                // 原样回喂给模型（后者会加「工具错误: 」前缀）。文案要能让模型自纠，
+                // 否则它只会原样重试，往返次数反而比 write 更多。
+                let Some((needle, replacement)) =
+                    resolve_needle(&content, &old_string, &new_string)
+                else {
+                    return Ok(ToolOutput::err(no_match_hint(&content, &old_string)));
+                };
+
+                let count = content.matches(needle.as_str()).count();
+                if count > 1 && !replace_all {
+                    return Ok(ToolOutput::err(format!(
+                        "old_string 在文件中出现 {count} 次，无法确定改哪一处。\
+                         请补上更多上下文（前后各多带几行）使其唯一，\
+                         或确实要全改时传 replace_all=true。文件未改动。"
+                    )));
+                }
+
+                let updated = if replace_all {
+                    content.replace(needle.as_str(), &replacement)
+                } else {
+                    content.replacen(needle.as_str(), &replacement, 1)
+                };
+                let before = content.len();
+                let after = updated.len();
+                tokio::fs::write(&p, updated.as_bytes()).await?;
+                cx.update(format!("编辑 {} ({count} 处)\n", p.display()));
+                Ok(ToolOutput::ok(format!(
+                    "已编辑 {}：替换 {count} 处，{before} → {after} 字节",
+                    p.display()
+                )))
+            }
+            FileArgs::Append { path, content } => {
+                let p = self.check(Path::new(&path), &cx.cwd)?;
+                if let Some(parent) = p.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                use tokio::io::AsyncWriteExt;
+                let mut f = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&p)
+                    .await?;
+                f.write_all(content.as_bytes()).await?;
+                f.flush().await?;
+                let total = tokio::fs::metadata(&p).await.map(|m| m.len()).unwrap_or(0);
+                cx.update(format!("追加 {} ({} 字节)\n", p.display(), content.len()));
+                Ok(ToolOutput::ok(format!(
+                    "已追加 {} 字节到 {}，现共 {total} 字节",
+                    content.len(),
+                    p.display()
+                )))
             }
             FileArgs::List { path } => {
                 let p = self.check(Path::new(&path), &cx.cwd)?;
@@ -163,6 +253,65 @@ impl Tool for FileTool {
             }
         }
     }
+}
+
+/// 定位 edit 实际要用的匹配串，返回 `(needle, replacement)`；`None` = 匹配不上。
+///
+/// 先按原文试。不中且文件是 CRLF 时，把 `old`/`new` 的 LF 转成 CRLF 再试——
+/// Windows 上这是头号失败源：模型给的跨行片段用 LF，文件里却是 CRLF，逐字符
+/// 比较必然不等。
+///
+/// 关键是只转这两个串、不动文件其余部分：整体归一化换行会把无关行也改掉，
+/// 一次 edit 变成整文件改写。
+fn resolve_needle(content: &str, old: &str, new: &str) -> Option<(String, String)> {
+    if content.contains(old) {
+        return Some((old.to_string(), new.to_string()));
+    }
+    // 仅当文件确有 CRLF 且 old 里有独立的 LF 时才值得回退。
+    if content.contains("\r\n") && old.contains('\n') && !old.contains("\r\n") {
+        let crlf_old = old.replace('\n', "\r\n");
+        if content.contains(&crlf_old) {
+            return Some((crlf_old, new.replace('\n', "\r\n")));
+        }
+    }
+    None
+}
+
+/// 匹配不上时给模型的诊断。
+///
+/// 只回「未找到」等于让它瞎猜，通常的结果是原样重试。模型看不到文件的确切字节，
+/// 最常见的错因是凭记忆重构、缩进对不上，所以要指出方向。
+fn no_match_hint(content: &str, old: &str) -> String {
+    let mut msg = String::from("未在文件中找到 old_string，文件未改动。");
+
+    // 空白折叠后能匹配 → 就是缩进/空白的问题，明说，别让它猜。
+    if collapse_ws(content).contains(&collapse_ws(old)) {
+        msg.push_str(
+            "\n内容能对上，但**空白不同**（缩进宽度、空格与制表符、行尾空格）。\
+             old_string 必须与文件逐字符一致，请先用 op=read 取回原文再照抄。",
+        );
+        return msg;
+    }
+
+    // 首行能定位 → 告诉它去读哪一段，省一次盲目 read 全文。
+    if let Some(first) = old.lines().next().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(n) = content.lines().position(|l| l.trim() == first) {
+            msg.push_str(&format!(
+                "\n首行「{first}」出现在第 {} 行附近，但后续内容不一致。\
+                 建议 op=read 取回该处原文后再改。",
+                n + 1
+            ));
+            return msg;
+        }
+    }
+
+    msg.push_str("\n请先用 op=read 确认文件当前内容——它可能与你记忆中的不同。");
+    msg
+}
+
+/// 把所有连续空白折叠成单个空格，用于「除了空白之外是否一致」的探测。
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 在文件或目录（递归）内按正则搜内容。返回 相对路径:行号:内容。
