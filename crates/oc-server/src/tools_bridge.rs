@@ -165,6 +165,15 @@ impl ToolExecutor {
         }
     }
 
+    /// 设置会话 cwd 的初值（未 `cd` 过的会话用它）。
+    ///
+    /// 不设则退回进程 `current_dir`，那只在测试里合适：生产上 CLI 传工作区进来，
+    /// 保证初始 cwd 一定落在 file/sys 的允许根内。
+    pub fn with_initial_cwd(mut self, cwd: std::path::PathBuf) -> Self {
+        self.initial_cwd = cwd;
+        self
+    }
+
     /// 设置后台移交 receiver。
     pub fn with_handoff(
         mut self,

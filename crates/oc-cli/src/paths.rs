@@ -25,3 +25,27 @@ pub fn db_path() -> Result<PathBuf> {
 pub fn config_path() -> Result<PathBuf> {
     Ok(oc_home()?.join("config.toml"))
 }
+
+/// agent 工作区 `~/.oc/workspace`：会话 cwd 初值 + file/sys 允许根之一。
+///
+/// 固定位置，不可配——工作区就是 agent 的家，跟 OC_HOME 一起搬即可，
+/// 没有第二个合理答案。要换位置就换 OC_HOME。
+///
+/// 这里**故意不看** `std::env::current_dir()`：工作区同时是允许根，跟随启动
+/// 目录意味着在家目录跑 `oc serve` 就把 `~/.ssh` 交给了模型。
+pub fn workspace() -> Result<PathBuf> {
+    Ok(oc_home()?.join("workspace"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 工作区必须在 OC_HOME 内——它是 allowed_roots 之一，跑到外面等于
+    /// 悄悄扩大文件访问范围。
+    #[test]
+    fn workspace_lives_under_oc_home() {
+        let home = oc_home().expect("测试环境应能定位 home");
+        assert_eq!(workspace().unwrap(), home.join("workspace"));
+    }
+}

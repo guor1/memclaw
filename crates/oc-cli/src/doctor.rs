@@ -50,6 +50,13 @@ pub fn run(dump_schema: bool) -> Result<()> {
         }
     }
 
+    // 3.5) 工作区：agent 的初始目录 + 文件访问范围。单独报出来，让人一眼看到
+    // 模型实际能碰哪里（这一项无配置，只随 OC_HOME 走）。
+    let ws = paths::workspace()?;
+    fs::create_dir_all(&ws).with_context(|| format!("创建工作区 {} 失败", ws.display()))?;
+    println!("[ok] 工作区: {}", ws.display());
+    println!("     file/sys 允许根 = 此目录 + {}", home.display());
+
     // 4) 协议 schema 导出
     if dump_schema {
         let schema = oc_proto::schema::export_schema();

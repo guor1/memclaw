@@ -62,6 +62,33 @@ async fn cd_changes_pwd_within_session() {
     std::fs::remove_dir_all(&sub).ok();
 }
 
+/// 未 `cd` 过的会话，pwd 应报注入的初始 cwd（生产上 = 配置里的工作区），
+/// 而不是 daemon 的启动目录。历史上这里取 `std::env::current_dir()`，
+/// 于是在 `/root` 下 `oc serve` 就把整个 `/root` 变成了 file 工具的允许根。
+#[tokio::test]
+async fn initial_cwd_comes_from_injection_not_process_dir() {
+    let tmp = std::env::temp_dir().canonicalize().unwrap();
+    let ws = tmp.join(format!("oc-cwd-ws-{}", std::process::id()));
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let ex = executor(vec![tmp.clone()]).with_initial_cwd(ws.clone());
+    let pwd = call(&ex, "sys", r#"{"op":"pwd"}"#, &SessionId::new("fresh")).await;
+
+    assert_eq!(
+        std::path::Path::new(pwd.trim()).canonicalize().unwrap(),
+        ws.canonicalize().unwrap(),
+        "新会话应从注入的工作区起步"
+    );
+    let proc_dir = std::env::current_dir().unwrap();
+    assert_ne!(
+        std::path::Path::new(pwd.trim()),
+        proc_dir.as_path(),
+        "不应回落到进程启动目录"
+    );
+
+    std::fs::remove_dir_all(&ws).ok();
+}
+
 #[tokio::test]
 async fn cwd_is_isolated_between_sessions() {
     let tmp = std::env::temp_dir().canonicalize().unwrap();

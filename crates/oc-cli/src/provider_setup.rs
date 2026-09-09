@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use oc_core::config::{ApprovalMode as CfgApprovalMode, Config, Hosting, Provider as ProviderKind, SecretRef};
 use oc_core::tool::ApprovalMode;
 use oc_llm::mock::MockProvider;
@@ -111,11 +111,19 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
     let exec_timeout = Duration::from_secs(cfg.tools.exec_timeout_secs);
     let approval_timeout = Duration::from_secs(cfg.tools.approval.timeout_secs);
 
-    // file 允许根：当前工作目录 + OC_HOME。空环境下退回当前目录。
+    // file/sys 允许根：`~/.oc/workspace` + OC_HOME。
+    //
+    // 曾经第一项是 `std::env::current_dir()`，于是允许根等于 daemon 的启动目录：
+    // 在 `/root` 或仓库里 `oc serve`，模型就拿到了那整棵树的读写权（含 `.ssh/`）。
+    // 现在固定在 OC_HOME 下，与启动位置无关。
+    // OC_HOME 自身也在内——soul 自我编辑要写 `~/.oc/soul/`。
     let mut roots = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd);
-    }
+    let ws = crate::paths::workspace()?;
+    // 允许根必须真实存在：path_guard 用 canonicalize 比前缀，目录不存在则
+    // 任何路径都判不进根，file 工具会整体失效。
+    std::fs::create_dir_all(&ws)
+        .with_context(|| format!("创建工作区 {} 失败", ws.display()))?;
+    roots.push(ws.clone());
     if let Ok(home) = crate::paths::oc_home() {
         roots.push(home);
     }
@@ -147,7 +155,11 @@ fn build_tools(cfg: &Config) -> Result<ToolExecutor> {
         registry.register(Arc::new(oc_tools::web::WebSearchTool));
     }
 
-    Ok(ToolExecutor::new(Arc::new(registry)).with_handoff(handoff_rx))
+    Ok(ToolExecutor::new(Arc::new(registry))
+        .with_handoff(handoff_rx)
+        // 会话 cwd 初值 = 工作区。不给的话 executor 退回进程 current_dir，
+        // 那 `sys pwd` 会报一个不在允许根里的目录，模型据此拼的相对路径全被拒。
+        .with_initial_cwd(ws))
 }
 
 fn resolve_secret(s: &SecretRef) -> Option<String> {

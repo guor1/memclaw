@@ -41,6 +41,8 @@ intent_budget = 3              # 同一条待办最多提醒几次，用尽即�
 intent_expiry_days = 90        # 多少天后过期；0 = 不过期
 intent_max_per_turn = 3        # 每轮最多注入几条待办（防一条消息命中多条塞满上下文）
 
+# agent 干活的目录固定为 ~/.oc/workspace（无配置项）。它和 ~/.oc 自身构成
+# file/sys 工具的全部可访问范围，与 daemon 的启动目录无关。
 [tools]
 exec_timeout_secs = 120
 [tools.approval]

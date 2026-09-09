@@ -96,6 +96,9 @@ pub fn run() -> Result<()> {
     fs::create_dir_all(home.join("logs"))?;
     let skills_dir = home.join("skills");
     fs::create_dir_all(&skills_dir)?;
+    // agent 工作区（`[tools] workspace` 的默认值）。file/sys 的允许根之一，
+    // 也是会话 cwd 初值——先建出来，否则 path_guard 的 canonicalize 判不进根。
+    fs::create_dir_all(home.join("workspace"))?;
 
     let mut created = Vec::new();
     write_if_absent(&home.join("config.toml"), DEFAULT_CONFIG, &mut created)?;

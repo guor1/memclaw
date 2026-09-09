@@ -93,6 +93,11 @@ oc cron add / list / rm
 [tools.approval] 的 timeout_secs 非 0（默认 120），否则该轮会一直
 占着会话车道。
 
+## agent 能碰哪些文件
+~/.oc/workspace + ~/.oc 自身，构成 file/sys 的全部范围（无配置项）。
+与 daemon 的启动目录无关；要换位置就换 OC_HOME。
+`oc doctor` 会打印实际生效的工作区。
+
 ## 环境变量
 - OC_HOME: 自定义配置根目录（默认 ~/.oc）
 - DEEPSEEK_API_KEY: DeepSeek API Key（推荐）

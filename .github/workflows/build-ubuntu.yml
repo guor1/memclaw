@@ -77,7 +77,7 @@ jobs:
           [Service]
           Type=simple
           User=YOUR_USER
-          WorkingDirectory=/home/YOUR_USER/ocdata
+          WorkingDirectory=/home/YOUR_USER
           Environment="DEEPSEEK_API_KEY=sk-xxxx"
           ExecStart=/usr/local/bin/oc serve
           Restart=on-failure
@@ -88,9 +88,9 @@ jobs:
           UNIT
           sudo systemctl daemon-reload && sudo systemctl enable --now oc-daemon
 
-          # WorkingDirectory 不是随便填的：它与 ~/.oc 共同构成 file 工具的
-          # allowed_roots，指向仓库或家目录会让 agent 能读写那里的一切。
-          # 建议先 mkdir -p ~/ocdata 用一个专用空目录。
+          # agent 能读写的范围是 ~/.oc/workspace + ~/.oc，与 WorkingDirectory
+          # 无关（启动目录已不影响 file/sys 的 allowed_roots）。要换位置就换
+          # OC_HOME。`oc doctor` 会打印实际生效的工作区。
 
           ## 7. 无人值守注意事项（cron / oc http）
           # 这些场景没有 TUI 来响应审批弹窗。请确认 ~/.oc/config.toml 里：
