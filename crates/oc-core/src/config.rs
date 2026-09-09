@@ -125,7 +125,37 @@ impl ModelConfig {
         self.context_window
             .unwrap_or_else(|| default_context_window(&self.model))
     }
+
+    /// 生效的单轮输出上限：手填优先，否则 `min(窗口, 8192)`。
+    ///
+    /// 对齐 openclaw 的兜底公式（provider-catalog-live-normalize.internal.ts
+    /// `?? Math.min(contextWindow, 8192)`）。它那边前面还有两层——打 provider
+    /// 的 /models 接口在线发现、内置各家静态目录——我们没有，所以这条公式就是
+    /// 主路径。
+    ///
+    /// **必须有个值，不能留空**：留空等于把上限交给服务端默认，而那个值往往
+    /// 很小（方舟 doubao 系列 4k），模型写稍长的脚本就被砍在半个 JSON 处。
+    /// 8192 填大了也不怕——[`Self::clamped_max_output_tokens`] 会压回窗口内，
+    /// 且服务端对超过自身上限的请求普遍是截断而非报错。
+    pub fn effective_max_output_tokens(&self) -> u32 {
+        self.max_output_tokens
+            .unwrap_or_else(|| self.effective_context_window().min(DEFAULT_MAX_OUTPUT_TOKENS))
+    }
+
+    /// 上一项再夹到上下文窗口内（手填过大时兜底）。
+    ///
+    /// 输出上限大于整个窗口没有意义，个别 provider 还会因此 400。
+    pub fn clamped_max_output_tokens(&self) -> u32 {
+        self.effective_max_output_tokens()
+            .min(self.effective_context_window())
+            .max(1)
+    }
 }
+
+/// 未配置时的输出上限兜底值（与 openclaw 同一个数）。
+///
+/// 取 8192 而非更小：截断的成因就是预算不够，调小只会更早撞上。
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8_192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -365,6 +395,39 @@ mod tests {
         // 手填 → 优先。
         m.context_window = Some(100_000);
         assert_eq!(m.effective_context_window(), 100_000);
+    }
+
+    /// 输出上限的零配置推导：`min(窗口, 8192)`，手填优先。
+    ///
+    /// 关键是**未配置时也必须有值**。留空等于把上限交给服务端默认，而那个值
+    /// 往往只有 4k（方舟 doubao 系列），模型写稍长的脚本就被砍在半个 JSON 处，
+    /// 工具压根没执行。
+    #[test]
+    fn max_output_tokens_derives_from_window() {
+        let mut m = Config::default_local().models.remove(0);
+        m.max_output_tokens = None;
+
+        // 大窗口 → 取 8192 上限（对齐 openclaw 的 min(contextWindow, 8192)）。
+        m.context_window = Some(200_000);
+        assert_eq!(m.effective_max_output_tokens(), DEFAULT_MAX_OUTPUT_TOKENS);
+
+        // 小窗口 → 不超过窗口本身。
+        m.context_window = Some(4_096);
+        assert_eq!(m.effective_max_output_tokens(), 4_096);
+
+        // 手填优先。
+        m.max_output_tokens = Some(32_768);
+        m.context_window = Some(200_000);
+        assert_eq!(m.effective_max_output_tokens(), 32_768);
+    }
+
+    /// 手填超过窗口时夹回去：输出上限大于整个窗口没有意义，个别 provider 会 400。
+    #[test]
+    fn max_output_tokens_clamped_to_window() {
+        let mut m = Config::default_local().models.remove(0);
+        m.context_window = Some(8_192);
+        m.max_output_tokens = Some(200_000);
+        assert_eq!(m.clamped_max_output_tokens(), 8_192);
     }
 
     /// `intent_max_per_turn` 缺失时回落到默认 3（设计 §12.5 ≤3）。

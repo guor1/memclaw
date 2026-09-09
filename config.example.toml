@@ -21,21 +21,18 @@ base_url = "https://api.deepseek.com"     # DeepSeek 端点
 # 压缩预算据此派生(budget = window − 16384 预留，保底 8000)。
 # context_window = 65536
 # 单轮「输出」上限(token)，即请求体的 max_tokens。与 context_window（输入侧）
-# 是两回事。省略 = 不发该字段，由服务端挑默认值——这个默认值通常很小
-# （方舟 doubao 系列默认 4k），强烈建议显式配置。
+# 是两回事。
 #
-# 为什么重要：模型写脚本时，整个脚本是工具调用的 arguments，走的也是输出预算。
-# 预算不够就会在半个 JSON 处被砍断，工具压根没执行，表现为「说要生成，然后
-# 什么都没发生」。thinking 类模型更紧张——推理内容同样计入。
+# **一般不用配**：省略时自动取 min(context_window, 8192)，对绝大多数模型够用。
+# 这里必须有个值——留空交给服务端默认的话，那个值往往只有 4k（方舟 doubao
+# 系列），模型写稍长的脚本就会被砍在半个 JSON 处，工具压根没执行，表现为
+# 「说要生成，然后什么都没发生」。
 #
-# 撞上限时日志打 WARN「模型输出被 max_tokens 截断」，带 tool_args_chars 与
-# output_tokens 两个字段，据此判断该调到多大。
-#
-# 参考上限（以各家控制台的模型详情页为准，规格更新频繁）：
-#   deepseek 系列        8k
-#   doubao-seed-1.6 系列 16k
-#   doubao-seed-code     32k（深度思考用 max_completion_tokens 可到 64k）
-# max_output_tokens = 8192
+# 手填会被夹到 context_window 以内，填大了不会报错。
+# 什么时候需要手填：任务经常要一次性产出很长的内容（大段代码、长文档），
+# 且模型支持更大的输出上限。撞上限时日志打 WARN「模型输出被 max_tokens 截断」，
+# 带 tool_args_chars 与 output_tokens 两个字段，据此判断该调到多大。
+# max_output_tokens = 16384
 # API key 三选一：
 #   { env = "DEEPSEEK_API_KEY" }  从环境变量读（推荐）
 #   { file = "C:\\Users\\你\\.oc\\deepseek.key" }  从文件读

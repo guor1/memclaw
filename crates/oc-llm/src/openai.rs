@@ -87,8 +87,16 @@ impl OpenAiProvider {
         });
         // 未配置就整个键不发。曾经这里恒发 `"max_tokens": null`——多数 OpenAI 兼容
         // 端点容忍，但有的严格校验类型，且 null 与缺键在个别实现上默认值不同。
+        //
+        // 字段名按模型选（对齐 openclaw 的 compat.maxTokensField）：OpenAI 的推理
+        // 模型（o1/o3/o4）硬性拒收 `max_tokens`，只认 `max_completion_tokens`。
+        //
+        // 其余一律 `max_tokens`，包括方舟的 thinking 模型——那边两个字段语义不同：
+        // `max_tokens` 不含思维链、`max_completion_tokens` 含。对 thinking 模型用
+        // 前者更好：可见输出（工具调用的 arguments 也算在内）独享这份预算，不会被
+        // 推理挤掉。
         if let Some(mt) = req.max_tokens {
-            body["max_tokens"] = json!(mt);
+            body[max_tokens_field(&req.model)] = json!(mt);
         }
         if let Some(t) = req.temperature {
             body["temperature"] = json!(t);
@@ -185,6 +193,29 @@ impl Provider for OpenAiProvider {
             }
         };
         Ok(stream.boxed())
+    }
+}
+
+/// 输出上限该用哪个请求字段。
+///
+/// OpenAI 的推理模型系列（o1/o3/o4）拒收 `max_tokens`，报
+/// `Unsupported parameter: 'max_tokens' is not supported with this model`，
+/// 必须用 `max_completion_tokens`。其余模型（含各家 OpenAI 兼容端点）用
+/// `max_tokens`——它是普遍支持的那个。
+///
+/// 按模型名判，不按 base_url：同一个端点可以同时服务两类模型。
+fn max_tokens_field(model: &str) -> &'static str {
+    let m = model.to_ascii_lowercase();
+    // 只认「o<数字>」开头这种形状（o1 / o3-mini / o4-mini），避免误伤名字里
+    // 恰好带 o 的模型。gpt-5 系列走 responses API，不在本函数覆盖范围。
+    let is_openai_reasoning = m
+        .strip_prefix('o')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit());
+    if is_openai_reasoning {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
     }
 }
 
@@ -355,6 +386,40 @@ mod tests {
 
     fn user(text: &str) -> Message {
         Message { role: MsgRole::User, content: text.into(), tool_call_id: None, tool_calls: vec![], reasoning: None }
+    }
+
+    /// 输出上限的字段名按模型选：OpenAI 推理系列只认 `max_completion_tokens`，
+    /// 发 `max_tokens` 会被硬拒（Unsupported parameter）。
+    #[test]
+    fn max_tokens_field_per_model() {
+        assert_eq!(max_tokens_field("o1"), "max_completion_tokens");
+        assert_eq!(max_tokens_field("o3-mini"), "max_completion_tokens");
+        assert_eq!(max_tokens_field("o4-mini-2025-04-16"), "max_completion_tokens");
+        // 其余一律 max_tokens——含各家 OpenAI 兼容端点。
+        assert_eq!(max_tokens_field("gpt-4o"), "max_tokens");
+        assert_eq!(max_tokens_field("deepseek-reasoner"), "max_tokens");
+        assert_eq!(max_tokens_field("doubao-seed-evolving"), "max_tokens");
+        // 名字里带 o 但不是「o+数字」开头的，不能误伤。
+        assert_eq!(max_tokens_field("openai-mystery"), "max_tokens");
+        assert_eq!(max_tokens_field("qwen-omni"), "max_tokens");
+    }
+
+    /// 未配置输出上限时整个键不发；配了才发，且发到正确的字段上。
+    #[test]
+    fn max_tokens_omitted_when_unset() {
+        let mut r = req_with(vec![user("hi")], vec![]);
+        let body = OpenAiProvider::body(&r);
+        assert!(body.get("max_tokens").is_none(), "未配置不该发该键: {body}");
+        assert!(body.get("max_completion_tokens").is_none());
+
+        r.max_tokens = Some(8192);
+        let body = OpenAiProvider::body(&r);
+        assert_eq!(body["max_tokens"], 8192);
+
+        r.model = "o3-mini".into();
+        let body = OpenAiProvider::body(&r);
+        assert_eq!(body["max_completion_tokens"], 8192);
+        assert!(body.get("max_tokens").is_none(), "推理模型不得发 max_tokens: {body}");
     }
 
     #[test]

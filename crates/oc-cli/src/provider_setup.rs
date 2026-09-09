@@ -60,8 +60,9 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         trigger_threshold: cfg.memory.trigger_threshold as f64,
         trigger_max_per_turn: cfg.memory.trigger_max_per_turn as usize,
         context_window: context_window as u32,
-        // 单轮输出上限：未配置则不发该字段，由服务端定。
-        max_output_tokens: model.max_output_tokens,
+        // 单轮输出上限：手填优先，否则 min(窗口, 8192)。**总是有值**——留空
+        // 等于把上限交给服务端默认（方舟 doubao 4k），写稍长的脚本就被截断。
+        max_output_tokens: Some(model.clamped_max_output_tokens()),
         // soul 目录（设计 §13.1）：dreaming 巩固轮据此重写 MEMORY.md。
         // 取不到 OC_HOME 时为 None——server 会跳过文件重写，只做 DB 内巩固。
         soul_dir: crate::paths::oc_home().ok().map(|h| h.join("soul")),
