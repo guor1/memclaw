@@ -7,6 +7,7 @@
 //! 单写线程 actor 与完整 Store trait 在 M2+ 补齐。
 
 pub mod error;
+pub mod fts;
 pub mod migrate;
 pub mod ops;
 pub mod reader;
@@ -175,6 +176,45 @@ pub fn schema_version(conn: &Connection) -> StoreResult<u32> {
     Ok(v as u32)
 }
 
+/// 校验库内实际结构是否跟得上当前代码。`Err(缺失项描述)` = 该删库重建。
+///
+/// **为什么版本号不够**：开发阶段的 schema 变更直接改建表 DDL、不写迁移步进，
+/// 于是旧库的 `user_version` 已等于 `TARGET_VERSION`，迁移 no-op，但表结构是旧的。
+/// 这种库能开、能报版本，却在第一次记忆操作时炸（`no such table: memory_fts`）。
+/// 这里查的是**结构**而非版本，把那类失败提前到 `oc doctor`。
+///
+/// 只查最近改动涉及、且缺了就必然运行时报错的东西；不做全量 schema diff
+/// （那要维护一份期望结构的副本，成本高且易与 DDL 漂移）。
+pub fn check_shape(conn: &Connection) -> Result<(), String> {
+    let mut missing = Vec::new();
+
+    // P2-4：memory.text 的 FTS 索引 + memory 的显式 rowid 列。
+    let has_fts: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'memory_fts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if has_fts == 0 {
+        missing.push("memory_fts 表（记忆全文索引）");
+    }
+    // `no` 列：contentless FTS 靠它关联回主表。用一次实查而非翻 pragma——
+    // 拿不到就是拿不到，无论原因。
+    if conn.query_row("SELECT no FROM memory LIMIT 1", [], |_| Ok(())).is_err()
+        // 空表时上面查不到行但不报列错，故再确认一次列存在。
+        && conn.prepare("SELECT no FROM memory").is_err()
+    {
+        missing.push("memory.no 列（FTS 索引的关联键）");
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing.join("、"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,11 +226,51 @@ mod tests {
         assert_eq!(v, migrate::TARGET_VERSION, "should migrate to target");
     }
 
+    /// 新建的库必须通过形状校验——否则 `oc doctor` 会对着好库报"结构过旧"。
+    #[test]
+    fn fresh_db_passes_shape_check() {
+        let conn = open_in_memory().expect("open");
+        assert_eq!(check_shape(&conn), Ok(()), "刚建的库应通过形状校验");
+    }
+
+    /// 旧结构的库（`user_version` 已到目标值但表结构是老的）必须被认出来。
+    ///
+    /// 这是开发阶段"改 DDL 不写迁移"约定下的真实路径：版本号骗过了迁移，
+    /// 只有查结构才拦得住。没有这一层，用户会在第一次写记忆时才看到
+    /// `no such table: memory_fts`。
+    #[test]
+    fn stale_db_fails_shape_check() {
+        let conn = Connection::open_in_memory().expect("open");
+        // 老 DDL：TEXT 主键、无 memory_fts。
+        conn.execute_batch(
+            "CREATE TABLE memory(
+               id TEXT PRIMARY KEY, tier TEXT NOT NULL, origin TEXT NOT NULL,
+               text TEXT NOT NULL, keywords TEXT, importance REAL NOT NULL DEFAULT 0.5,
+               created_at INTEGER NOT NULL, last_used_at INTEGER,
+               use_count INTEGER NOT NULL DEFAULT 0, content_hash TEXT NOT NULL,
+               injected_mark INTEGER NOT NULL DEFAULT 0, pref_key TEXT);",
+        )
+        .expect("建老表");
+        let err = check_shape(&conn).expect_err("老结构应被拦住");
+        assert!(err.contains("memory_fts"), "应指出缺 memory_fts：{err}");
+        assert!(err.contains("memory.no"), "应指出缺 no 列：{err}");
+    }
+
+    /// 空的新库也要过——形状校验不能依赖表里有数据。
+    #[test]
+    fn shape_check_passes_on_empty_memory_table() {
+        let conn = open_in_memory().expect("open");
+        let n: i64 = conn.query_row("SELECT count(*) FROM memory", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "本用例要的就是空表");
+        assert_eq!(check_shape(&conn), Ok(()));
+    }
+
     #[test]
     fn expected_tables_exist() {
         let conn = open_in_memory().expect("open");
         for t in [
-            "session", "entry", "memory", "cron", "standing_intent", "task", "audit", "kv",
+            "session", "entry", "memory", "memory_fts", "cron", "standing_intent", "task",
+            "audit", "kv",
         ] {
             let count: i64 = conn
                 .query_row(

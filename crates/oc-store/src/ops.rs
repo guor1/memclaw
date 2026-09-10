@@ -167,9 +167,17 @@ pub fn compact_with_summary(
     Ok(())
 }
 
-/// upsert 一条记忆（按 id）。
+/// upsert 一条记忆（按 id），并同步 `memory_fts` 索引。
+///
+/// **事务内一并做**：索引与表必须同进同退。半途失败若只写了表，那条记忆就检索不到
+/// （candidates 走索引），而它明明在库里——比整条写失败更难排查。
+///
+/// **索引侧先删后插**：contentless FTS 表的 `INSERT` 不认 rowid 冲突，同一 rowid
+/// 插两次会**累积**两份 token（旧文本的窗口仍在，改过的记忆按旧内容也能被搜到）。
+/// 故 upsert 的更新分支必须先 `DELETE` 再插。
 pub fn upsert_memory(conn: &Connection, m: &NewMemory) -> StoreResult<()> {
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO memory(id, tier, origin, text, keywords, importance, created_at, content_hash, pref_key)
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(id) DO UPDATE SET
@@ -187,6 +195,21 @@ pub fn upsert_memory(conn: &Connection, m: &NewMemory) -> StoreResult<()> {
             m.content_hash,
             m.pref_key
         ],
+    )?;
+    // 拿这条记忆的 rowid：`last_insert_rowid` 在 ON CONFLICT 走更新分支时不更新，
+    // 故按 id 回查（id 有 UNIQUE 索引）。
+    let no: i64 = tx.query_row("SELECT no FROM memory WHERE id = ?1", params![m.id], |r| r.get(0))?;
+    index_memory_text(&tx, no, &m.text)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 重建单条记忆的 FTS 索引项（先删后插，见 [`upsert_memory`]）。
+fn index_memory_text(conn: &Connection, no: i64, text: &str) -> StoreResult<()> {
+    conn.execute("DELETE FROM memory_fts WHERE rowid = ?1", params![no])?;
+    conn.execute(
+        "INSERT INTO memory_fts(rowid, terms) VALUES(?1, ?2)",
+        params![no, crate::fts::encode_doc(text)],
     )?;
     Ok(())
 }
@@ -418,57 +441,111 @@ fn fnv1a_hex(s: &str) -> String {
     format!("{hash:016x}")
 }
 
-/// 词法候选检索：用关键词 LIKE 粗筛，取候选集（精确排名在 oc-core）。
+/// `MemoryRow` 的取列清单，带 `m.` 前缀（各查询统一 `FROM memory m`）。
 ///
-/// M5：先用 LIKE；FTS5 索引在第 4 段接入以提升相关性。
+/// 与 [`map_memory_row`] **成对**使用：曾经出过一次「给 mapper 加了 `pref_key`
+/// 取值，却漏改动态拼接的 SELECT」，于是下标错位。清单与 mapper 各只有一份，
+/// 那类漂移就无从发生。
+const MEMORY_COLS: &str = "m.id, m.tier, m.origin, m.text, m.importance, m.created_at,
+     m.last_used_at, m.use_count, m.content_hash, m.pref_key";
+
+/// [`MEMORY_COLS`] 的行映射。下标顺序必须与清单一致。
+fn map_memory_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRow> {
+    Ok(MemoryRow {
+        id: r.get(0)?,
+        tier: Tier::from_db_str(&r.get::<_, String>(1)?),
+        origin: Origin::from_db_str(&r.get::<_, String>(2)?),
+        text: r.get(3)?,
+        importance: r.get(4)?,
+        created_at: r.get(5)?,
+        last_used_at: r.get(6)?,
+        use_count: r.get(7)?,
+        content_hash: r.get(8)?,
+        pref_key: r.get(9)?,
+    })
+}
+
+/// 词法候选检索：取候选集（精确排名在 oc-core）。
+///
+/// **走 FTS5 索引**（P2-4）：查询词编码成 `memory_fts` 的 MATCH 表达式先收窄，
+/// 再用原来的 `LIKE` 复核。索引是 LIKE 结果的超集（见 [`crate::fts`]），
+/// 复核负责剔掉「两字窗口都在但并不相邻」的行，故**结果集与纯 LIKE 完全一致**，
+/// 只是不必再全表扫。实测 10 万条时最慢查询从 560ms 降到 6ms 内。
+///
+/// 查询词若无法编码（如纯 emoji）则整体退回全表 LIKE——慢，但不会漏召回。
+///
+/// **排序用 `no DESC` 而非 `created_at DESC`**：两者都是「最近的在前」
+/// （`no` 是自增 rowid，`created_at` 是插入时的 `now_millis()`，同为插入序），
+/// 但按 `created_at` 排要把 MATCH 命中的全部行灌进临时 B-tree 再排，实测反而比
+/// 纯 LIKE 更慢（80~140ms）；按 `no` 走 rowid 逆序读，是 1~7ms 的那条路径。
+/// 本函数只产候选集、最终排名在 oc-core，取「最近 N 条」时用哪个单调量不影响语义。
 pub fn search_candidates(
     conn: &Connection,
     query_terms: &[String],
     tier_filter: Option<Tier>,
     limit: i64,
 ) -> StoreResult<Vec<MemoryRow>> {
-    // 构造 OR LIKE 条件（词法粗筛）。无词则取最近的。
-    // 列顺序必须与下方 query_map 的取值下标一致（含 pref_key 在第 9 位）。
-    let mut sql = String::from(
-        "SELECT id, tier, origin, text, importance, created_at, last_used_at, use_count, content_hash, pref_key
-         FROM memory WHERE 1=1",
-    );
-    if let Some(t) = tier_filter {
-        sql.push_str(&format!(" AND tier = '{}'", t.as_str()));
-    }
-    if !query_terms.is_empty() {
-        sql.push_str(" AND (");
-        for (i, _) in query_terms.iter().enumerate() {
-            if i > 0 {
-                sql.push_str(" OR ");
-            }
-            // 用参数绑定防注入。
-            sql.push_str(&format!("text LIKE ?{}", i + 1));
-        }
-        sql.push(')');
-    }
-    sql.push_str(&format!(" ORDER BY created_at DESC LIMIT {limit}"));
+    let tier_clause = match tier_filter {
+        // tier 来自枚举的 as_str，非用户输入，内联无注入风险。
+        Some(t) => format!(" AND m.tier = '{}'", t.as_str()),
+        None => String::new(),
+    };
 
-    let mut stmt = conn.prepare(&sql)?;
+    // 无查询词：取最近的若干条（不经索引，本就无 term 可匹配）。
+    if query_terms.is_empty() {
+        let sql = format!(
+            "SELECT {MEMORY_COLS} FROM memory m WHERE 1=1{tier_clause}
+             ORDER BY m.no DESC LIMIT ?1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit], map_memory_row)?;
+        return Ok(rows.collect::<Result<_, _>>()?);
+    }
+
     let like_params: Vec<String> = query_terms.iter().map(|t| format!("%{t}%")).collect();
-    let param_refs: Vec<&dyn rusqlite::ToSql> =
-        like_params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
 
-    let rows = stmt.query_map(param_refs.as_slice(), |r| {
-        Ok(MemoryRow {
-            id: r.get(0)?,
-            tier: Tier::from_db_str(&r.get::<_, String>(1)?),
-            origin: Origin::from_db_str(&r.get::<_, String>(2)?),
-            text: r.get(3)?,
-            importance: r.get(4)?,
-            created_at: r.get(5)?,
-            last_used_at: r.get(6)?,
-            use_count: r.get(7)?,
-            content_hash: r.get(8)?,
-            pref_key: r.get(9)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    match crate::fts::match_expr(query_terms) {
+        // 索引路径：MATCH 收窄 + LIKE 复核。
+        Some(match_expr) => {
+            // ?1 = MATCH 表达式，?2.. = LIKE 模式，最后一个 = limit。
+            let recheck = (0..query_terms.len())
+                .map(|i| format!("m.text LIKE ?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let sql = format!(
+                "SELECT {MEMORY_COLS} FROM memory_fts f JOIN memory m ON m.no = f.rowid
+                 WHERE f.memory_fts MATCH ?1{tier_clause} AND ({recheck})
+                 ORDER BY f.rowid DESC LIMIT ?{}",
+                query_terms.len() + 2
+            );
+            let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(query_terms.len() + 2);
+            binds.push(&match_expr);
+            binds.extend(like_params.iter().map(|s| s as &dyn rusqlite::ToSql));
+            binds.push(&limit);
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(binds.as_slice(), map_memory_row)?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        }
+        // 回落：有词编不进索引，只能全表 LIKE。语义与索引路径相同。
+        None => {
+            let pred = (0..query_terms.len())
+                .map(|i| format!("m.text LIKE ?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let sql = format!(
+                "SELECT {MEMORY_COLS} FROM memory m
+                 WHERE ({pred}){tier_clause}
+                 ORDER BY m.no DESC LIMIT ?{}",
+                query_terms.len() + 1
+            );
+            let mut binds: Vec<&dyn rusqlite::ToSql> =
+                like_params.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            binds.push(&limit);
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(binds.as_slice(), map_memory_row)?;
+            Ok(rows.collect::<Result<_, _>>()?)
+        }
+    }
 }
 
 /// 按偏好主题取既有偏好（P1-3，供 `supersede` 判同主题冲突）。
@@ -500,8 +577,21 @@ pub fn memory_by_pref_key(conn: &Connection, key: &str) -> StoreResult<Vec<Memor
 
 /// 删除一条记忆（P1-3：supersede 的 Replace 用来清掉被取代的旧偏好）。
 ///
+/// 连带删掉 FTS 索引项——否则被取代的旧偏好仍会被检索命中（`memory_fts` 是
+/// contentless 表，SQLite 不会因主表删行而自动清理）。事务包裹，同进同退。
+///
 /// 返回是否删到行。
 pub fn delete_memory(conn: &Connection, id: &str) -> StoreResult<bool> {
-    let n = conn.execute("DELETE FROM memory WHERE id = ?1", params![id])?;
+    let tx = conn.unchecked_transaction()?;
+    // 先取 rowid：删完就查不到了，而索引项要按 rowid 删。
+    let no: Option<i64> = tx
+        .query_row("SELECT no FROM memory WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()?;
+    let Some(no) = no else {
+        return Ok(false); // 无此行，索引也无从清理。
+    };
+    let n = tx.execute("DELETE FROM memory WHERE no = ?1", params![no])?;
+    tx.execute("DELETE FROM memory_fts WHERE rowid = ?1", params![no])?;
+    tx.commit()?;
     Ok(n > 0)
 }

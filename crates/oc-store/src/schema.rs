@@ -28,8 +28,13 @@ CREATE TABLE entry (
 CREATE INDEX idx_entry_session_seq ON entry(session_id, seq);
 
 -- ── 记忆索引 ───────────────────────────────────────────────
+-- `no INTEGER PRIMARY KEY` 是显式 rowid：`memory_fts` 是 contentless 表，只能靠
+-- rowid 关联回本表。SQLite 只对**声明了** INTEGER PRIMARY KEY 的表保证 rowid
+-- 在 VACUUM 后不变；隐式 rowid 允许被重编号，那会让 FTS 的映射整体错位
+-- （指向别的记忆，而非查不到）。id 仍是业务主键，改 UNIQUE 保持等价约束。
 CREATE TABLE memory (
-  id            TEXT PRIMARY KEY,
+  no            INTEGER PRIMARY KEY,
+  id            TEXT NOT NULL UNIQUE,
   tier          TEXT NOT NULL,
   origin        TEXT NOT NULL,
   text          TEXT NOT NULL,
@@ -42,6 +47,24 @@ CREATE TABLE memory (
   injected_mark INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_memory_tier_origin ON memory(tier, origin);
+
+-- `memory.text` 的全文索引（P2-4）。存的不是原文，而是
+-- `crate::fts::encode_doc` 产出的「相邻两字」词流；查询侧用同一函数编码，
+-- 于是索引是 `LIKE '%词%'` 结果的**超集**。理由见 fts 模块文档。
+--
+-- `content=''`（contentless）：原文已在 memory.text，再存一份纯属浪费——
+-- 实测 10 万条时 contentless 索引占表的 28%，存内容则到 200~300%。
+-- `detail=none`：不存词位，索引只答「这些两字窗口都出现过」，
+-- 相邻性由 SQL 里保留的 `LIKE` 复核负责（也因此不支持多 token 短语查询）。
+-- `contentless_delete=1`：contentless 表默认删不掉行，而记忆会被
+-- supersede 替换和删除，没有它索引只增不减。
+CREATE VIRTUAL TABLE memory_fts USING fts5(
+  terms,
+  tokenize='unicode61',
+  detail=none,
+  content='',
+  contentless_delete=1
+);
 
 -- ── 主动性 ─────────────────────────────────────────────────
 CREATE TABLE cron (

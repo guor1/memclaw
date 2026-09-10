@@ -29,6 +29,22 @@ pub fn run(dump_schema: bool) -> Result<()> {
         version,
         oc_store::migrate::TARGET_VERSION
     );
+
+    // 2.5) 库内形状校验。
+    //
+    // 版本号对不代表表结构对：开发阶段的 schema 变更是**直接改建表 DDL**
+    // （不写迁移步进，见项目约定），于是旧库的 `user_version` 已经等于目标值、
+    // 迁移整个 no-op，但表结构还是老的。没有这一步，`oc doctor` 会对着一个
+    // 「每次记忆操作都报 no such table」的库照样打印"全部检查通过"，
+    // 真正的报错要等到运行时才冒出来。
+    if let Err(missing) = oc_store::check_shape(&conn) {
+        println!("[err] 数据库结构与当前版本不符，缺少：{missing}");
+        println!();
+        println!("      开发阶段不做数据迁移。请停掉 daemon 后删库重建：");
+        println!("        rm {}*        # 连 -wal / -shm 一起删", db.display());
+        println!("        oc doctor              # 按新 DDL 重建");
+        anyhow::bail!("数据库结构过旧");
+    }
     drop(conn);
 
     // 3) 配置校验：存在 config.toml 则解析+校验真实配置，否则校验默认配置。
