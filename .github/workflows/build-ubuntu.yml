@@ -182,9 +182,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-13 = Intel x86_64，macos-14 = Apple Silicon arm64。两个都打，
-        # 覆盖新老 Mac Mini；成本几乎为零。
-        os: [macos-13, macos-14]
+        # macos-15-intel = Intel x86_64，macos-14 = Apple Silicon arm64。两个都
+        # 打，覆盖新老 Mac Mini；成本几乎为零。
+        #
+        # Intel 一栏**不要**写回 macos-13：该 label 已下线，GitHub 不再有对应
+        # 机器，job 会一直卡在 "Waiting for a runner to pick up this job" 直到
+        # 24 小时后被系统丢弃——不报错、也不失败，只是永远不结束。Intel 现在
+        # 统一走 `-intel` 后缀（macos-15-intel / macos-26-intel）。
+        #
+        # 两边都特意选还在供的**最老**版本：产物的 macOS 部署目标取决于构建机
+        # 的系统版本，用老的编能兼容更多旧机器。
+        os: [macos-15-intel, macos-14]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
