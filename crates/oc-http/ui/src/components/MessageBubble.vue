@@ -84,6 +84,7 @@ const toolIcon = {
 }
 
 .bubble {
+  min-width: 0;
   max-width: min(72ch, 92%);
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-md);
@@ -91,12 +92,18 @@ const toolIcon = {
 }
 
 .bubble.user {
+  max-width: min(60ch, 80%);
   background: var(--accent);
   color: white;
   border-bottom-right-radius: var(--r-sm);
 }
 
 .bubble.assistant {
+  /* Assistant prose gets a generous reading column, not the narrow 72ch default.
+     min() keeps it fluid: 840px on wide panes, shrinking to the full messages
+     column (minus side padding) on narrow ones. Shrink-to-fit still keeps short
+     replies compact. */
+  max-width: min(840px, 100%);
   background: var(--surface-raised);
   border: 1px solid var(--border);
   border-bottom-left-radius: var(--r-sm);
