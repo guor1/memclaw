@@ -1,6 +1,8 @@
-//! 配置类型、校验、SecretRef、ReloadKind（设计 §4.8、§13.2）。
+//! 配置类型、校验、SecretRef（设计 §4.8、§13.2）。
 //!
 //! 解引用 SecretRef（读 env/文件）是 IO，在 server 做；core 只持类型 + 校验形状。
+//!
+//! 不支持热更（P2-5 定案方案 B）：修改 config.toml 后需重启 `oc serve` 才会生效。
 
 use std::path::PathBuf;
 
@@ -274,15 +276,6 @@ pub enum SecretRef {
     Inline(String),
     Env(String),
     File(PathBuf),
-}
-
-/// 每个配置项的热更能力（设计 §13.3）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReloadKind {
-    /// 可 ArcSwap 热更（如 trigger_threshold、anti-nagging）。
-    Hot,
-    /// 需重启（如 transport、db 路径）。
-    RestartRequired,
 }
 
 impl Config {

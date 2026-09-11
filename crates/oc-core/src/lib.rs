@@ -17,4 +17,4 @@ pub mod queue;
 pub mod summary;
 pub mod tool;
 
-pub use config::{Config, ReloadKind, SecretRef};
+pub use config::{Config, SecretRef};

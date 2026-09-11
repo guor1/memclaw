@@ -1,6 +1,6 @@
 //! 模型目录 / 别名 / failover（设计 §4.6）。纯逻辑。
 //!
-//! 代际快照由 server 用 ArcSwap 承载；core 只接收某一代不可变引用。
+//! 无 IO、无状态；仅持有某一代不可变目录的引用做别名解析与 failover 选择。
 
 use serde::{Deserialize, Serialize};
 

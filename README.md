@@ -251,9 +251,9 @@ oc debug --watch     # 每秒刷新，观察「不回复 / 卡住」时状态如
 - `oc http` 真机端到端：起 daemon + `oc http`，用真实 OpenAI SDK 打通。
 
 **中期（配置与可靠性）**
-- ArcSwap 代际快照 / 配置热更新（当前仅注释）。
+- ~~ArcSwap 代际快照 / 配置热更新~~（P2-5 定案：不做热更，配置变更需重启 `oc serve`）。
 - Provider failover 接线（`failover_plan` / `resolve_alias` 已实现但无调用方）。
-- 双平台 CI 矩阵（unix socket 目前只编译不在 Linux 跑）。
+- ~~双平台 CI 矩阵~~（unix socket 已在 Linux/macOS 实跑，Windows 走命名管道）。
 - 抽出 `oc-core::context` 模块（上下文加载现散落在 server::session）。
 
 **远期（能力增强）**

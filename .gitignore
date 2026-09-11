@@ -18,6 +18,9 @@ Cargo.lock.orig
 # 真机测试临时构造的请求体
 /.e2e_req*.json
 
+# Claude Code 本地个人设置（不提交）
+.claude/settings.local.json
+
 # 编辑器 / OS
 .DS_Store
 *.swp
