@@ -54,42 +54,42 @@ pub fn fingerprint(body: &str) -> String {
 /// - 不以 `---` 开头 → 无 frontmatter，整篇为正文，其余字段取缺省（目录名当 name）。
 /// - 有 frontmatter 但 YAML 非法 / 缺闭界 `---` → `None`（调用方跳过并 warn）。
 pub fn parse_skill(dir_name: &str, raw: &str) -> Option<Skill> {
-    match extract_frontmatter(raw) {
-        Some((fm_str, rest)) => {
-            let fm: SkillFrontmatter = serde_yaml::from_str(fm_str).ok()?;
-            let name = fm.name.unwrap_or_else(|| dir_name.to_string());
-            let description = fm.description.unwrap_or_default();
-            let enabled = fm.enabled.unwrap_or(true);
-            let os = fm
-                .metadata
-                .and_then(|m| m.openclaw)
-                .map(|o| o.os)
-                .unwrap_or_default();
-            let body = rest.trim().to_string();
-            Some(Skill {
-                name,
-                description,
-                fingerprint: fingerprint(&body),
-                body,
-                enabled,
-                os,
-            })
-        }
-        None => {
-            let body = raw.trim().to_string();
-            Some(Skill {
-                name: dir_name.to_string(),
-                description: String::new(),
-                fingerprint: fingerprint(&body),
-                body,
-                enabled: true,
-                os: vec![],
-            })
-        }
+    if !raw.starts_with("---") {
+        // 不以 `---` 开头 → 无 frontmatter，整篇为正文。
+        let body = raw.trim().to_string();
+        return Some(Skill {
+            name: dir_name.to_string(),
+            description: String::new(),
+            fingerprint: fingerprint(&body),
+            body,
+            enabled: true,
+            os: vec![],
+        });
     }
+    // 以 `---` 开头：缺闭界 `---` / YAML 非法 → None。
+    let (fm_str, rest) = extract_frontmatter(raw)?;
+    let fm: SkillFrontmatter = serde_yaml::from_str(fm_str).ok()?;
+    let name = fm.name.unwrap_or_else(|| dir_name.to_string());
+    let description = fm.description.unwrap_or_default();
+    let enabled = fm.enabled.unwrap_or(true);
+    let os = fm
+        .metadata
+        .and_then(|m| m.openclaw)
+        .map(|o| o.os)
+        .unwrap_or_default();
+    let body = rest.trim().to_string();
+    Some(Skill {
+        name,
+        description,
+        fingerprint: fingerprint(&body),
+        body,
+        enabled,
+        os,
+    })
 }
 
-/// 若以 `---` 开头，返回 `(frontmatter 文本, 正文)`；否则 `None`。
+/// 前置条件：`raw` 以 `---` 开头。返回 `(frontmatter 文本, 正文)`；
+/// 缺闭界 `---` 时返回 `None`。
 fn extract_frontmatter(raw: &str) -> Option<(&str, &str)> {
     let s = raw.strip_prefix("---")?;
     // 允许 `---` 后紧跟换行。
@@ -194,6 +194,18 @@ body
     fn malformed_frontmatter_is_none() {
         let bad = "---\nname: [unclosed\n---\nbody";
         assert!(parse_skill("x", bad).is_none());
+    }
+
+    #[test]
+    fn unterminated_frontmatter_is_none() {
+        assert!(parse_skill("x", "---\nname: broken").is_none());
+    }
+
+    #[test]
+    fn plain_no_frontmatter_still_some() {
+        let s = parse_skill("mydir", "no dashes here").unwrap();
+        assert_eq!(s.name, "mydir");
+        assert_eq!(s.body, "no dashes here");
     }
 
     #[test]
