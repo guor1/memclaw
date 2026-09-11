@@ -60,7 +60,7 @@
 
 | ID | 主题 | 优先级 | 来源 | 现状 |
 |---|---|---|---|---|
-| ROAD-1 | Skills 完整形态（SKILL.md 格式 + `<available_skills>` 按需注入 + 资格门控） | P1 | §8 | 仅最简版：`~/.oc/skills/*.md` 文件名当技能名、全文灌进 system prompt（`oc-cli/src/skills_loader.rs` + `oc-core/src/prompt.rs`）。无 frontmatter、无 sha256 版本、无门控、无按需加载 |
+| ROAD-1 | Skills 完整形态（SKILL.md 格式 + `<available_skills>` 按需注入 + 资格门控） | P1 | §8 | 已完成：目录式 SKILL.md + frontmatter + `<available_skills>` 按需注入 + enabled/config/os 门控；env/bins 门控留后续 |
 | ROAD-2 | 渠道抽象 + 首个真实渠道（Telegram/Discord 等） | P2 | §2 | 无渠道层。当前入口仅 CLI/TUI + loopback HTTP（`oc http` 原生 API + 内嵌 Web UI）。个人助手定位下单源够用，多源暂缓 |
 | ROAD-3 | 插件系统（manifest 发现 + bundle plugin + 注册能力） | P2 | §15 | 无插件机制。`plugin-agnostic` 是设计前提，但当前无外部插件消费方 |
 | ROAD-4 | Hooks（内部命令钩子 + 插件接缝） | P2 | §14 | 无 hook 机制。扩展接缝（`before_prompt_build` / `after_tool_call` 等）未做 |
@@ -116,13 +116,13 @@ P2 阶段 1（读写分离 / 写线程自愈 / 内存淘汰）代码已落地，
 
 ### ROAD-1 Skills 完整形态
 
-当前 `~/.oc/skills/*.md` 是最简版：文件名去扩展名当技能名、**全文整段灌进 system prompt**。规划里的【必须】三件都还没做，它们是 ClawHub（ROAD-8）能落地的前置：
+已完成【必须】三件，它们是 ClawHub（ROAD-8）能落地的前置：
 
 1. **SKILL.md 标准格式**：`SkillBrief` 加 frontmatter（name/description/when_to_use/triggers 等），`skills_loader.rs` 解析元数据而非全文照读。
 2. **`<available_skills>` 按需注入**：base prompt 里只放技能名 + `sha256` 版本标记，模型用 `file` 工具按需读正文（正文变了版本号变、触发重读）。这样 base prompt 保持精简。
-3. **资格门控**：metadata/env/config/allowlist 决定哪些技能对本会话可见。
+3. **资格门控**：metadata/env/config/allowlist 决定哪些技能对本会话可见（enabled/config/os 已落地）。
 
-依赖链：ROAD-1 → ROAD-8（ClawHub 装回来的就是带 frontmatter 的 SKILL.md 包，格式不统一则装回来也没法正确加载）。
+留后续：env/bins 门控未做。依赖链：ROAD-1 → ROAD-8（ClawHub 装回来的就是带 frontmatter 的 SKILL.md 包，格式不统一则装回来也没法正确加载）。
 
 ### ROAD-8 ClawHub
 
