@@ -47,3 +47,7 @@
 ## archive/ — 归档
 
 旧文档，已冻结，不再更新。详见 [archive/README.md](archive/README.md)。
+
+---
+
+任务看板（新需求 / 缺陷 / 规划）：[../BOARD.md](../BOARD.md)

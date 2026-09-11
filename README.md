@@ -92,7 +92,7 @@ oc-cli ──▶ oc-tui  ──▶ oc-server ──▶ oc-core   (纯策略：�
 | 查某个命令或配置项 | [CLI 参考](docs/reference/cli.md) · [配置参考](docs/reference/config.md) |
 | 出问题了 | [故障排查](docs/operations/troubleshooting.md) |
 | 理解内部怎么运作 | [架构文档](docs/architecture/overview.md) |
-| 看改了什么 / 接下来做什么 | [CHANGELOG](CHANGELOG.md) · [ROADMAP](ROADMAP.md) |
+| 看改了什么 / 接下来做什么 | [CHANGELOG](CHANGELOG.md) · [看板](BOARD.md) |
 
 文档总索引：[docs/README.md](docs/README.md)。
 

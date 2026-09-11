@@ -241,5 +241,5 @@ bash 脚本必须用 Git Bash 跑（`C:\Program Files\Git\bin\bash.exe`）；
 ## 相关
 
 - [人工探针清单](manual-probes.md) —— 只剩需要人眼判断的少数几条
-- [ROADMAP](../../ROADMAP.md) —— 未完成的工作
+- [看板](../../BOARD.md) —— 未完成的工作（含 TEST-1 / TEST-2 / TEST-3 三条测试缺口）
 - [CHANGELOG](../../CHANGELOG.md) —— 已发生的变更

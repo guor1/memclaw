@@ -54,7 +54,7 @@ cron 表达式最小粒度是分钟，「10 秒后提醒我」没法表达。`de
 
 ### 已知语义偏差
 
-标准 cron 在 day-of-month 和 day-of-week 都非 `*` 时取 OR，当前实现取 AND。个人助手场景多数只用其一，见 [ROADMAP](../../ROADMAP.md)。
+标准 cron 在 day-of-month 和 day-of-week 都非 `*` 时取 OR，当前实现取 AND。个人助手场景多数只用其一，见 [看板](../../BOARD.md) BUG-1。
 
 ## standing intent：话题触发式待办
 
