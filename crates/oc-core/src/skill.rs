@@ -9,7 +9,10 @@ use sha2::{Digest, Sha256};
 /// 一个技能。
 #[derive(Debug, Clone)]
 pub struct Skill {
+    /// frontmatter `name`（缺省回退目录名）。进 prompt 展示用。
     pub name: String,
+    /// 目录名（可路由 slug）。门控（allowlist/denylist）按它匹配，与 `name` 解耦。
+    pub slug: String,
     pub description: String,
     /// 剥离 frontmatter 后的正文。
     pub body: String,
@@ -59,6 +62,7 @@ pub fn parse_skill(dir_name: &str, raw: &str) -> Option<Skill> {
         let body = raw.trim().to_string();
         return Some(Skill {
             name: dir_name.to_string(),
+            slug: dir_name.to_string(),
             description: String::new(),
             fingerprint: fingerprint(&body),
             body,
@@ -80,6 +84,7 @@ pub fn parse_skill(dir_name: &str, raw: &str) -> Option<Skill> {
     let body = rest.trim().to_string();
     Some(Skill {
         name,
+        slug: dir_name.to_string(),
         description,
         fingerprint: fingerprint(&body),
         body,
@@ -102,7 +107,7 @@ fn extract_frontmatter(raw: &str) -> Option<(&str, &str)> {
 
 fn normalize_os(os: &str) -> &str {
     match os {
-        "darwin" | "macos" | "mac" => "macos",
+        "darwin" | "macos" => "macos",
         "windows" | "win32" => "windows",
         "linux" => "linux",
         other => other,
@@ -128,8 +133,8 @@ pub fn gated_skills(
     skills
         .into_iter()
         .filter(|s| s.enabled)
-        .filter(|s| !denylist.iter().any(|d| d == &s.name))
-        .filter(|s| allowlist.is_empty() || allowlist.iter().any(|a| a == &s.name))
+        .filter(|s| !denylist.iter().any(|d| d == &s.slug))
+        .filter(|s| allowlist.is_empty() || allowlist.iter().any(|a| a == &s.slug))
         .filter(|s| os_matches(&s.os, host_os))
         .collect()
 }
@@ -211,9 +216,9 @@ body
     #[test]
     fn disabled_and_denylist_win() {
         let skills = vec![
-            Skill { name: "a".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: false, os: vec![] },
-            Skill { name: "b".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
-            Skill { name: "c".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
+            Skill { name: "a".into(), slug: "a".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: false, os: vec![] },
+            Skill { name: "b".into(), slug: "b".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
+            Skill { name: "c".into(), slug: "c".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
         ];
         // enabled:false 过滤掉 a；denylist 优先于 allowlist，过滤 c。
         let out = gated_skills(skills, &[], &["c".to_string()], "linux");
@@ -223,8 +228,8 @@ body
     #[test]
     fn allowlist_restricts() {
         let skills = vec![
-            Skill { name: "a".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
-            Skill { name: "b".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
+            Skill { name: "a".into(), slug: "a".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
+            Skill { name: "b".into(), slug: "b".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
         ];
         let out = gated_skills(skills, &["a".to_string()], &[], "linux");
         assert_eq!(out.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["a"]);
@@ -237,11 +242,66 @@ body
         assert!(os_matches(&[], "linux"));                     // 空 = 不限
         assert!(!os_matches(&["darwin".to_string()], "windows"));
         let skills = vec![
-            Skill { name: "mac-only".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec!["darwin".to_string()] },
-            Skill { name: "any".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
+            Skill { name: "mac-only".into(), slug: "mac-only".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec!["darwin".to_string()] },
+            Skill { name: "any".into(), slug: "any".into(), description: "".into(), body: "".into(), fingerprint: "".into(), enabled: true, os: vec![] },
         ];
         let out = gated_skills(skills, &[], &[], "windows");
         assert_eq!(out.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["any"]);
+    }
+
+    /// `windows` / `win32` 都应归一成 `windows`（规范只保留这两个别名）。
+    #[test]
+    fn os_matches_windows_and_win32_aliases() {
+        assert!(os_matches(&["windows".to_string()], "windows"));
+        assert!(os_matches(&["win32".to_string()], "windows"));
+        assert!(!os_matches(&["win32".to_string()], "linux"));
+        // 未文档化的 "mac" 别名必须不再命中 macos。
+        assert!(!os_matches(&["mac".to_string()], "macos"));
+    }
+
+    /// 门控按目录 slug 匹配，而非 frontmatter `name`。
+    ///
+    /// frontmatter `name` 是可读展示名，可能与目录名（slug）不同；allowlist/denylist
+    /// 必须键在 slug 上，否则按展示名匹配不到真正要开关的技能目录。
+    #[test]
+    fn gating_keys_on_slug_not_frontmatter_name() {
+        // slug = "pdf", frontmatter name = "PDF 生成器"。
+        let pdf = Skill {
+            name: "PDF 生成器".into(),
+            slug: "pdf".into(),
+            description: "".into(),
+            body: "".into(),
+            fingerprint: "".into(),
+            enabled: true,
+            os: vec![],
+        };
+        let todo = Skill {
+            name: "待办".into(),
+            slug: "todo".into(),
+            description: "".into(),
+            body: "".into(),
+            fingerprint: "".into(),
+            enabled: true,
+            os: vec![],
+        };
+
+        // allowlist 填 slug "pdf" → 只保留 pdf（按 name 匹配会一个都不留）。
+        let out = gated_skills(
+            vec![pdf.clone(), todo.clone()],
+            &["pdf".to_string()],
+            &[],
+            "linux",
+        );
+        assert_eq!(out.iter().map(|s| s.slug.as_str()).collect::<Vec<_>>(), vec!["pdf"]);
+
+        // denylist 填 slug "pdf" → 踢掉 pdf（按 name 匹配会踢不掉）。
+        let out = gated_skills(
+            vec![pdf.clone(), todo.clone()],
+            &[],
+            &["pdf".to_string()],
+            "linux",
+        );
+        assert_eq!(out.iter().map(|s| s.slug.as_str()).collect::<Vec<_>>(), vec!["todo"]);
     }
 
     #[test]

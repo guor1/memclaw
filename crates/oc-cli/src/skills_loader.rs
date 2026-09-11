@@ -34,10 +34,14 @@ fn load_from_dir(dir: &std::path::Path, cfg: &SkillsConfig, host_os: &str) -> Ve
             Some(r) => r,
             None => continue,
         };
-        let dir_name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
+        let dir_name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n,
+            None => {
+                // 目录名非 UTF-8：没有可路由的 slug，跳过而不是加载成空名技能。
+                tracing::warn!(path = %path.display(), "skill 目录名非 UTF-8，跳过");
+                continue;
+            }
+        };
         match parse_skill(dir_name, &raw) {
             Some(s) => out.push(s),
             None => tracing::warn!(path = %path.display(), "skill frontmatter 解析失败，跳过"),
@@ -84,6 +88,48 @@ mod tests {
         let out = load_from_dir(&skills, &cfg, "linux");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "todoist");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    /// slug 必须等于目录名，而非 frontmatter `name`——门控与路由键的是 slug。
+    #[test]
+    fn slug_is_directory_name_not_frontmatter_name() {
+        let base = tmp();
+        // 用独立子目录名，避免与同进程其它用例共用 per-PID 临时根而互相踩踏。
+        let skills = base.join("skills-slug");
+        // 目录名 "pdf" 与 frontmatter name 故意不同。
+        fs::create_dir_all(skills.join("pdf")).unwrap();
+        fs::write(
+            skills.join("pdf").join("SKILL.md"),
+            "---\nname: PDF 生成器\ndescription: 生成 PDF\n---\nbody",
+        )
+        .unwrap();
+
+        let cfg = SkillsConfig::default();
+        let out = load_from_dir(&skills, &cfg, "linux");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].slug, "pdf", "slug 应是目录名");
+        assert_eq!(out[0].name, "PDF 生成器", "name 仍是 frontmatter 展示名");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    /// 非 UTF-8 目录名跳过（带 warn），不得加载成 name/slug 为空的技能。
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_dir_name_is_skipped() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let base = tmp();
+        let skills = base.join("skills-nonutf8");
+        // 目录名含非法 UTF-8 字节 0xFF。
+        let bad = skills.join(OsString::from_vec(vec![b'b', b'a', b'd', 0xFF]));
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("SKILL.md"), "just a body").unwrap();
+
+        let cfg = SkillsConfig::default();
+        let out = load_from_dir(&skills, &cfg, "linux");
+        assert!(out.is_empty(), "非 UTF-8 目录名应跳过: {out:?}");
         fs::remove_dir_all(&base).ok();
     }
 }

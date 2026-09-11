@@ -159,7 +159,7 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
         skills.sort_by(|a, b| a.name.cmp(&b.name));
         prefix.push_str("\n# 技能\n可用技能（正文不在本提示词内，用 file 工具 read `~/.oc/skills/<name>/SKILL.md` 按需读取；指纹变了要重读）：\n");
         for s in skills {
-            let desc = if s.description.is_empty() { "" } else { &s.description };
+            let desc = &s.description;
             prefix.push_str(&format!("- {} — {} [fingerprint {}]\n", s.name, desc, s.fingerprint));
         }
     }
@@ -340,6 +340,7 @@ mod tests {
     fn skill(name: &str, desc: &str, body: &str) -> crate::skill::Skill {
         crate::skill::Skill {
             name: name.into(),
+            slug: name.into(),
             description: desc.into(),
             body: body.into(),
             fingerprint: crate::skill::fingerprint(body),
@@ -366,6 +367,11 @@ mod tests {
         let rendered = render_system_prompt(&p);
         assert!(rendered.stable_prefix.contains("pdf"), "应含技能名");
         assert!(rendered.stable_prefix.contains("生成 PDF"), "应含描述");
+        assert!(
+            rendered.stable_prefix.contains("[fingerprint "),
+            "索引应带内容指纹（变了才触发模型重读正文）: {}",
+            rendered.stable_prefix
+        );
         assert!(
             !rendered.stable_prefix.contains("BODY_MARKER_XYZ"),
             "正文不得注入：{rendered:?}"

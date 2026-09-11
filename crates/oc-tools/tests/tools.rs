@@ -223,6 +223,36 @@ async fn file_raw_root_allows_relative_path_via_cwd() {
     assert!(r.content.contains("内容"));
 }
 
+/// 核心机制回归：`~/.oc/skills/<name>/SKILL.md` 必须以 `~` 开头的绝对路径
+/// 解析到主目录，而不是被拼成 `<cwd>/~/.oc/...`。主目录不一定是 allowed_roots
+/// 的父目录，所以这里直接放行读 HOME 下的一个真实文件（allowed_roots 含 HOME）。
+#[tokio::test]
+async fn file_read_expands_tilde_under_home_root() {
+    let home = oc_tools::path_guard::home_dir().expect("测试环境应能定位主目录");
+
+    // 在 HOME 下建一个技能式目录 + SKILL.md。
+    let skills = home.join(".oc-test-skills");
+    std::fs::create_dir_all(&skills).unwrap();
+    std::fs::write(skills.join("SKILL.md"), "TILDE_BODY_XYZ").unwrap();
+
+    // allowed_roots 含 HOME：展开后的 `~/.oc-test-skills/SKILL.md` 落在根内。
+    let tool = FileTool::new(vec![home.clone()]);
+    // cwd 故意设到别处，证明 `~` 不是相对 cwd 解析的。
+    let mut cx = ToolCtx::detached(CancellationToken::new());
+    cx.cwd = std::env::temp_dir();
+
+    let r = tool
+        .invoke(
+            serde_json::json!({ "op": "read", "path": "~/.oc-test-skills/SKILL.md" }),
+            cx,
+        )
+        .await
+        .expect("~/... 路径应解析到主目录并放行");
+    assert!(r.content.contains("TILDE_BODY_XYZ"), "读到的不是技能正文: {}", r.content);
+
+    std::fs::remove_dir_all(&skills).ok();
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // op=edit / op=append
 //

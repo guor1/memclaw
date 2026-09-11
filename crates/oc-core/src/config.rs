@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use garde::Validate;
 use serde::{Deserialize, Serialize};
 
-/// 顶层配置。分节：server / models / memory / proactive / tools / watchdog。
+/// 顶层配置。分节：server / models / memory / proactive / tools / watchdog / skills。
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct Config {
     #[garde(range(min = 1))]

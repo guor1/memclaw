@@ -76,6 +76,7 @@ async fn skills_reach_model_request() {
     let mut c = cfg("人格");
     c.skills = vec![oc_core::skill::Skill {
         name: "pdf".into(),
+        slug: "pdf".into(),
         description: "生成 PDF".into(),
         body: "正文不该进提示词".into(),
         fingerprint: oc_core::skill::fingerprint("正文不该进提示词"),

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::error::{ToolError, ToolResult};
-use crate::path_guard::resolve_in_roots;
+use crate::path_guard::{expand_home, resolve_in_roots};
 use crate::sanitize::sanitize;
 use crate::types::{ToolCtx, ToolOutput, ToolPolicy, ToolSpec};
 use crate::Tool;
@@ -64,8 +64,12 @@ impl FileTool {
     }
 
     /// 解析路径（相对 cwd）并校验在允许范围内。委托给共享的 path_guard。
+    ///
+    /// 先展开开头的 `~`（`~/.oc/skills/...` → 用户主目录），否则会被当成
+    /// cwd 下的字面 `~` 目录而解析失败。
     fn check(&self, path: &Path, cwd: &Path) -> ToolResult<PathBuf> {
-        resolve_in_roots(path, cwd, &self.allowed_roots)
+        let expanded = expand_home(&path.to_string_lossy());
+        resolve_in_roots(Path::new(&expanded), cwd, &self.allowed_roots)
     }
 }
 
