@@ -6,21 +6,18 @@ use axum::{
     extract::{Path, State as AxumState},
     http::HeaderMap,
     response::{IntoResponse, Response as AxumResponse, Sse},
-    routing::{get, post},
+    routing::post,
     Json, Router,
 };
 use dashmap::DashMap;
-use tower_http::cors::CorsLayer;
 
-use oc_proto::{
-    ChatAbortParams, ChatSendParams, ConnectParams, Frame, Method, MethodOk, Req, ReqId, ResResult,
-    RunId, SessionId, PROTO_VERSION,
-};
+use oc_proto::{ChatAbortParams, ChatSendParams, Frame, Method, MethodOk, RunId, SessionId};
 
 use crate::{
     adapter::{self, ResponseSessions},
     conn_pool::{ConnPool, NdjsonConn},
     error::{HttpError, HttpResult},
+    proto::{await_res, handshake, send_req},
     sse::{stream_sse, SseState},
     types::*,
 };
@@ -35,93 +32,34 @@ pub struct ResponseRecord {
 
 #[derive(Clone)]
 pub struct AppState {
-    pool: ConnPool,
+    pub(crate) pool: ConnPool,
     /// response_id → session, for `previous_response_id` continuity.
     sessions: ResponseSessions,
     /// response_id → run record, for cancel.
     records: Arc<DashMap<String, ResponseRecord>>,
     default_model: String,
+    /// Bearer token, injected into the Web UI's index.html so the browser
+    /// can authenticate API requests without a separate config step.
+    pub(crate) token: Option<String>,
 }
 
-pub fn create_app(pool: ConnPool, default_model: String) -> Router {
-    let state = AppState {
-        pool,
-        sessions: Arc::new(DashMap::new()),
-        records: Arc::new(DashMap::new()),
-        default_model,
-    };
+impl AppState {
+    pub fn new(pool: ConnPool, default_model: String, token: Option<String>) -> Self {
+        Self {
+            pool,
+            sessions: Arc::new(DashMap::new()),
+            records: Arc::new(DashMap::new()),
+            default_model,
+            token,
+        }
+    }
+}
 
+/// The OpenAI Responses API routes.
+pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/responses", post(create_response))
         .route("/v1/responses/:id/cancel", post(cancel_response))
-        .route("/health", get(health))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
-}
-
-async fn health() -> &'static str {
-    "ok"
-}
-
-/// Perform the `connect` handshake. oc-server hard-rejects a version mismatch,
-/// so this must precede any other method on a fresh connection.
-async fn handshake(conn: &mut NdjsonConn) -> HttpResult<()> {
-    send_req(
-        conn,
-        Method::Connect(ConnectParams {
-            proto_version: PROTO_VERSION,
-            token: None,
-        }),
-        None,
-    )
-    .await?;
-
-    match await_res(conn).await? {
-        MethodOk::Hello { .. } => Ok(()),
-        other => Err(HttpError::Protocol(format!(
-            "expected hello, got {other:?}"
-        ))),
-    }
-}
-
-/// Send a `Req` frame.
-async fn send_req(
-    conn: &mut NdjsonConn,
-    method: Method,
-    idempotency_key: Option<String>,
-) -> HttpResult<()> {
-    let frame = Frame::Req(Req {
-        id: ReqId::new(uuid::Uuid::now_v7().to_string()),
-        method,
-        idempotency_key: idempotency_key.map(oc_proto::IdemKey::new),
-    });
-    conn.tx
-        .send(frame)
-        .await
-        .map_err(|_| HttpError::Protocol("daemon connection closed".into()))
-}
-
-/// Read frames until the next `Res`, returning its payload.
-///
-/// Events may interleave before the `Res` arrives; they are dropped here since
-/// no run is being tracked yet.
-async fn await_res(conn: &mut NdjsonConn) -> HttpResult<MethodOk> {
-    loop {
-        match conn.rx.recv().await {
-            Some(Frame::Res(res)) => {
-                return match res.result {
-                    ResResult::Ok(ok) => Ok(ok),
-                    ResResult::Err(e) => Err(HttpError::from_proto(e)),
-                }
-            }
-            Some(_) => continue,
-            None => {
-                return Err(HttpError::Protocol(
-                    "daemon closed connection before responding".into(),
-                ))
-            }
-        }
-    }
 }
 
 /// Read [`adapter::SESSION_KEY_HEADER`], if present.

@@ -223,12 +223,30 @@ pub struct HealthOk {
     pub db_version: u32,
 }
 
+/// assistant 发起的一次工具调用（对外视图，历史回放用）。
+///
+/// 与 `oc-llm` 的 `ToolCallSpec` 同构但独立定义：协议层不依赖 provider 层，
+/// 只透传库里的 `tool_calls`（JSON 数组文本）解析结果。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ToolCallSpec {
+    pub id: String,
+    pub name: String,
+    /// 参数 JSON 文本（原样）。
+    pub args: String,
+}
+
 /// 一条 transcript 记录（对外视图）。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Entry {
     pub seq: i64,
     pub role: Role,
     pub content: String,
+    /// assistant 发起的工具调用；`None` = 该条没发起调用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallSpec>>,
+    /// 该条工具结果关联的调用 id；`None` = 不是工具结果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     pub created_at: i64,
 }
 

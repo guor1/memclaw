@@ -41,11 +41,14 @@ enum Command {
         #[arg(long)]
         socket: Option<String>,
     },
-    /// 启动 OpenAI Responses API 兼容的 HTTP 服务器。
+    /// 启动 HTTP 服务器：Web UI + 原生 API + OpenAI 兼容层。
     Http {
         /// HTTP 监听端口。
         #[arg(long, default_value = "8080")]
         port: u16,
+        /// 监听地址。默认仅本机；绑其他地址必须同时给 `--token`。
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
         /// oc-server socket/pipe 路径（默认平台默认路径）。
         #[arg(long)]
         socket: Option<String>,
@@ -55,6 +58,14 @@ enum Command {
         /// 同一会话本就串行执行（车道单开），调大只对多 session key 并行有意义。
         #[arg(long, default_value = "32")]
         max_conns: usize,
+        /// API 访问 token（`Authorization: Bearer <token>`）。
+        ///
+        /// 绑非 loopback 地址时必填——该端点等同于对 daemon 的完全访问权。
+        #[arg(long, env = "OC_HTTP_TOKEN")]
+        token: Option<String>,
+        /// 不提供 Web UI，只保留 API。
+        #[arg(long)]
+        no_web: bool,
     },
     /// 交互式初始化：生成 ~/.oc 骨架（config.toml + SOUL.md 等）。
     Onboard,
@@ -153,7 +164,9 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Some(Command::Doctor { dump_schema }) => doctor::run(dump_schema),
         Some(Command::Serve { socket }) => run_serve(socket),
-        Some(Command::Http { port, socket, max_conns }) => run_http(port, socket, max_conns),
+        Some(Command::Http { port, bind, socket, max_conns, token, no_web }) => {
+            run_http(port, bind, socket, max_conns, token, no_web)
+        }
         Some(Command::Onboard) => onboard::run(),
         Some(Command::Cron(CronCmd::Add { expr, prompt, tz })) => {
             cli_client::cron_add(expr, prompt, tz)
@@ -194,7 +207,14 @@ fn resolve_transport(socket: Option<String>, home: &std::path::Path) -> oc_serve
     }
 }
 
-fn run_http(port: u16, socket: Option<String>, max_conns: usize) -> anyhow::Result<()> {
+fn run_http(
+    port: u16,
+    bind: String,
+    socket: Option<String>,
+    max_conns: usize,
+    token: Option<String>,
+    no_web: bool,
+) -> anyhow::Result<()> {
     let home = paths::oc_home()?;
 
     use tracing_subscriber::prelude::*;
@@ -204,6 +224,16 @@ fn run_http(port: u16, socket: Option<String>, max_conns: usize) -> anyhow::Resu
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
+
+    // 绑定地址与 token 的搭配在建 socket 之前就校验：该端点等同于对 daemon 的
+    // 完全访问权，配错了要在有流量之前就失败，而不是先起来再说。
+    let ip: std::net::IpAddr = bind
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--bind 不是合法 IP（{bind}）: {e}"))?;
+    let addr = std::net::SocketAddr::new(ip, port);
+    if let Err(msg) = oc_http::auth::check_bind_requires_token(&addr, &token) {
+        anyhow::bail!(msg);
+    }
 
     let kind = resolve_transport(socket, &home);
 
@@ -216,12 +246,19 @@ fn run_http(port: u16, socket: Option<String>, max_conns: usize) -> anyhow::Resu
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         let pool = oc_http::conn_pool::ConnPool::new(kind, 4, max_conns);
-        let app = oc_http::create_app(pool, model);
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let auth_mode = if token.is_some() { "Bearer token" } else { "无鉴权（仅本机）" };
+        let app = oc_http::create_app(
+            pool,
+            model,
+            oc_http::AppConfig { token, web_ui: !no_web },
+        );
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        // 只绑 loopback：该端点等同于对 daemon 的完全访问权，且当前无鉴权，
-        // 不能暴露到网络。需要远程访问时应在前面放一个带认证的反向代理。
-        tracing::info!(%addr, "OpenAI Responses API 监听中（仅本机，无鉴权）");
+        tracing::info!(
+            %addr,
+            auth = auth_mode,
+            web_ui = !no_web,
+            "HTTP 监听中（Web UI + /api/v1 原生 API + /v1 OpenAI 兼容）"
+        );
         axum::serve(listener, app).await?;
         Ok::<_, anyhow::Error>(())
     })?;

@@ -102,7 +102,8 @@ pub enum RunErrorKind {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum ToolPhase {
-    Start { name: String, args_preview: String },
+    /// 工具调用发起。`args` 为完整参数 JSON 文本（不再截断——展示层自行裁剪）。
+    Start { name: String, args: String },
     Update { chunk: String },
     End { status: ToolStatus },
 }

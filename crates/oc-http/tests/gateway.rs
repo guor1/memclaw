@@ -25,7 +25,11 @@ use oc_server::TransportKind;
 /// `max_conns` 对应 `oc http --max-conns`：到 daemon 的连接硬上限。
 async fn spawn_gateway(transport: TransportKind, max_conns: usize) -> String {
     let pool = oc_http::conn_pool::ConnPool::new(transport, max_conns, max_conns);
-    let app = oc_http::create_app(pool, "mock".into());
+    let app = oc_http::create_app(
+        pool,
+        "mock".into(),
+        oc_http::AppConfig { token: None, web_ui: false },
+    );
 
     // 端口交给 OS 分配，避免并行跑测试时撞端口。
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

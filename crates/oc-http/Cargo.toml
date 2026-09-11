@@ -21,6 +21,7 @@ uuid = { version = "1", features = ["v4", "v7"] }
 futures-util = "0.3"
 async-stream = "0.3"
 dashmap = "6"
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
@@ -28,6 +29,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 oc-server = { workspace = true, features = ["test-support"] }
 oc-llm = { workspace = true }
 oc-store = { workspace = true }
+# 工具结构回归：造 ToolExecutor + ExecTool，让脚本化模型真跑一轮工具调用。
+oc-tools = { workspace = true }
+oc-core = { workspace = true }
 # stream：cancel 用例要边读 SSE 边取 response id，不能等整条流读完。
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 futures-util = "0.3"

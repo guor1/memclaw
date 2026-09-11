@@ -534,10 +534,10 @@ impl App {
                 }
             }
             Event::Tool { phase, .. } => match phase {
-                oc_proto::ToolPhase::Start { name, args_preview } => {
+                oc_proto::ToolPhase::Start { name, args } => {
                     self.msgs.push(Msg {
                         who: "工具",
-                        text: format!("{name}: {args_preview}"),
+                        text: format!("{name}: {}", truncate(&args, 200)),
                     });
                 }
                 oc_proto::ToolPhase::Update { chunk } => {
@@ -777,6 +777,16 @@ fn parse_input(text: &str) -> Input {
 /// 简易唯一键（避免为 TUI 引入 uuid 依赖）。
 fn uuid_like(n: u64) -> String {
     format!("tui-{}-{}", std::process::id(), n)
+}
+
+/// 截断过长文本用于单行显示（工具参数预览）。
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{t}…")
+    }
 }
 
 /// `/new` 的新会话 id。

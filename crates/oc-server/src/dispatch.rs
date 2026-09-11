@@ -63,6 +63,12 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>, out_tx: &mpsc::Send
                                 oc_store::Role::User => oc_proto::Role::User,
                             },
                             content: e.content,
+                            // 透传工具结构：assistant 的 tool_calls（JSON 数组文本）解析成
+                            // 规格数组，解析失败降级 None（脏数据不丢整轮历史）。
+                            tool_calls: e.tool_calls.as_deref().and_then(|s| {
+                                serde_json::from_str::<Vec<oc_proto::ToolCallSpec>>(s).ok()
+                            }),
+                            tool_call_id: e.tool_call_id,
                             created_at: e.created_at,
                         })
                         .collect();

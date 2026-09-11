@@ -20,7 +20,7 @@ oc-tools  = { workspace = true }
 oc-tui    = { path = "../oc-tui" }
 oc-http   = { path = "../oc-http" }
 axum = "0.7"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 directories = "5"
 serde_json = "1"
 toml = "0.8"

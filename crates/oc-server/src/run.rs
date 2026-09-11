@@ -705,7 +705,7 @@ async fn exec_tool(ctx: &RunCtx, call_id: &str, name: &str, args: &str) -> Strin
         call_id: cid.clone(),
         phase: ToolPhase::Start {
             name: name.to_string(),
-            args_preview: truncate(args, 200),
+            args: args.to_string(),
         },
     }).await;
 
@@ -909,18 +909,6 @@ fn outcome_of(state: &RunState) -> RunOutcome {
     match state {
         RunState::Terminal(o) => o.clone(),
         _ => RunOutcome::Completed,
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut n = max;
-        while n > 0 && !s.is_char_boundary(n) {
-            n -= 1;
-        }
-        format!("{}…", &s[..n])
     }
 }
 

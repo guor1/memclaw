@@ -1,0 +1,4 @@
+node_modules/
+# dist/ 及其 hashed assets 提交入库：rust-embed 在编译期嵌入，release 构建
+# 不跑 Node，靠已提交的产物保证 `cargo build --release` 自包含。
+# 前端改动流程：npm run dev 热更 → npm run build 出 dist → 一起提交。

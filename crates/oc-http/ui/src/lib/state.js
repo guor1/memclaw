@@ -1,0 +1,185 @@
+/**
+ * Global application state using Vue 3 reactivity.
+ *
+ * Keeps session list, active session, message map, and ambient status in one
+ * place so any component can subscribe without prop-drilling.
+ */
+
+import { reactive, shallowReactive } from 'vue'
+import { fetchSessions, fetchHistory, fetchStatus, openAmbientStream } from './api.js'
+
+// ── Session list ──────────────────────────────────────────────────────────────
+
+export const sessions = reactive({ list: [], loading: false, error: null })
+
+// silent: true skips the loading skeleton — use for background refreshes where
+// there's already data in the list and a flash would be jarring (e.g. onAccepted).
+export async function loadSessions({ silent = false } = {}) {
+  if (!silent) sessions.loading = true
+  sessions.error = null
+  try {
+    sessions.list = await fetchSessions()
+  } catch (e) {
+    sessions.error = e.message
+  } finally {
+    sessions.loading = false
+  }
+}
+
+// ── Active session ────────────────────────────────────────────────────────────
+
+export const activeSessionId = reactive({ value: 'main' })
+
+// ── Messages per session ──────────────────────────────────────────────────────
+// { [sessionId]: Message[] }
+// Message: { id, role, content, pending?, error? }
+//
+// A plain reactive object, not a Map: Vue's collection reactivity only tracks
+// get/set/has/delete on a Map — the stored array values would NOT be made
+// reactive, so in-place `push`/content mutation wouldn't re-render. Assigning
+// into a plain reactive object deep-wraps the array, so per-message streaming
+// updates trigger renders.
+
+const messageMap = reactive({})
+
+export function messagesFor(sessionId) {
+  if (!messageMap[sessionId]) messageMap[sessionId] = []
+  return messageMap[sessionId]
+}
+
+export async function loadHistory(sessionId) {
+  const entries = await fetchHistory(sessionId)
+  // Build a structured message list: assistant dispatch entries that carry
+  // `tool_calls` become per-call ToolCard units; each is matched to its
+  // subsequent `tool` result entry (by `tool_call_id`), mirroring openclaw's
+  // extractToolCards + findFirstUnmatchedCard call-id pairing.
+  const msgs = []
+  for (const e of entries) {
+    if (e.role === 'assistant' && Array.isArray(e.tool_calls) && e.tool_calls.length > 0) {
+      // Emit the assistant's prose (if any) as its own bubble, then one tool
+      // card per call.
+      if ((e.content ?? '').trim() !== '') {
+        msgs.push({ id: `hist-${e.seq}`, role: 'assistant', content: e.content, ts: e.created_at })
+      }
+      for (const tc of e.tool_calls) {
+        msgs.push({
+          id: `tool-${tc.id}`,
+          role: 'tool',
+          name: tc.name,
+          args: tc.args,
+          content: '',
+          output: '',
+          status: 'running', // provisional until matched by a result entry below
+          ts: e.created_at,
+        })
+      }
+      continue
+    }
+    if (e.role === 'tool' && e.tool_call_id) {
+      // Match the result to its dispatch card.
+      const card = msgs.findLast((m) => m.id === `tool-${e.tool_call_id}`)
+      if (card) {
+        card.output = e.content
+        card.content = e.content
+        card.status = inferToolStatus(e.content)
+      } else {
+        msgs.push({ id: `hist-${e.seq}`, role: 'tool', name: undefined, content: e.content, ts: e.created_at })
+      }
+      continue
+    }
+    msgs.push({ id: `hist-${e.seq}`, role: e.role, content: e.content, ts: e.created_at })
+  }
+  messageMap[sessionId] = msgs
+}
+
+// A tool result without an explicit status field is inferred from content:
+// our tool layer prefixes failures with "工具错误:" / "exec 失败:" or a non-zero
+// exit code marker.
+function inferToolStatus(content) {
+  const text = (content ?? '').trim()
+  if (/^工具错误[:：]/.test(text)) return 'error'
+  if (/^exec 失败[:：]/.test(text)) return 'error'
+  if (/\[退出码:\s*[1-9]/.test(text)) return 'error'
+  return 'ok'
+}
+
+export function appendMessage(sessionId, msg) {
+  const list = messagesFor(sessionId)
+  list.push(msg)
+}
+
+export function updateLastAssistant(sessionId, delta) {
+  if (!delta) return
+  const list = messagesFor(sessionId)
+  const last = list.findLast(m => m.role === 'assistant' && m.pending)
+  if (last) {
+    last.content += delta
+  } else {
+    list.push({ id: `stream-${Date.now()}`, role: 'assistant', content: delta, pending: true })
+  }
+}
+
+export function finalizeLastAssistant(sessionId) {
+  const list = messagesFor(sessionId)
+  const last = list.findLast(m => m.role === 'assistant' && m.pending)
+  if (last) delete last.pending
+}
+
+// ── Status / ambient stream ───────────────────────────────────────────────────
+
+export const status = reactive({
+  model: '',
+  provider: '',
+  context_window: 0,
+  last_input_tokens: null,
+  active_run: null,
+  queued_turns: 0,
+  session: 'main',
+})
+
+export const notification = reactive({ text: null })
+
+let closeAmbient = null
+
+export function startAmbientStream() {
+  if (closeAmbient) closeAmbient()
+  closeAmbient = openAmbientStream({
+    onStatus(snap) {
+      Object.assign(status, snap)
+    },
+    onUsage(ev) {
+      if (ev.session === (activeSessionId.value ?? 'main')) {
+        status.last_input_tokens = ev.input_tokens
+        status.context_window = ev.context_window
+      }
+    },
+    onProactive(ev) {
+      notification.text = ev.text
+      setTimeout(() => { notification.text = null }, 12000)
+    },
+    onTask(_ev) {
+      // Refresh session list so task-spawned sessions appear.
+      loadSessions()
+    },
+    onError(_msg) {
+      // EventSource reconnects automatically; no manual action needed.
+    },
+  })
+}
+
+// ── Per-session active chat controllers ──────────────────────────────────────
+// Map<sessionId, { abort }> — keeps the streaming connection alive when user
+// switches sessions (back-keep semantics).
+//
+// Reactive so `activeChats.has(sessionId)` in ChatPane tracks membership, but
+// the abort controllers themselves are opaque — hence shallowReactive.
+
+export const activeChats = shallowReactive(new Map())
+
+export function setActiveChatCtrl(sessionId, ctrl) {
+  activeChats.set(sessionId, ctrl)
+}
+
+export function clearActiveChatCtrl(sessionId) {
+  activeChats.delete(sessionId)
+}
