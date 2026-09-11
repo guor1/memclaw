@@ -32,6 +32,10 @@ pub struct Config {
 
     #[garde(dive)]
     pub watchdog: WatchdogConfig,
+
+    #[garde(skip)]
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
@@ -269,6 +273,19 @@ pub struct WatchdogConfig {
     pub abort_min_secs: u64,
 }
 
+/// 技能门控配置（ROAD-1）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]
+pub struct SkillsConfig {
+    /// 非空则只加载列表内的技能名。
+    #[garde(skip)]
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+    /// 永不加载（优先于 allowlist）。
+    #[garde(skip)]
+    #[serde(default)]
+    pub denylist: Vec<String>,
+}
+
 /// Secret 引用三态（inline/env/file）。解引用是 IO，在 server 做。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -332,6 +349,7 @@ impl Config {
                 run_timeout_secs: 0,
                 abort_min_secs: 300,
             },
+            skills: SkillsConfig::default(),
         }
     }
 }
@@ -441,5 +459,42 @@ mod tests {
     fn intent_max_per_turn_defaults_to_three() {
         assert_eq!(default_intent_max_per_turn(), 3);
         assert_eq!(Config::default_local().proactive.intent_max_per_turn, 3);
+    }
+
+    /// 现网 config.toml 没有 [skills] 节，缺省必须能加载。
+    #[test]
+    fn skills_section_defaults_when_absent() {
+        let cfg: Config = toml::from_str(r#"
+proto_version = 1
+[server]
+transport = "pipe"
+[[models]]
+alias = "default"
+provider = "openai"
+model = "m"
+hosting = "cloud"
+api_key = { env = "K" }
+[memory]
+vec = true
+halflife_days = 30
+trigger_threshold = 0.72
+trigger_max_per_turn = 3
+[proactive]
+heartbeat_secs = 60
+intent_cooldown_secs = 86400
+intent_budget = 3
+intent_expiry_days = 90
+[tools]
+exec_timeout_secs = 120
+[tools.approval]
+mode = "prompt"
+[watchdog]
+idle_cloud_secs = 120
+idle_self_secs = 300
+run_timeout_secs = 0
+abort_min_secs = 300
+"#).expect("旧配置应能加载");
+        assert!(cfg.skills.allowlist.is_empty());
+        assert!(cfg.skills.denylist.is_empty());
     }
 }
