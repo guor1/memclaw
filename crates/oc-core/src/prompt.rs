@@ -17,13 +17,6 @@ pub struct ToolBrief {
     pub description: String,
 }
 
-/// 一个技能文档。
-#[derive(Debug, Clone)]
-pub struct SkillBrief {
-    pub name: String,
-    pub body: String,
-}
-
 /// 组装输入。
 pub struct PromptInputs<'a> {
     /// SOUL.md 人格（原样置顶）。
@@ -39,7 +32,7 @@ pub struct PromptInputs<'a> {
     pub endpoint: Option<&'a str>,
     /// curated 记忆注入（有预算，调用方已截断）。
     pub bootstrap: &'a [MemLine],
-    pub skills: &'a [SkillBrief],
+    pub skills: &'a [crate::skill::Skill],
     pub tools: &'a [ToolBrief],
     /// 易变量：当前时间（RFC3339 字符串），放尾部。
     pub now: &'a str,
@@ -159,13 +152,15 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
         );
     }
 
-    // 3) 技能：按名称排序。
+    // 3) 技能：只注入索引列表（名字 + 描述 + 指纹），正文不进提示词——模型用
+    //    file 工具按需读 `~/.oc/skills/<name>/SKILL.md`。按名称排序保持确定性。
     if !inputs.skills.is_empty() {
-        let mut skills: Vec<&SkillBrief> = inputs.skills.iter().collect();
+        let mut skills: Vec<&crate::skill::Skill> = inputs.skills.iter().collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
-        prefix.push_str("\n# 技能\n");
+        prefix.push_str("\n# 技能\n可用技能（正文不在本提示词内，用 file 工具 read `~/.oc/skills/<name>/SKILL.md` 按需读取；指纹变了要重读）：\n");
         for s in skills {
-            prefix.push_str(&format!("## {}\n{}\n", s.name, s.body.trim()));
+            let desc = if s.description.is_empty() { "" } else { &s.description };
+            prefix.push_str(&format!("- {} — {} [fingerprint {}]\n", s.name, desc, s.fingerprint));
         }
     }
 
@@ -340,5 +335,40 @@ mod tests {
         let a = render_system_prompt(&inputs("NOW", &t, &m));
         let b = render_system_prompt(&inputs("NOW", &t, &m));
         assert_eq!(a, b);
+    }
+
+    fn skill(name: &str, desc: &str, body: &str) -> crate::skill::Skill {
+        crate::skill::Skill {
+            name: name.into(),
+            description: desc.into(),
+            body: body.into(),
+            fingerprint: crate::skill::fingerprint(body),
+            enabled: true,
+            os: vec![],
+        }
+    }
+
+    /// 技能正文不得进 system prompt，只有索引（名字 + 描述 + 指纹）。
+    #[test]
+    fn skills_render_as_index_not_body() {
+        let skills = [skill("pdf", "生成 PDF", "BODY_MARKER_XYZ")];
+        let p = PromptInputs {
+            soul: "s",
+            platform: "",
+            model: "",
+            provider: "",
+            endpoint: None,
+            bootstrap: &[],
+            skills: &skills,
+            tools: &[],
+            now: "t",
+        };
+        let rendered = render_system_prompt(&p);
+        assert!(rendered.stable_prefix.contains("pdf"), "应含技能名");
+        assert!(rendered.stable_prefix.contains("生成 PDF"), "应含描述");
+        assert!(
+            !rendered.stable_prefix.contains("BODY_MARKER_XYZ"),
+            "正文不得注入：{rendered:?}"
+        );
     }
 }

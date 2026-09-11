@@ -74,9 +74,13 @@ async fn skills_reach_model_request() {
     let store = oc_store::Store::open_memory().unwrap();
 
     let mut c = cfg("人格");
-    c.skills = vec![oc_core::prompt::SkillBrief {
+    c.skills = vec![oc_core::skill::Skill {
         name: "pdf".into(),
-        body: "生成 PDF 时用 XXXPDFSKILL 工具链。".into(),
+        description: "生成 PDF".into(),
+        body: "正文不该进提示词".into(),
+        fingerprint: oc_core::skill::fingerprint("正文不该进提示词"),
+        enabled: true,
+        os: vec![],
     }];
 
     let handle = session::spawn(oc_proto::SessionId::main(), c, provider, tx, store, oc_server::diag::DiagRegistry::new().for_session(&oc_proto::SessionId::main()));
@@ -85,7 +89,8 @@ async fn skills_reach_model_request() {
 
     let reqs = captures.lock().unwrap();
     let system = reqs[0].system.as_deref().unwrap_or("");
-    assert!(system.contains("XXXPDFSKILL"), "技能正文应注入系统提示词: {system}");
+    assert!(system.contains("pdf"), "技能名应注入: {system}");
+    assert!(!system.contains("正文不该进提示词"), "正文不得注入: {system}");
 }
 
 /// 「你用的什么模型」必须能答上来：模型名与 provider 须到达 system 提示词。
