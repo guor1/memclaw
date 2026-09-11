@@ -11,7 +11,7 @@
 
 ## 从 Release 安装
 
-从 [GitHub Releases](https://github.com/guorui1/memclaw/releases) 下载对应平台的压缩包，解压后运行 `install.sh`（Linux/macOS）或按 `INSTALL.txt`（Windows）操作。
+从 [GitHub Releases](https://github.com/guorui1/oh-my-claw/releases) 下载对应平台的压缩包，解压后运行 `install.sh`（Linux/macOS）或按 `INSTALL.txt`（Windows）操作。
 
 ## 从源码构建
 

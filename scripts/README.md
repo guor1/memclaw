@@ -10,7 +10,7 @@
 
 ```powershell
 # 在 PowerShell 中执行
-cd C:\dev\workspace\memclaw
+cd C:\dev\workspace\oh-my-claw
 .\scripts\build-windows.ps1
 ```
 
@@ -94,7 +94,7 @@ transport = "pipe"  # Windows 必须用 pipe（不是 unix）
 
 ```bash
 # 在 Ubuntu 环境执行
-cd /path/to/memclaw
+cd /path/to/oh-my-claw
 ./scripts/build-ubuntu.sh
 ```
 
@@ -114,7 +114,7 @@ cd /path/to/memclaw
 
 ```bash
 # 在 Windows Git Bash 或 macOS Terminal 执行
-cd /path/to/memclaw
+cd /path/to/oh-my-claw
 ./scripts/build-ubuntu-in-docker.sh
 ```
 

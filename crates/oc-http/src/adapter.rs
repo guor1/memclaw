@@ -8,7 +8,7 @@
 //!
 //! The default differs from OpenClaw's gateway, which is stateless per request.
 //! OpenClaw routes across agents and auth subjects, so it has no single obvious
-//! session to fall into; memclaw is a single-user resident agent where `main` is
+//! session to fall into; oh-my-claw is a single-user resident agent where `main` is
 //! *the* conversation (cron already reports into it, see `proactive.rs`). A
 //! stateless default here also leaks: the session registry has no idle eviction
 //! and each new session id persists an actor plus a `session` row, so one
@@ -113,7 +113,7 @@ pub fn resolve_session(
     SessionId::main()
 }
 
-/// Extracted parts of an OpenAI request that map onto a memclaw turn.
+/// Extracted parts of an OpenAI request that map onto an oh-my-claw turn.
 pub struct ExtractedInput {
     /// The "current message" text sent as the user turn.
     pub text: String,
@@ -141,7 +141,7 @@ pub struct ToolOutput {
 /// Mirrors OpenClaw's item semantics: the most recent `user` or
 /// `function_call_output` item is the current message; `system`/`developer`
 /// go to the system prompt; earlier user/assistant messages are history
-/// (memclaw already has them persisted, so they are not re-sent).
+/// (oh-my-claw already has them persisted, so they are not re-sent).
 pub fn extract_input(req: &CreateResponseReq) -> HttpResult<ExtractedInput> {
     let mut out = ExtractedInput {
         text: String::new(),
@@ -306,7 +306,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Build the text prepended to the user turn to carry per-request context.
 ///
-/// memclaw assembles its system prompt inside the session actor from SOUL.md and
+/// oh-my-claw assembles its system prompt inside the session actor from SOUL.md and
 /// config, and the wire protocol (`chat.send`) carries only text. Rather than
 /// widen the protocol, per-request instructions and file contents are prefixed
 /// to the turn. Files use explicit untrusted-content boundaries so their bytes
@@ -361,7 +361,7 @@ pub fn validate_tools(tools: &[ClientTool]) -> HttpResult<()> {
     Ok(())
 }
 
-/// Reject request fields memclaw cannot honor, so callers fail loudly
+/// Reject request fields oh-my-claw cannot honor, so callers fail loudly
 /// rather than silently getting different behavior.
 pub fn reject_unsupported(req: &CreateResponseReq) -> HttpResult<()> {
     if !req.tools.is_empty() {

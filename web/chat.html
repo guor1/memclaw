@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>oh-my-claw</title>
+<style>
+/* ── Token system ──────────────────────────────────────────── */
+:root {
+  --c-bg:          oklch(14% 0.008 250);
+  --c-surface:     oklch(18% 0.010 250);
+  --c-raised:      oklch(22% 0.012 250);
+  --c-border:      oklch(30% 0.012 250);
+  --c-muted:       oklch(55% 0.010 250);
+  --c-body:        oklch(88% 0.006 250);
+  --c-strong:      oklch(97% 0.003 250);
+
+  --c-accent:      oklch(70% 0.16  245);
+  --c-accent-dim:  oklch(55% 0.14  245);
+  --c-accent-bg:   oklch(22% 0.06  245);
+
+  --c-user-bg:     oklch(22% 0.055 255);
+  --c-user-border: oklch(35% 0.08  255);
+
+  --c-danger:      oklch(65% 0.18  25);
+  --c-danger-bg:   oklch(20% 0.07  25);
+
+  --c-success:     oklch(70% 0.14  155);
+
+  --r-sm:   6px;
+  --r-md:   10px;
+  --r-lg:   16px;
+
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;
+  --sp-4: 16px; --sp-5: 20px; --sp-6: 24px;
+  --sp-8: 32px;
+
+  --font: -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "Fira Code", "Consolas", monospace;
+}
+
+/* ── Reset ─────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--c-body);
+  background: var(--c-bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Layout ─────────────────────────────────────────────────── */
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ── Header ─────────────────────────────────────────────────── */
+#header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--c-surface);
+  border-bottom: 1px solid var(--c-border);
+  flex-shrink: 0;
+  min-height: 52px;
+}
+#header h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--c-strong);
+  flex: 1;
+}
+#header h1 span { color: var(--c-accent); }
+
+#session-badge {
+  font-size: 12px;
+  color: var(--c-muted);
+  font-family: var(--font-mono);
+  background: var(--c-raised);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  padding: 2px var(--sp-2);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--c-border);
+  flex-shrink: 0;
+  transition: background 200ms;
+}
+#status-dot.ready   { background: var(--c-success); }
+#status-dot.working { background: var(--c-accent); animation: pulse 1s ease infinite; }
+#status-dot.error   { background: var(--c-danger); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+/* ── Message list ───────────────────────────────────────────── */
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-5) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  scroll-behavior: smooth;
+}
+#messages::-webkit-scrollbar { width: 6px; }
+#messages::-webkit-scrollbar-track { background: transparent; }
+#messages::-webkit-scrollbar-thumb {
+  background: var(--c-border);
+  border-radius: 3px;
+}
+
+.msg-row {
+  display: flex;
+  gap: var(--sp-3);
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+}
+.msg-row.user { flex-direction: row-reverse; }
+
+.avatar {
+  width: 30px; height: 30px;
+  border-radius: var(--r-sm);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+.msg-row.user .avatar {
+  background: var(--c-accent-bg);
+  color: var(--c-accent);
+  border: 1px solid var(--c-user-border);
+}
+.msg-row.assistant .avatar {
+  background: var(--c-raised);
+  color: var(--c-muted);
+  border: 1px solid var(--c-border);
+}
+
+.bubble {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  line-height: 1.7;
+  max-width: calc(100% - 42px);
+  word-break: break-word;
+}
+.msg-row.user .bubble {
+  background: var(--c-user-bg);
+  border: 1px solid var(--c-user-border);
+  color: var(--c-strong);
+  border-radius: var(--r-md) var(--r-sm) var(--r-md) var(--r-md);
+}
+.msg-row.assistant .bubble {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-body);
+  border-radius: var(--r-sm) var(--r-md) var(--r-md) var(--r-md);
+}
+
+/* streaming cursor */
+.bubble.streaming::after {
+  content: '▍';
+  display: inline-block;
+  color: var(--c-accent);
+  animation: blink .7s step-end infinite;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+}
+@keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+
+/* inline markdown */
+.bubble p  { margin: 0 0 var(--sp-2); }
+.bubble p:last-child { margin-bottom: 0; }
+.bubble code {
+  font-family: var(--font-mono);
+  font-size: .88em;
+  background: var(--c-raised);
+  border: 1px solid var(--c-border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.bubble pre {
+  background: var(--c-raised);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-4);
+  overflow-x: auto;
+  margin: var(--sp-2) 0;
+}
+.bubble pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: .86em;
+}
+.bubble ul, .bubble ol {
+  padding-left: var(--sp-5);
+  margin: var(--sp-2) 0;
+}
+.bubble li { margin: var(--sp-1) 0; }
+.bubble strong { color: var(--c-strong); font-weight: 600; }
+.bubble em { color: var(--c-body); }
+.bubble blockquote {
+  border-left: 3px solid var(--c-accent-dim);
+  margin: var(--sp-2) 0;
+  padding-left: var(--sp-3);
+  color: var(--c-muted);
+}
+.bubble h1,.bubble h2,.bubble h3 {
+  color: var(--c-strong);
+  font-weight: 600;
+  margin: var(--sp-3) 0 var(--sp-2);
+}
+.bubble h1 { font-size: 1.15em; }
+.bubble h2 { font-size: 1.05em; }
+.bubble h3 { font-size: .98em; }
+.bubble a { color: var(--c-accent); text-decoration: underline; text-underline-offset: 2px; }
+
+/* error bubble */
+.bubble.error-bubble {
+  background: var(--c-danger-bg);
+  border-color: var(--c-danger);
+  color: var(--c-danger);
+}
+
+/* ── Empty state ────────────────────────────────────────────── */
+#empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  color: var(--c-muted);
+  pointer-events: none;
+  user-select: none;
+}
+#empty-state .logo { font-size: 32px; opacity: .3; }
+#empty-state p { font-size: 14px; }
+
+/* ── Input area ─────────────────────────────────────────────── */
+#input-area {
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  background: var(--c-surface);
+  border-top: 1px solid var(--c-border);
+  flex-shrink: 0;
+}
+#input-wrap {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-end;
+  max-width: 860px;
+  margin: 0 auto;
+  background: var(--c-raised);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-4);
+  transition: border-color 150ms;
+}
+#input-wrap:focus-within { border-color: var(--c-accent-dim); }
+
+#msg-input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--c-strong);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.6;
+  resize: none;
+  min-height: 26px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: var(--sp-1) 0;
+}
+#msg-input::placeholder { color: var(--c-muted); }
+#msg-input::-webkit-scrollbar { width: 4px; }
+#msg-input::-webkit-scrollbar-thumb { background: var(--c-border); border-radius: 2px; }
+
+#send-btn {
+  width: 36px; height: 36px;
+  border-radius: var(--r-md);
+  border: none;
+  background: var(--c-accent);
+  color: oklch(14% 0.008 250);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 150ms, transform 80ms, opacity 150ms;
+}
+#send-btn:hover:not(:disabled) { background: oklch(78% 0.16 245); }
+#send-btn:active:not(:disabled) { transform: scale(.93); }
+#send-btn:disabled { opacity: .35; cursor: not-allowed; }
+#send-btn svg { width: 18px; height: 18px; }
+
+#input-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 860px;
+  margin: var(--sp-2) auto 0;
+  font-size: 12px;
+  color: var(--c-muted);
+  padding: 0 var(--sp-1);
+}
+
+/* ── Config panel ───────────────────────────────────────────── */
+#cfg-btn {
+  background: none;
+  border: 1px solid var(--c-border);
+  color: var(--c-muted);
+  border-radius: var(--r-sm);
+  padding: 2px var(--sp-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 150ms, color 150ms;
+}
+#cfg-btn:hover { border-color: var(--c-accent-dim); color: var(--c-accent); }
+
+#cfg-panel {
+  display: none;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  padding: var(--sp-4);
+  max-width: 860px;
+  margin: var(--sp-3) auto 0;
+  gap: var(--sp-3);
+  flex-direction: column;
+}
+#cfg-panel.open { display: flex; }
+#cfg-panel label { font-size: 13px; color: var(--c-muted); display: flex; flex-direction: column; gap: var(--sp-1); }
+#cfg-panel input, #cfg-panel select {
+  background: var(--c-raised);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  color: var(--c-strong);
+  font: inherit;
+  font-size: 13px;
+  padding: var(--sp-1) var(--sp-2);
+  outline: none;
+  transition: border-color 150ms;
+}
+#cfg-panel input:focus, #cfg-panel select:focus { border-color: var(--c-accent-dim); }
+#cfg-row { display: flex; gap: var(--sp-3); flex-wrap: wrap; }
+#cfg-row label { flex: 1; min-width: 140px; }
+
+/* ── Responsive ─────────────────────────────────────────────── */
+@media (max-width: 600px) {
+  #messages { padding: var(--sp-3) var(--sp-3); }
+  #input-area { padding: var(--sp-2) var(--sp-3) var(--sp-3); }
+  .bubble { font-size: 14px; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Header -->
+  <header id="header">
+    <div id="status-dot"></div>
+    <h1>mem<span>claw</span></h1>
+    <div id="session-badge">no session</div>
+    <button id="cfg-btn" title="Settings">⚙ config</button>
+  </header>
+
+  <!-- Messages -->
+  <div id="messages">
+    <div id="empty-state">
+      <div class="logo">🦀</div>
+      <p>Send a message to start</p>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div id="input-area">
+    <!-- Config panel (hidden by default) -->
+    <div id="cfg-panel">
+      <div id="cfg-row">
+        <label>API base URL
+          <input id="cfg-url" type="text" value="http://localhost:4444" spellcheck="false">
+        </label>
+        <label>Session key
+          <input id="cfg-session" type="text" placeholder="e.g. notes (leave blank for auto)" spellcheck="false">
+        </label>
+        <label>Stream
+          <select id="cfg-stream">
+            <option value="true" selected>SSE (streaming)</option>
+            <option value="false">Blocking</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div id="input-wrap">
+      <textarea id="msg-input" rows="1" placeholder="Message…" autocomplete="off" spellcheck="true"></textarea>
+      <button id="send-btn" title="Send (Enter)">
+        <svg viewBox="0 0 20 20" fill="currentColor">
+          <path d="M2.94 17.94a.75.75 0 0 0 1.02.07l14-10a.75.75 0 0 0 0-1.22l-14-10a.75.75 0 0 0-1.09.98L4.77 9H2a.75.75 0 0 0 0 1.5h2.77L2.85 16.96a.75.75 0 0 0 .09.98Z"/>
+        </svg>
+      </button>
+    </div>
+    <div id="input-footer">
+      <span id="footer-hint">Enter to send · Shift+Enter for newline</span>
+      <span id="token-info"></span>
+    </div>
+  </div>
+
+</div>
+<script>
+// ── State ───────────────────────────────────────────────────
+const state = {
+  apiBase:    () => document.getElementById('cfg-url').value.replace(/\/$/, ''),
+  sessionKey: () => document.getElementById('cfg-session').value.trim() || null,
+  stream:     () => document.getElementById('cfg-stream').value === 'true',
+  lastResponseId: null,   // for previous_response_id continuity
+  sessionId:  null,       // displayed in header
+  busy:       false,
+};
+
+// ── DOM refs ────────────────────────────────────────────────
+const $messages  = document.getElementById('messages');
+const $input     = document.getElementById('msg-input');
+const $send      = document.getElementById('send-btn');
+const $dot       = document.getElementById('status-dot');
+const $badge     = document.getElementById('session-badge');
+const $tokenInfo = document.getElementById('token-info');
+const $cfgBtn    = document.getElementById('cfg-btn');
+const $cfgPanel  = document.getElementById('cfg-panel');
+const $empty     = document.getElementById('empty-state');
+
+// ── Config panel toggle ─────────────────────────────────────
+$cfgBtn.addEventListener('click', () => $cfgPanel.classList.toggle('open'));
+
+// ── Auto-resize textarea ────────────────────────────────────
+$input.addEventListener('input', () => {
+  $input.style.height = 'auto';
+  $input.style.height = Math.min($input.scrollHeight, 200) + 'px';
+});
+
+// ── Keyboard: Enter sends, Shift+Enter newline ──────────────
+$input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    submit();
+  }
+});
+$send.addEventListener('click', submit);
+
+// ── Status dot ─────────────────────────────────────────────
+function setStatus(s) { $dot.className = s; }   // '', 'ready', 'working', 'error'
+
+// ── Minimal Markdown renderer ───────────────────────────────
+// Handles: fenced code, inline code, bold, italic, headers, lists, blockquote, links.
+// Deliberate subset — avoids a full library dependency for a UI prototype.
+function renderMarkdown(raw) {
+  let s = raw
+    // fenced code blocks
+    .replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
+      `<pre><code class="lang-${lang}">${escHtml(code.trim())}</code></pre>`)
+    // blockquote
+    .replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
+    // headers
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm,  '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm,   '<h1>$1</h1>')
+    // unordered list items
+    .replace(/^[-*] (.+)$/gm, '<li>$1</li>')
+    // ordered list items
+    .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+    // inline bold/italic (order matters)
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g,     '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,         '<em>$1</em>')
+    .replace(/_(.+?)_/g,           '<em>$1</em>')
+    // inline code
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // links
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  // wrap bare text lines (not already block-wrapped) in <p>
+  const lines = s.split('\n');
+  const out = [];
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) { out.push(''); continue; }
+    if (/^<(pre|h[1-6]|li|blockquote|ul|ol)/.test(t)) { out.push(t); continue; }
+    out.push(`<p>${t}</p>`);
+  }
+  // collapse consecutive <li> into a <ul>
+  return out.join('\n')
+    .replace(/(<li>[\s\S]*?<\/li>\n?)+/g, m => `<ul>${m}</ul>`);
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Append message bubble ───────────────────────────────────
+function appendBubble(role, text, streaming) {
+  if ($empty) $empty.style.display = 'none';
+
+  const row = document.createElement('div');
+  row.className = `msg-row ${role}`;
+
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = role === 'user' ? 'U' : '🦀';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble' + (streaming ? ' streaming' : '');
+
+  if (role === 'user') {
+    bubble.textContent = text;
+  } else {
+    bubble.innerHTML = text ? renderMarkdown(text) : '';
+  }
+
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  $messages.appendChild(row);
+  scrollToBottom();
+  return bubble;
+}
+
+function scrollToBottom() {
+  $messages.scrollTop = $messages.scrollHeight;
+}
+
+// ── Update existing assistant bubble during streaming ───────
+function updateBubble(bubble, fullText) {
+  bubble.innerHTML = renderMarkdown(fullText);
+  scrollToBottom();
+}
+
+function finalizeBubble(bubble) {
+  bubble.classList.remove('streaming');
+}
+
+// ── Submit ──────────────────────────────────────────────────
+async function submit() {
+  const text = $input.value.trim();
+  if (!text || state.busy) return;
+
+  state.busy = true;
+  $send.disabled = true;
+  setStatus('working');
+  $input.value = '';
+  $input.style.height = 'auto';
+
+  appendBubble('user', text, false);
+
+  const body = {
+    input: text,
+    stream: state.stream(),
+  };
+  if (state.lastResponseId) body.previous_response_id = state.lastResponseId;
+
+  const headers = { 'Content-Type': 'application/json' };
+  const sk = state.sessionKey();
+  if (sk) headers['X-OC-Session'] = sk;
+
+  try {
+    if (state.stream()) {
+      await streamResponse(body, headers);
+    } else {
+      await blockResponse(body, headers);
+    }
+    setStatus('ready');
+  } catch (err) {
+    appendErrorBubble(err.message || String(err));
+    setStatus('error');
+  } finally {
+    state.busy = false;
+    $send.disabled = false;
+    $input.focus();
+  }
+}
+
+// ── Streaming path (SSE) ────────────────────────────────────
+async function streamResponse(body, headers) {
+  const res = await fetch(`${state.apiBase()}/v1/responses`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const msg = await res.text().catch(() => res.statusText);
+    throw new Error(`HTTP ${res.status}: ${msg}`);
+  }
+
+  const bubble = appendBubble('assistant', '', true);
+  let accumulated = '';
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+
+    // SSE: split on double-newline
+    const parts = buf.split('\n\n');
+    buf = parts.pop();                 // keep incomplete chunk
+
+    for (const part of parts) {
+      for (const line of part.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6);
+        if (raw === '[DONE]') { finalizeBubble(bubble); continue; }
+
+        let ev;
+        try { ev = JSON.parse(raw); } catch { continue; }
+
+        if (ev.type === 'response.created' || ev.type === 'response.completed') {
+          const r = ev.response;
+          if (r?.id) {
+            state.lastResponseId = r.id;
+            updateBadge(r.id);
+          }
+          if (ev.type === 'response.completed') {
+            const u = r?.usage;
+            if (u) $tokenInfo.textContent = `in ${u.input_tokens} · out ${u.output_tokens} tok`;
+            finalizeBubble(bubble);
+          }
+        }
+
+        if (ev.type === 'response.output_text.delta') {
+          accumulated += ev.delta || '';
+          updateBubble(bubble, accumulated);
+        }
+
+        if (ev.type === 'response.failed') {
+          finalizeBubble(bubble);
+          throw new Error(ev.error?.message || 'Run failed');
+        }
+      }
+    }
+  }
+}
+
+// ── Blocking path ───────────────────────────────────────────
+async function blockResponse(body, headers) {
+  const res = await fetch(`${state.apiBase()}/v1/responses`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const msg = await res.text().catch(() => res.statusText);
+    throw new Error(`HTTP ${res.status}: ${msg}`);
+  }
+  const data = await res.json();
+  state.lastResponseId = data.id;
+  updateBadge(data.id);
+
+  const u = data.usage;
+  if (u) $tokenInfo.textContent = `in ${u.input_tokens} · out ${u.output_tokens} tok`;
+
+  const text = data.output
+    ?.flatMap(o => o.content ?? [])
+    ?.filter(c => c.type === 'output_text')
+    ?.map(c => c.text)
+    ?.join('') ?? '';
+
+  if (data.status === 'failed') throw new Error(data.error?.message || 'Run failed');
+  appendBubble('assistant', renderMarkdown(text), false);
+}
+
+// ── Error bubble ────────────────────────────────────────────
+function appendErrorBubble(msg) {
+  const row = document.createElement('div');
+  row.className = 'msg-row assistant';
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  av.textContent = '⚠';
+  const b = document.createElement('div');
+  b.className = 'bubble error-bubble';
+  b.textContent = msg;
+  row.appendChild(av);
+  row.appendChild(b);
+  $messages.appendChild(row);
+  scrollToBottom();
+}
+
+// ── Badge ───────────────────────────────────────────────────
+function updateBadge(responseId) {
+  $badge.textContent = responseId;
+  $badge.title = responseId;
+}
+
+// ── Init ────────────────────────────────────────────────────
+setStatus('ready');
+$input.focus();
+</script>
+</body>
+</html>
