@@ -71,6 +71,72 @@ oc memory search 编辑器 --limit 5
 
 ---
 
+## 技能
+
+技能是「教 oc 做某类任务的固定流程」，一个技能 = 一个目录 + 一份 `SKILL.md`（YAML frontmatter + Markdown 正文）。
+
+### 安装
+
+三种方式等价，最终都是把目录放进 `~/.oc/skills/`，重启 `oc serve` 后生效：
+
+```bash
+# 1) 从 ClawHub 安装（scoped 包，落在 @<publisher>/<slug>/）
+clawhub install @pskoett/self-improving-agent
+
+# 2) 从 Git 仓库安装单个技能
+npx skills add https://github.com/anthropics/skills --skill frontend-design
+
+# 3) 手工放入（裸包）
+mkdir -p ~/.oc/skills/my-skill
+cat > ~/.oc/skills/my-skill/SKILL.md <<'EOF'
+---
+name: my-skill
+description: 这个技能做什么、什么时候该用。
+enabled: true
+---
+
+# 正文：具体流程，模型按需读取
+EOF
+```
+
+安装后**必须重启 `oc serve`** 才重新扫描（技能是启动时加载的）。
+
+### 目录结构
+
+技能在磁盘上有两种形态，取决于 slug 是否带 scope（对齐 ClawHub 的 npm 风格 slug）：
+
+| 形态 | 磁盘路径 | slug |
+|---|---|---|
+| 裸包 | `~/.oc/skills/<name>/SKILL.md` | `<name>` |
+| scoped 包 | `~/.oc/skills/@<publisher>/<name>/SKILL.md` | `@<publisher>/<name>` |
+
+`SKILL.md` 的 frontmatter 支持：`name`（展示名，缺省回退叶子目录名）、`description`（进可用技能列表）、`enabled`（默认 true）、`metadata.openclaw.os`（平台限制，如 `["darwin"]`）。
+
+### 怎么生效
+
+技能正文**不会**整段塞进上下文。系统提示词里只放一份索引（技能名 + 描述 + 内容指纹），模型判断该用某个技能时，用 `file` 工具读 `~/.oc/skills/<slug>/SKILL.md` 拿全文——正文变了指纹会变，模型据此重读。
+
+### 开关与门控
+
+`config.toml` 的 `[skills]` 节控制哪些技能可见：
+
+```toml
+[skills]
+allowlist = []     # 非空则只加载列表内的技能
+denylist  = []     # 永不加载（优先于 allowlist）
+```
+
+列表项填**完整 slug**（scoped 包要带 `@scope/` 前缀）：
+
+```toml
+[skills]
+denylist = ["@pskoett/self-improving-agent"]   # 不是 "self-improving-agent"
+```
+
+`metadata.openclaw.os` 与当前系统不匹配的技能会被跳过。
+
+---
+
 ## 定时任务
 
 到点触发，daemon 主动推送，不占用当前对话。

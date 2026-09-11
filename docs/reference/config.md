@@ -67,6 +67,17 @@
 
 ---
 
+## [skills]
+
+技能门控。技能装在 `~/.oc/skills/`（见 [使用指南](../guides/usage.md#技能)）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `allowlist` | string[] | `[]` | 非空则只加载列表内的技能。填**完整 slug**（scoped 包带 `@publisher/` 前缀，如 `"@pskoett/self-improving-agent"`） |
+| `denylist` | string[] | `[]` | 永不加载（优先于 allowlist）。同样填完整 slug |
+
+---
+
 ## [tools.approval]
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -121,6 +132,10 @@ exec_timeout_secs = 120
 [tools.approval]
 mode = "prompt"
 timeout_secs = 120
+
+[skills]
+allowlist = []
+denylist = []
 
 [watchdog]
 idle_cloud_secs = 120
