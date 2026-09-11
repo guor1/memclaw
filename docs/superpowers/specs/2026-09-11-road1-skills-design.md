@@ -27,38 +27,42 @@ pub struct Skill {
     pub name: String,        // frontmatter.name 或目录名
     pub description: String, // frontmatter.description，进 <available_skills> 列表
     pub body: String,        // 剥离 frontmatter 后的正文
-    pub version: String,     // 正文哈希（16 位 hex，FNV-1a），变了触发模型重读
+    pub fingerprint: String, // 正文 sha256（hex），变了触发模型重读
     pub enabled: bool,       // frontmatter.enabled，缺省 true
+    pub os: Vec<String>,     // metadata.openclaw.os，空 = 不限平台
 }
 ```
 
-> `version` 复用 `oc-server/src/dreaming.rs:288` 的 `content_hash`（FNV-1a）。该函数注释明确
-> 「仅用于变没变的比对，非安全用途」——与按需注入「正文变了要重读」的语义完全一致。
-> 不新引入 sha2 依赖。抽到 `oc-core`（或作为工具函数）供两处复用。
+> `fingerprint` 用 **sha256**（非 FNV-1a）：技能正文来自 ClawHub，属潜在不可信输入，
+> 指纹要对「恶意构造碰撞」免疫；且冻结的设计文档 `02-核心机制.md` 字面要求 sha256。
+> `fingerprint`（内容哈希）与 frontmatter 的 `version: 1.0.0`（semver，发布/目录概念）是
+> 两码事——ROAD-1 不解析 semver，只算内容哈希。
 
-## Frontmatter 解析（手写极简解析器）
+## Frontmatter 解析（serde_yaml + struct）
 
-首版只认三键，其余忽略（不报错）：
+用 `serde_yaml` 反序列化到 struct，未知字段忽略（不 `deny_unknown_fields`）。首版只取：
 
 - `name`（字符串，缺省用目录名）
 - `description`（字符串，缺省空）
 - `enabled`（布尔，缺省 true）
+- `metadata.openclaw.os`（字符串数组；`metadata.clawdbot`/`metadata.clawdis` 作为 alias 一并识别）
 
-解析器位置：`oc-core/src/skill.rs`（新模块）。逻辑：
+解析位置：`oc-core/src/skill.rs`（新模块）。逻辑：
 
-1. 若文件不以 `---` 开头 → 视为无 frontmatter，**整篇都是正文**（但目录名仍是技能名）。
-2. 找到第二个 `---`（闭界），中间按行拆 `key: value`；用**手写扫描**而非 serde_yaml。
-3. 嵌套块（如 `metadata:` 后面的缩进行）首版**跳过**，不解析、不报错——ClawHub 包的
-   `metadata.openclaw.*` 字段本阶段读不到也没关系（见门控范围）。
+1. 文件不以 `---` 开头 → 无 frontmatter，整篇为正文，`os`/`enabled`/`description` 取缺省。
+2. 切出两个 `---` 之间的块，`serde_yaml::from_str` 到 `SkillFrontmatter` struct；解析失败
+   → 整目录跳过并 `warn`（不 panic、不阻塞启动）。
+3. 后续要加 `requires.env`/`envVars`/`bins` 门控，只在 struct 上加字段，解析层零改动。
 
-> 不引入 `serde_yaml` 的理由：首版只认三个标量字段；`metadata` 嵌套结构在 ROAD-6/后续
-> （env/bin 门控）需要时再升级解析器。YAGNI。
+> 选 serde_yaml 而非手写解析器：ClawHub frontmatter 是真正的嵌套 YAML，且同时存在
+> 块式（`metadata:\n  openclaw:\n    os:`）与 flow 式 JSON（`metadata: { "openclaw": {...} }`）
+> 两种写法，后者会立刻击穿任何手写按行解析器。
 
 ## 加载器（`oc-cli/src/skills_loader.rs`）
 
 - 遍历 `~/.oc/skills/*/SKILL.md`（目录式），跳过非目录条目。
 - 每目录读 `SKILL.md`（`SKILL.md` → `skill.md` 回退），解析 frontmatter → `Skill`。
-- `version = content_hash(body)`。
+- `fingerprint = sha256(body)`。
 - frontmatter 缺失/读失败 → 跳过该目录（不 panic，不阻塞启动），打 `tracing::warn`。
 - 旧平铺 `~/.oc/skills/*.md` **直接忽略**（用户定案：只认新格式，不做降级兼容）。
 
@@ -76,35 +80,16 @@ pub struct Skill {
    ```
 
    字段 `#[serde(default)]`，老配置无此节也能解析（保持「缺键兼容」既有约定）。
-3. **os 门控**：解析 `metadata.openclaw.os`（字符串数组，如 `["darwin"]`），不匹配当前
-   OS 则跳过。为解析这一个嵌套字段，极简解析器需**最少支持** `metadata.openclaw.os` 这条
-   缩进路径（见下方「解析器最小嵌套支持」）。
+3. **os 门控**：`metadata.openclaw.os`（如 `["darwin"]`），不匹配当前 OS 则跳过。
+   当前 OS 字符串由 CLI 注入（`std::env::consts::OS` 映射：`macos`→darwin / `windows` /
+   `linux`），保持 `oc-core` 纯策略无 IO。
 
-纯函数 `gated_skills(all, cfg)` 在 `oc-core/src/skill.rs`，输入全部已加载技能 + `SkillsConfig`，
-输出过滤后的列表。OS 匹配在 CLI 侧注入当前平台字符串（复用 `oc-tools` 里已有的平台判断或
-`std::env::consts::OS`），保持 `oc-core` 纯策略无 IO。
+纯函数 `gated_skills(all, cfg)` 在 `oc-core/src/skill.rs`，输入全部已加载技能 + `SkillsConfig` +
+当前平台，输出过滤后的列表。
 
 **范围外**（本阶段不做，留后续）：`requires.env` / `requires.bins` / `requires.anyBins` /
 `envVars` 运行时门控。这些需要探测进程环境与二进制存在性，且是「用的时候才报错」的体验问题，
-不阻塞「装进来能生效」这条硬约束。
-
-## 解析器最小嵌套支持
-
-手写解析器只需读懂两种形状：
-
-```
-name: foo
-description: bar
-enabled: false
-metadata:
-  openclaw:
-    os:
-      - darwin
-```
-
-实现：逐行扫描；遇 `key: <标量>` 记录；遇 `metadata:` / `openclaw:` 进上下文；遇
-`    os:` 后的 `- value` 列表项收集进 `os: Vec<String>`。其余嵌套键一律跳过。这是为 os 门控
-专门加的最小支持，不实现通用 YAML。
+不阻塞「装进来能生效」这条硬约束。serde_yaml 已引入，后续只需在 `SkillFrontmatter` 上补字段。
 
 ## 按需注入（`oc-core/src/prompt.rs` 改）
 
@@ -113,10 +98,10 @@ metadata:
 ```text
 # 技能
 可用技能列表（正文不在本提示词内）：
-- <name> — <description> [version <hash>]
+- <name> — <description> [fingerprint <sha256>]
 ...
 要使用某个技能时，用 file 工具 read `~/.oc/skills/<name>/SKILL.md` 读正文；
-若该技能的 version 与上次读到的不一致，需要重新读取全文。
+若该技能的 fingerprint 与上次读到的不一致，需要重新读取全文。
 ```
 
 要点：
@@ -145,7 +130,7 @@ metadata:
 - **oc-core**（`skill.rs` 新模块单测）：
   - frontmatter 解析：三键正常 / 无 frontmatter 整篇为正文 / `enabled` 缺省 true /
     `name` 缺省用目录名。
-  - 最小嵌套 `metadata.openclaw.os` 解析。
+  - `metadata.openclaw.os`（块式）与 `metadata: { "openclaw": { "os": [...] } }`（flow 式）都能解析。
   - `gated_skills`：enabled 过滤 / allowlist / denylist 优先 / os 匹配矩阵。
   - `render_system_prompt`：只含索引不含正文（锁快照）。
 - **oc-cli**（`skills_loader` 单测，用 tempdir）：
@@ -154,10 +139,11 @@ metadata:
 
 ## 待改文件
 
-- `crates/oc-core/src/skill.rs`（新）：`Skill` 类型 + frontmatter 解析 + `gated_skills` + `content_hash`。
+- `crates/oc-core/src/skill.rs`（新）：`Skill` 类型 + frontmatter 解析 + `gated_skills` + `fingerprint`。
 - `crates/oc-core/src/prompt.rs`：`SkillBrief`→`Skill`，技能段改索引注入。
 - `crates/oc-core/src/config.rs`：`SkillsConfig { allowlist, denylist }` + `Config.skills`（`#[serde(default)]`）。
 - `crates/oc-core/src/lib.rs`：注册 `skill` 模块。
+- `crates/oc-core/Cargo.toml`：加 `serde_yaml` + `sha2` 依赖。
 - `crates/oc-cli/src/skills_loader.rs`：目录式 + frontmatter + 门控，签名 `load(&SkillsConfig, platform)`。
 - `crates/oc-cli/src/provider_setup.rs`：`load()` → `load(&cfg.skills, platform)`。
 - `crates/oc-cli/src/onboard.rs`：写 `skills/example/SKILL.md`。
@@ -166,9 +152,9 @@ metadata:
 
 ## 依赖 / 约束
 
-- 不新增第三方依赖（手写 YAML 极简解析 + FNV-1a 复用）。
-- `oc-core` 保持「纯策略、无 IO」：frontmatter 解析与门控入参是字符串/配置，不碰文件系统；
-  文件 IO 全在 `oc-cli` 的 loader。
+- 新增第三方依赖：`serde_yaml`（frontmatter 解析）、`sha2`（内容指纹）。均为纯函数依赖，
+  落在 `oc-core`；`oc-core` 仍保持「纯策略、无 IO」——frontmatter 解析与门控入参是字符串/配置，
+  不碰文件系统；文件 IO 全在 `oc-cli` 的 loader。
 
 ## 验证
 
