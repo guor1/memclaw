@@ -16,5 +16,6 @@ pub mod prompt;
 pub mod queue;
 pub mod summary;
 pub mod tool;
+pub mod skill;
 
 pub use config::{Config, SecretRef};

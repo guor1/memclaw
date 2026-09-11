@@ -11,6 +11,8 @@ serde = { version = "1", features = ["derive"] }
 garde = { version = "0.22", features = ["derive"] }
 time = { version = "0.3", features = ["macros", "serde"] }
 time-tz = "2"
+serde_yaml = "0.9"
+sha2 = "0.10"
 
 [dev-dependencies]
 # 仅测试用：验证 `#[serde(default)]` 在旧配置（缺 timeout_secs）下的行为。
