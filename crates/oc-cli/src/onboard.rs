@@ -51,6 +51,10 @@ idle_cloud_secs = 120
 idle_self_secs = 300
 run_timeout_secs = 0
 abort_min_secs = 300
+
+[skills]
+allowlist = []
+denylist = []
 "#;
 
 const DEFAULT_SOUL: &str = r#"# SOUL.md — oc 的人格
@@ -78,12 +82,17 @@ const DEFAULT_MEMORY: &str = r#"# MEMORY.md — curated 核心记忆
 （dreaming 巩固会重写这里；也可手工编辑。）
 "#;
 
-const DEFAULT_SKILL: &str = r#"# example — 示例技能
+const DEFAULT_SKILL: &str = r#"---
+name: example
+description: 示例技能，演示 SKILL.md 格式。删除或替换为你自己的技能。
+enabled: true
+---
 
-这是一个技能示例。skills/ 下每个 .md 文件是一个技能，文件名即技能名，
-正文会在会话起始注入系统提示词，用来教 oc 做某类任务的固定流程。
+# example — 示例技能
 
-删除本文件或替换为你自己的技能。
+skills/ 下每个子目录是一个技能，子目录里的 `SKILL.md` 是技能本体。
+`description` 会进 base prompt 的可用技能列表；正文在模型按需用
+`file read` 读取时才进入上下文。删除本目录或替换为你自己的技能。
 "#;
 
 pub fn run() -> Result<()> {
@@ -106,7 +115,9 @@ pub fn run() -> Result<()> {
     write_if_absent(&soul_dir.join("USER.md"), DEFAULT_USER, &mut created)?;
     write_if_absent(&soul_dir.join("AGENTS.md"), DEFAULT_AGENTS, &mut created)?;
     write_if_absent(&soul_dir.join("MEMORY.md"), DEFAULT_MEMORY, &mut created)?;
-    write_if_absent(&skills_dir.join("example.md"), DEFAULT_SKILL, &mut created)?;
+    let example_dir = skills_dir.join("example");
+    fs::create_dir_all(&example_dir)?;
+    write_if_absent(&example_dir.join("SKILL.md"), DEFAULT_SKILL, &mut created)?;
 
     println!("oc 初始化完成：{}", home.display());
     if created.is_empty() {
