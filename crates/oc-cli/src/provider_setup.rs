@@ -56,7 +56,7 @@ pub fn build(cfg: &Config) -> Result<(Arc<dyn Provider>, SessionConfig, Duration
         max_history_entries: 200,
         history_token_budget: budget,
         soul: load_soul(),
-        skills: crate::skills_loader::load(),
+        skills: crate::skills_loader::load(&cfg.skills, std::env::consts::OS),
         trigger_threshold: cfg.memory.trigger_threshold as f64,
         trigger_max_per_turn: cfg.memory.trigger_max_per_turn as usize,
         context_window: context_window as u32,
