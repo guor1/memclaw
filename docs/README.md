@@ -1,98 +1,49 @@
 # 文档索引
 
-按用途分四类。**新增文档请放进对应子目录**，不要放在 `docs/` 根下。
-
-## design/ — 设计（长期有效，改动需慎重）
-
-从需求到实现方案的推导链，**按编号顺序阅读**：
+## guides/ — 使用指南
 
 | 文档 | 内容 |
 |---|---|
-| [01-功能点清单](design/01-功能点清单.md) | 要做什么：能力清单与边界 |
-| [02-核心机制](design/02-核心机制.md) | 怎么想的：记忆/主动性/人格等机制设计 |
-| [03-Rust落地方案](design/03-Rust落地方案.md) | 怎么落地：crate 划分与技术选型 |
-| [04-详细设计文档](design/04-详细设计文档.md) | 逐模块详设 + 落地状态标注（**最常查**） |
+| [quickstart.md](guides/quickstart.md) | 从零到能对话的最短路径 |
+| [usage.md](guides/usage.md) | 完整功能：记忆、定时任务、工具审批、HTTP 网关、状态诊断 |
 
-> 04 是唯一会随实现持续更新的设计文档：每项落地后在对应章节标 ✅ 与「落地实况」，
-> 保证文档不与代码漂移。
-
-单项专题（不在主线编号内）：
+## reference/ — 参考手册
 
 | 文档 | 内容 |
 |---|---|
-| [OpenAI-Responses-API-方案](design/OpenAI-Responses-API-方案.md) | `oc-http` 兼容层：协议映射、SSE 事件、支持范围与安全边界 |
+| [cli.md](reference/cli.md) | 所有子命令、参数、环境变量 |
+| [config.md](reference/config.md) | config.toml 全字段说明 |
+| [protocol.md](reference/protocol.md) | HTTP 网关接口（OpenAI Responses API 兼容） |
 
-## plan/ — 计划与方案（滚动更新）
-
-| 文档 | 内容 |
-|---|---|
-| [下一阶段计划](plan/下一阶段计划.md) | 优先级队列 + 每项的现状/改动/成本 + **变更记录**（时间倒序） |
-| [P1-2-standing-intent方案](plan/P1-2-standing-intent方案.md) | 单项专题方案（含 zeroclaw 调研结论） |
-| [P1-7-代码质量与技术债](plan/P1-7-代码质量与技术债.md) | Clippy 警告清零 + TODO 归档（2026-09-02 新增） |
-| [P2-生产化收口详细计划](plan/P2-生产化收口详细计划.md) | 读写分离 / 自愈 / 淘汰 / 索引 / CI（2026-09-02 新增） |
-
-> 想知道「现在做到哪了、下一步做什么」看《下一阶段计划》的变更记录。  
-> P1-7 与 P2 是 2026-09-02 代码评审后新增的详细计划。
-
-## testing/ — 测试指南与覆盖矩阵
-
-2026-09-06 起，真机验证从**手册照着敲**改为**自动化执行**。原先 8 份逐步操作
-手册（2658 行）已删除，替换为两份：
+## architecture/ — 架构
 
 | 文档 | 内容 |
 |---|---|
-| [README](testing/README.md) | 怎么跑、三层结构、**覆盖矩阵**（每条原 TC → 对应测试函数）、环境陷阱 |
-| [人工探针清单](testing/人工探针清单.md) | 只剩真正需要人眼判断的 4 条（回复质量、TUI 观感等） |
+| [overview.md](architecture/overview.md) | crate 划分、核心不变量、进程模型、车道模型 |
+| [memory.md](architecture/memory.md) | 三层记忆、Lane1 检索、dreaming 巩固、FTS5 索引 |
+| [agent-loop.md](architecture/agent-loop.md) | Agent 循环、工具集、审批门、防卡死机制 |
+| [proactive.md](architecture/proactive.md) | cron、standing intent、心跳底座、anti-nagging |
+| [store.md](architecture/store.md) | 单写线程、读写分离、写线程健康、FTS5 实现细节 |
+| [adr/0001-per-run-sink-backpressure.md](architecture/adr/0001-per-run-sink-backpressure.md) | per-run 背压通道（P0-1 事件丢失修复）|
+| [adr/0002-fts5-trigram-tokenization.md](architecture/adr/0002-fts5-trigram-tokenization.md) | FTS5 2-gram 预切词策略（P2-4）|
+| [adr/0003-no-config-hotreload.md](architecture/adr/0003-no-config-hotreload.md) | 不做配置热更（P2-5）|
 
-```sh
-cargo test --workspace      # 278 项自动化回归
-bash scripts/e2e/smoke.sh   # 进程级冒烟（真二进制 + 真 CLI + 真 HTTP）
-```
-
-CI（[ci.yml](../.github/workflows/ci.yml)）每次 push / PR 双平台跑上述内容 + clippy。
-
-> 这次迁移顺带抓到三个缺陷，其中 **SSE 双层 `data:` 前缀**（标准客户端一个事件
-> 都解析不出来）和 **`ERROR_PIPE_BUSY` 未重试**（Windows 并发随机 500）已修。
-> 详见 README 的「自动化过程中发现的缺陷」。
->
-> 配套脚本：[`scripts/h3-concurrent.sh`](../scripts/h3-concurrent.sh) —— 手工并发打点，
-> 用时间轴重叠证明请求真并发。该思路已进代码（`gateway.rs` 的 `max_in_flight`），
-> 脚本保留供临时排查真机问题。
-
-## research/ — 调研与审查（一次性产出）
+## operations/ — 运维
 
 | 文档 | 内容 |
 |---|---|
-| [zeroclaw流式传输调研](research/zeroclaw流式传输调研.md) | 参考项目的 SSE 处理对比 |
-| [P1-2-改动范围审查](research/P1-2-改动范围审查.md) | 改动范围逐层拆解 + 风险评估 |
-| [CODE_REVIEW_2026-09-02](CODE_REVIEW_2026-09-02.md) | 全面代码评审报告（207 测试全绿后的质量审计） |
+| [install.md](operations/install.md) | 安装：release 二进制 / 从源码构建 / 各平台差异 |
+| [deploy.md](operations/deploy.md) | 部署：目录布局、初始化、启动停止、API key、systemd |
+| [troubleshooting.md](operations/troubleshooting.md) | 故障手册：逐条现象 → 原因 → 处置步骤 |
 
----
+## development/ — 开发
 
-## 命名约定
+| 文档 | 内容 |
+|---|---|
+| [testing.md](development/testing.md) | 测试策略、如何跑、覆盖矩阵、环境陷阱 |
+| [manual-probes.md](development/manual-probes.md) | 人工探针：需要眼睛判断的 4 条验证 |
+| [release.md](development/release.md) | 发布流程：tag、CI、多平台产物 |
 
-- **design/** 保留数字前缀（有阅读顺序）；其余目录用语义命名，**不加全局编号**
-  （历史上全局编号导致过撞号：两个 `07-`）。
-- 专题文档统一 `<阶段项>-<主题>.md`，如 `P1-7-代码质量与技术债.md`。
-- 内部链接用相对路径：跨目录 `../plan/xxx.md`，引用源码 `../../crates/...`。
+## archive/ — 归档
 
----
-
-## 当前位置（2026-09-06）
-
-**已完成**：
-- ✅ M1-M6 里程碑：对话 / 持久化 / 记忆 / 防卡死 / 工具 / 主动性 / CLI
-- ✅ P0 稳定核心闭环：事件丢失 / 审批取消 / 泄漏清理 / 阻塞 IO
-- ✅ **P1 全部**：ask_user / standing intent / 偏好 supersede / dreaming 重写 /
-  cron 工具 / **episodic 产出（P1-6）** / 代码质量（P1-7）
-- ✅ `oc-http`：OpenAI Responses API 兼容层（计划外产出）
-- ✅ **测试自动化 + CI 门禁**（2026-09-06）：手册式真机验证 → `cargo test` 里的
-  278 项自动化 e2e + 进程级冒烟；push/PR 双平台 CI。顺带修掉 SSE 双层 `data:`
-  前缀（流式对标准客户端不可用）与 Windows 并发 `ERROR_PIPE_BUSY`。
-
-**下一步**：
-- P2 阶段 1：读写分离 / 写线程自愈 / 内存淘汰（可用性基石）
-- P2 阶段 2：索引 / 文档（工程化收口；CI 已提前落地）
-- 补两处未覆盖用例：老库 v1 迁移、真 OpenAI SDK 兼容（规格见 testing/README）
-
-详见 [plan/下一阶段计划.md](plan/下一阶段计划.md) 与 [CODE_REVIEW_2026-09-02.md](CODE_REVIEW_2026-09-02.md)。
+旧文档，已冻结，不再更新。详见 [archive/README.md](archive/README.md)。

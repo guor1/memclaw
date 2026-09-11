@@ -3,7 +3,7 @@
 > 自动化跑完且全绿之后，才做这里的几条。
 > 收录标准只有一个：**判定依赖人的审美或质量判断，无法用断言表达**。
 > 凡是"某文件应含某字符串""某返回码应为 400"这类，都已进
-> [覆盖矩阵](README.md#覆盖矩阵)，不该出现在本文。
+> [覆盖矩阵](testing.md#覆盖矩阵)，不该出现在本文。
 >
 > 全部自动化回归：`cargo test --workspace` + `bash scripts/e2e/smoke.sh`。
 
@@ -17,7 +17,7 @@ cargo run --release               # 终端 B（TUI）
 ```
 
 用默认 `~/.oc`（开发环境无需隔离）。日志落 `~/.oc/logs/oc.log.YYYY-MM-DD`。
-需要与自己正跑的 daemon 隔开时设 `OC_SOCKET`（见 [环境陷阱](README.md#环境陷阱)）。
+需要与自己正跑的 daemon 隔开时设 `OC_SOCKET`（见 [环境陷阱](testing.md#环境陷阱)）。
 
 真实模型是本文的前提——这几条要看的正是模型输出质量，mock 无意义。
 

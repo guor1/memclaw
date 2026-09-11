@@ -10,7 +10,7 @@
 ## 怎么跑
 
 ```sh
-cargo test --workspace          # 全部自动化回归（约 60s，278 项）
+cargo test --workspace          # 全部自动化回归（约 60s）
 cargo test -p oc-server         # 单 crate
 cargo test --test e2e_long_reply  # 单个 e2e 文件
 bash scripts/e2e/smoke.sh       # 进程级冒烟（真二进制 + 真 CLI + 真 HTTP）
@@ -46,7 +46,7 @@ clippy，Linux 与 Windows 双平台。冒烟在 Linux 上跑。
 | live lane | `#[ignore]` + `OC_LIVE_TEST=1` | 真 provider 的 SSE / 鉴权 / 限流 | 分钟 + 花钱 |
 
 分层依据是**能否确定性断言**，不是快慢。判定标准明确的一律进代码；
-只有需要人眼判断质量的才留在 [人工探针清单](人工探针清单.md)。
+只有需要人眼判断质量的才留在 [人工探针清单](manual-probes.md)。
 这条界线借鉴 openclaw 的 `qa suite` / `qa manual` 之分。
 
 ## 写 e2e 用的 harness
@@ -108,7 +108,7 @@ let daemon = TestDaemon::builder("tag", provider)
 | TC-P1-3a~e,g,h 偏好 supersede | ✅ [memory_write.rs](../../crates/oc-server/tests/memory_write.rs) |
 | TC-P1-3f 老库 v1 升级不丢记忆 | ⬜ **未覆盖**（需签入 v1 schema fixture 库，见下方「未覆盖」） |
 | TC-P1-4a~g,i dreaming 重写 | ✅ [dreaming_memory_md.rs](../../crates/oc-server/tests/dreaming_memory_md.rs) |
-| TC-P1-4h 重写内容无编造 | → [人工探针](人工探针清单.md)（质量判断） |
+| TC-P1-4h 重写内容无编造 | → [人工探针](manual-probes.md)（质量判断） |
 | TC-P1-5a~c,e~g cron 工具 | ✅ [cron_tool.rs](../../crates/oc-server/tests/cron_tool.rs) |
 | TC-P1-5d 到点消息真推到客户端 | ✅ [e2e_cron_push.rs](../../crates/oc-server/tests/e2e_cron_push.rs)（含「一次性不重复」回归） |
 | TC-P1-6 episodic 产出 | ✅ [episodic_flush.rs](../../crates/oc-server/tests/episodic_flush.rs) |
@@ -127,7 +127,7 @@ let daemon = TestDaemon::builder("tag", provider)
 | TC-H2 session key 路由 + 隔离 | ✅ 单测（`adapter.rs`）+ `gateway.rs` |
 | TC-H3 同会话并发排队 | ✅ `gateway.rs` `concurrent_same_session_all_return` |
 | TC-H4 队列满 → 报错而非挂住 | ✅ `gateway.rs` `queue_full_returns_error_not_hang` + [queue_full_reject.rs](../../crates/oc-server/tests/queue_full_reject.rs)（server 侧同源） |
-| TC-H5 HTTP 与 TUI 抢车道 + TUI 错误显示 | → [人工探针](人工探针清单.md)（TUI 渲染） |
+| TC-H5 HTTP 与 TUI 抢车道 + TUI 错误显示 | → [人工探针](manual-probes.md)（TUI 渲染） |
 | TC-H6 SSE 事件序列与终止 | ✅ `gateway.rs` `sse_stream_emits_deltas_then_completes`（含线格式，**见下方缺陷 2**） |
 | TC-H7 断连归还许可 | ✅ `gateway.rs` `aborted_request_returns_permit` |
 | TC-H8 max-conns 超限 503 | ✅ `gateway.rs` `over_max_conns_returns_503` |
@@ -180,7 +180,7 @@ ask_user / 审批的等待上。已在 [run.rs](../../crates/oc-server/src/run.r
 **4. `usage.input_tokens` 并发下不可信。**
 `Event::Usage` 只有 `session` 没有 `run_id`，同会话 N 个并发 run 无法归属；
 且它走全局广播、比 `Lifecycle::End` 晚到时会被 `accumulate_response` 丢弃。
-详见 [OpenAI-Responses-API-方案 §8](../design/OpenAI-Responses-API-方案.md)。
+详见 [OpenAI-Responses-API-方案 §8](../reference/protocol.md)。
 修它要动 `oc-proto`，跨 crate，留待 P2。
 
 ## 未覆盖（原手册已删，用例规格记在此）
@@ -240,5 +240,6 @@ bash 脚本必须用 Git Bash 跑（`C:\Program Files\Git\bin\bash.exe`）；
 
 ## 相关
 
-- [人工探针清单](人工探针清单.md) —— 只剩需要人眼判断的少数几条
-- [下一阶段计划](../plan/下一阶段计划.md)
+- [人工探针清单](manual-probes.md) —— 只剩需要人眼判断的少数几条
+- [ROADMAP](../../ROADMAP.md) —— 未完成的工作
+- [CHANGELOG](../../CHANGELOG.md) —— 已发生的变更
