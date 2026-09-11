@@ -152,15 +152,15 @@ pub fn render_system_prompt(inputs: &PromptInputs) -> RenderedPrompt {
         );
     }
 
-    // 3) 技能：只注入索引列表（名字 + 描述 + 指纹），正文不进提示词——模型用
-    //    file 工具按需读 `~/.oc/skills/<name>/SKILL.md`。按名称排序保持确定性。
+    // 3) 技能：只注入索引列表（名字 + slug 路径 + 描述 + 指纹），正文不进提示词——
+    //    模型用 file 工具按需读 `~/.oc/skills/<slug>/SKILL.md`（slug 见括号）。按名称排序。
     if !inputs.skills.is_empty() {
         let mut skills: Vec<&crate::skill::Skill> = inputs.skills.iter().collect();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
-        prefix.push_str("\n# 技能\n可用技能（正文不在本提示词内，用 file 工具 read `~/.oc/skills/<name>/SKILL.md` 按需读取；指纹变了要重读）：\n");
+        prefix.push_str("\n# 技能\n可用技能（正文不在本提示词内，用 file 工具 read `~/.oc/skills/<slug>/SKILL.md` 按需读取，slug 即括号内路径；指纹变了要重读）：\n");
         for s in skills {
             let desc = &s.description;
-            prefix.push_str(&format!("- {} — {} [fingerprint {}]\n", s.name, desc, s.fingerprint));
+            prefix.push_str(&format!("- {}（{}）— {} [fingerprint {}]\n", s.name, s.slug, desc, s.fingerprint));
         }
     }
 

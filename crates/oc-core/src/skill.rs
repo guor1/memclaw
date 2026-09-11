@@ -9,9 +9,10 @@ use sha2::{Digest, Sha256};
 /// 一个技能。
 #[derive(Debug, Clone)]
 pub struct Skill {
-    /// frontmatter `name`（缺省回退目录名）。进 prompt 展示用。
+    /// frontmatter `name`（缺省回退叶子目录名）。展示用。
     pub name: String,
-    /// 目录名（可路由 slug）。门控（allowlist/denylist）按它匹配，与 `name` 解耦。
+    /// 相对 `skills/` 的可路由 slug：裸包 = 目录名，scoped 包 = `@scope/name`。
+    /// 门控（allowlist/denylist）按它匹配，与 `name` 解耦（skill-format.md §Slugs）。
     pub slug: String,
     pub description: String,
     /// 剥离 frontmatter 后的正文。
@@ -54,15 +55,18 @@ pub fn fingerprint(body: &str) -> String {
 
 /// 解析一个技能的原始 `SKILL.md` 内容。
 ///
-/// - 不以 `---` 开头 → 无 frontmatter，整篇为正文，其余字段取缺省（目录名当 name）。
+/// `slug` 为可路由 slug（裸包或 `@scope/name`），`leaf` 为叶子目录名——frontmatter
+/// 缺 `name` 时回退到 `leaf`（skill-format.md：`name` 应匹配父目录，即叶子目录）。
+///
+/// - 不以 `---` 开头 → 无 frontmatter，整篇为正文，其余字段取缺省。
 /// - 有 frontmatter 但 YAML 非法 / 缺闭界 `---` → `None`（调用方跳过并 warn）。
-pub fn parse_skill(dir_name: &str, raw: &str) -> Option<Skill> {
+pub fn parse_skill(slug: &str, leaf: &str, raw: &str) -> Option<Skill> {
     if !raw.starts_with("---") {
         // 不以 `---` 开头 → 无 frontmatter，整篇为正文。
         let body = raw.trim().to_string();
         return Some(Skill {
-            name: dir_name.to_string(),
-            slug: dir_name.to_string(),
+            name: leaf.to_string(),
+            slug: slug.to_string(),
             description: String::new(),
             fingerprint: fingerprint(&body),
             body,
@@ -73,7 +77,7 @@ pub fn parse_skill(dir_name: &str, raw: &str) -> Option<Skill> {
     // 以 `---` 开头：缺闭界 `---` / YAML 非法 → None。
     let (fm_str, rest) = extract_frontmatter(raw)?;
     let fm: SkillFrontmatter = serde_yaml::from_str(fm_str).ok()?;
-    let name = fm.name.unwrap_or_else(|| dir_name.to_string());
+    let name = fm.name.unwrap_or_else(|| leaf.to_string());
     let description = fm.description.unwrap_or_default();
     let enabled = fm.enabled.unwrap_or(true);
     let os = fm
@@ -84,7 +88,7 @@ pub fn parse_skill(dir_name: &str, raw: &str) -> Option<Skill> {
     let body = rest.trim().to_string();
     Some(Skill {
         name,
-        slug: dir_name.to_string(),
+        slug: slug.to_string(),
         description,
         fingerprint: fingerprint(&body),
         body,
@@ -170,8 +174,9 @@ body
 
     #[test]
     fn parses_frontmatter_and_strips_body() {
-        let s = parse_skill("todoist", SAMPLE).unwrap();
+        let s = parse_skill("todoist", "todoist", SAMPLE).unwrap();
         assert_eq!(s.name, "todoist");
+        assert_eq!(s.slug, "todoist");
         assert_eq!(s.description, "Manage Todoist tasks.");
         assert!(s.enabled);
         assert_eq!(s.os, vec!["darwin".to_string()]);
@@ -181,14 +186,25 @@ body
 
     #[test]
     fn flow_style_metadata_parses() {
-        let s = parse_skill("todoist", FLOW).unwrap();
+        let s = parse_skill("todoist", "todoist", FLOW).unwrap();
         assert_eq!(s.os, vec!["darwin".to_string(), "linux".to_string()]);
+    }
+
+    /// scoped 包（`@publisher/slug`）的 slug 应是完整 scoped 路径，name 回退叶子目录名。
+    #[test]
+    fn scoped_slug_keeps_full_path_and_name_falls_back_to_leaf() {
+        let raw = "---\ndescription: 自改进\n---\nbody";
+        let s = parse_skill("@pskoett/self-improving-agent", "self-improving-agent", raw).unwrap();
+        assert_eq!(s.slug, "@pskoett/self-improving-agent");
+        assert_eq!(s.name, "self-improving-agent"); // frontmatter 无 name，回退叶子目录
+        assert_eq!(s.description, "自改进");
     }
 
     #[test]
     fn no_frontmatter_means_whole_file_is_body() {
-        let s = parse_skill("mydir", NO_FM).unwrap();
-        assert_eq!(s.name, "mydir");           // 目录名兜底
+        let s = parse_skill("mydir", "mydir", NO_FM).unwrap();
+        assert_eq!(s.name, "mydir");           // 叶子目录名兜底
+        assert_eq!(s.slug, "mydir");
         assert_eq!(s.description, "");
         assert!(s.enabled);                     // enabled 缺省 true
         assert!(s.os.is_empty());
@@ -198,17 +214,17 @@ body
     #[test]
     fn malformed_frontmatter_is_none() {
         let bad = "---\nname: [unclosed\n---\nbody";
-        assert!(parse_skill("x", bad).is_none());
+        assert!(parse_skill("x", "x", bad).is_none());
     }
 
     #[test]
     fn unterminated_frontmatter_is_none() {
-        assert!(parse_skill("x", "---\nname: broken").is_none());
+        assert!(parse_skill("x", "x", "---\nname: broken").is_none());
     }
 
     #[test]
     fn plain_no_frontmatter_still_some() {
-        let s = parse_skill("mydir", "no dashes here").unwrap();
+        let s = parse_skill("mydir", "mydir", "no dashes here").unwrap();
         assert_eq!(s.name, "mydir");
         assert_eq!(s.body, "no dashes here");
     }

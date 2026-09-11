@@ -81,7 +81,7 @@ impl Tool for FileTool {
             description: "文件操作（优先于 exec）。op=read|write|edit|append|list|stat|head|tail|grep|glob。\
                 修改已有文件用 edit（只发要改的片段）而不是 write 重发整个文件。\
                 路径可相对当前工作目录。\
-                技能正文在 ~/.oc/skills/<name>/SKILL.md（用 op=read 按需读取）。".to_string(),
+                技能正文在 ~/.oc/skills/<slug>/SKILL.md（用 op=read 按需读取）。".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

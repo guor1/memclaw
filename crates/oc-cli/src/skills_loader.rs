@@ -1,4 +1,9 @@
-//! 技能加载（ROAD-1）：读 `~/.oc/skills/<name>/SKILL.md`（目录式）为 Skill 列表。
+//! 技能加载（ROAD-1）：读 `~/.oc/skills/` 下的技能目录为 Skill 列表。
+//!
+//! 目录布局对齐 `docs/design/skill-format.md` §Slugs：
+//! - 裸包：`skills/<slug>/SKILL.md`（深度 1）
+//! - scoped 包：`skills/@<publisher>/<slug>/SKILL.md`（深度 2，`@scope/name` 是
+//!   npm 风格 scoped slug，`/` 在磁盘上即嵌套目录）
 //!
 //! 每个技能一个目录，`SKILL.md` 带 YAML frontmatter。缺目录/读失败返回空列表
 //! （不阻塞启动）；旧平铺 `*.md` 忽略。渲染时由 oc-core::prompt 稳定排序。
@@ -30,24 +35,53 @@ fn load_from_dir(dir: &std::path::Path, cfg: &SkillsConfig, host_os: &str) -> Ve
         if !path.is_dir() {
             continue; // 旧平铺 *.md 直接忽略。
         }
-        let raw = match read_skill_md(&path) {
-            Some(r) => r,
-            None => continue,
+        // 裸包：`skills/<slug>/SKILL.md`。
+        if let Some(skill) = load_one(&path, "") {
+            out.push(skill);
+            continue;
+        }
+        // scoped 包：`skills/@<publisher>/<slug>/SKILL.md`。仅当该目录自身不是技能
+        // （无 SKILL.md）时才下钻一层——避免把带 SKILL.md 的裸包误当成 scope 根。
+        let scoped = match std::fs::read_dir(&path) {
+            Ok(e) => e,
+            Err(_) => continue,
         };
-        let dir_name = match path.file_name().and_then(|s| s.to_str()) {
-            Some(n) => n,
-            None => {
-                // 目录名非 UTF-8：没有可路由的 slug，跳过而不是加载成空名技能。
-                tracing::warn!(path = %path.display(), "skill 目录名非 UTF-8，跳过");
+        for sub in scoped.flatten() {
+            let sub_path = sub.path();
+            if !sub_path.is_dir() {
                 continue;
             }
-        };
-        match parse_skill(dir_name, &raw) {
-            Some(s) => out.push(s),
-            None => tracing::warn!(path = %path.display(), "skill frontmatter 解析失败，跳过"),
+            let Some(publisher) = path.file_name().and_then(|s| s.to_str()) else {
+                tracing::warn!(path = %path.display(), "skill scope 目录名非 UTF-8，跳过");
+                continue;
+            };
+            let Some(leaf) = sub_path.file_name().and_then(|s| s.to_str()) else {
+                tracing::warn!(path = %sub_path.display(), "skill 目录名非 UTF-8，跳过");
+                continue;
+            };
+            let slug = format!("{publisher}/{leaf}");
+            if let Some(skill) = load_one(&sub_path, &slug) {
+                out.push(skill);
+            }
         }
     }
     gated_skills(out, &cfg.allowlist, &cfg.denylist, host_os)
+}
+
+/// 读取一个技能目录（含 `SKILL.md`）为 `Skill`。`slug` 为相对 `skills/` 的完整
+/// 可路由名（裸包 = leaf，scoped = `@publisher/leaf`）；无 `SKILL.md` 或解析失败返回
+/// `None`。
+fn load_one(dir: &std::path::Path, slug: &str) -> Option<Skill> {
+    let raw = read_skill_md(dir)?;
+    let leaf = dir.file_name().and_then(|s| s.to_str())?;
+    let slug = if slug.is_empty() { leaf } else { slug };
+    match parse_skill(slug, leaf, &raw) {
+        Some(s) => Some(s),
+        None => {
+            tracing::warn!(path = %dir.display(), "skill frontmatter 解析失败，跳过");
+            None
+        }
+    }
 }
 
 /// 读目录下的 `SKILL.md`（回退 `skill.md`）。
@@ -65,9 +99,15 @@ fn read_skill_md(dir: &std::path::Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // 每次调用返回唯一临时目录：Rust 测试默认并行，若三个用例共用 per-PID 的
+    // 同一个目录、又各自 remove_dir_all，会互相删掉对方正在用的目录（flaky）。
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn tmp() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("oc-skill-test-{}", std::process::id()));
+        let n = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let d = std::env::temp_dir().join(format!("oc-skill-test-{}-{n}", std::process::id()));
         fs::create_dir_all(&d).unwrap();
         d
     }
@@ -110,6 +150,27 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].slug, "pdf", "slug 应是目录名");
         assert_eq!(out[0].name, "PDF 生成器", "name 仍是 frontmatter 展示名");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    /// scoped 包（`@publisher/slug`）下钻一层，slug 为完整 `@publisher/slug`，
+    /// name 回退叶子目录名。
+    #[test]
+    fn scans_scoped_package_and_sets_full_slug() {
+        let base = tmp();
+        let skills = base.join("skills-scoped");
+        fs::create_dir_all(skills.join("@pskoett/self-improving-agent")).unwrap();
+        fs::write(
+            skills.join("@pskoett/self-improving-agent/SKILL.md"),
+            "---\ndescription: 自改进\n---\nbody",
+        )
+        .unwrap();
+
+        let cfg = SkillsConfig::default();
+        let out = load_from_dir(&skills, &cfg, "linux");
+        assert_eq!(out.len(), 1, "scoped 技能应被加载: {out:?}");
+        assert_eq!(out[0].slug, "@pskoett/self-improving-agent");
+        assert_eq!(out[0].name, "self-improving-agent", "name 回退叶子目录名");
         fs::remove_dir_all(&base).ok();
     }
 
