@@ -1,7 +1,8 @@
 //! web 工具（设计 §6.1）：`web_fetch` 抓取 URL、`web_search` 联网搜索。
 //!
 //! - **web_fetch**：GET 一个 URL，返回**净化 + 截断**的正文（粗略去 HTML 标签）。
-//! - **web_search**：走 DuckDuckGo HTML 端点（无需 key），解析结果标题+链接。
+//! - **web_search**：走 Bing HTML 端点（无需 key），解析结果标题+链接+摘要。
+//!   DuckDuckGo 的 `html.duckduckgo.com` 在部分网络（如国内）TCP 不可达，Bing 更稳。
 //!
 //! 抓来的内容是 **Untrusted**（provenance），由调用方按需归类；本层只做传输 + 净化。
 //! 需 `web` feature（默认开）。无 feature 时工具不注册。
@@ -131,8 +132,9 @@ impl Tool for WebSearchTool {
             serde_json::from_value(args).map_err(|e| ToolError::BadArgs(e.to_string()))?;
         cx.update(format!("搜索「{}」\n", args.query));
 
-        // DuckDuckGo HTML 端点（无需 key）。
-        let url = "https://html.duckduckgo.com/html/";
+        // Bing HTML 端点（无需 key）。DuckDuckGo 的 html.duckduckgo.com 在部分网络
+        // TCP 不可达，故改走 Bing；带浏览器 UA 以拿全量结果页而非跳转。
+        let url = "https://www.bing.com/search";
         let resp = tokio::select! {
             _ = cx.cancel.cancelled() => return Err(ToolError::Aborted),
             r = client()?.get(url).query(&[("q", args.query.as_str())]).send() => {
@@ -144,13 +146,16 @@ impl Tool for WebSearchTool {
             .await
             .map_err(|e| ToolError::Failed(format!("读取搜索结果失败: {e}")))?;
 
-        let results = parse_ddg_results(&body);
+        let results = parse_bing_results(&body);
         if results.is_empty() {
             return Ok(ToolOutput::ok(format!("「{}」无搜索结果。", args.query)));
         }
         let mut out = format!("「{}」搜索结果：\n", args.query);
-        for (i, (title, link)) in results.iter().take(MAX_RESULTS).enumerate() {
+        for (i, (title, link, snippet)) in results.iter().take(MAX_RESULTS).enumerate() {
             out.push_str(&format!("{}. {}\n   {}\n", i + 1, title, link));
+            if !snippet.is_empty() {
+                out.push_str(&format!("   {}\n", snippet));
+            }
         }
         Ok(ToolOutput::ok(sanitize(&out)))
     }
@@ -221,33 +226,55 @@ fn strip_block(s: &str, open: &str, close: &str) -> String {
     out
 }
 
-/// 从 DuckDuckGo HTML 结果里抽 (标题, 链接)。找 `result__a` 锚点。
-fn parse_ddg_results(html: &str) -> Vec<(String, String)> {
+/// 从 Bing HTML 结果里抽 (标题, 链接, 摘要)。按 `<li class="b_algo">` 切块，
+/// 每块内标题在 `<h2><a href>`、摘要在小记段落（`b_lineclamp`）、出处 `<cite>`。
+fn parse_bing_results(html: &str) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
-    // 结果锚：<a ... class="result__a" href="...">标题</a>
-    for chunk in html.split("result__a").skip(1) {
-        // href
-        let Some(href) = extract_attr(chunk, "href=\"") else {
+    // 先按结果块边界切（首块前可能有非结果内容，直接 skip(1) 丢掉）。
+    for chunk in html.split(r#"<li class="b_algo""#).skip(1) {
+        // 标题 + 链接：结果锚 `<h2 ...><a ... href="...">标题</a>`。
+        let title_link = chunk
+            .split_once("<h2")
+            .and_then(|(_, rest)| rest.split_once("href=\""))
+            .and_then(|(_, rest)| {
+                let href = rest.split('"').next().unwrap_or_default();
+                let title = rest
+                    .split_once('>')
+                    .and_then(|(_, t)| t.split_once("</a>"))
+                    .map(|(t, _)| strip_tags(t).trim().to_string())
+                    .unwrap_or_default();
+                Some((href.to_string(), title))
+            })
+            .filter(|(_, t)| !t.is_empty());
+
+        let (Some((link, title)), _) = (title_link, 0) else {
             continue;
         };
-        // 标题：紧跟的 `>...</a>`
-        let title = chunk
-            .split_once('>')
-            .and_then(|(_, rest)| rest.split_once("</a>"))
-            .map(|(t, _)| strip_tags(t).trim().to_string())
+        // 摘要：`<p class="b_lineclamp...">...</p>`，实体已在 html_to_text 里解过，
+        // 这里复用 strip_tags + trim。
+        let snippet = chunk
+            .split_once("b_lineclamp")
+            .and_then(|(_, rest)| rest.split_once('>'))
+            .and_then(|(_, rest)| rest.split_once("</p>"))
+            .map(|(s, _)| collapse_ws(s))
             .unwrap_or_default();
-        if !title.is_empty() {
-            out.push((title, decode_ddg_href(&href)));
-        }
+        out.push((title, link, snippet));
     }
     out
 }
 
-fn extract_attr(s: &str, key: &str) -> Option<String> {
-    let start = s.find(key)? + key.len();
-    let rest = &s[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+/// 把一段含标签/实体的片段压成单行纯文本（摘要用）。
+fn collapse_ws(s: &str) -> String {
+    let s = strip_tags(s);
+    let s = s
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&ensp;", " ")
+        .replace("&nbsp;", " ");
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn strip_tags(s: &str) -> String {
@@ -262,56 +289,6 @@ fn strip_tags(s: &str) -> String {
         }
     }
     out
-}
-
-/// DDG 的 href 常是 `/l/?uddg=<urlencoded>` 跳转，尽量解出真实 URL。
-fn decode_ddg_href(href: &str) -> String {
-    if let Some(idx) = href.find("uddg=") {
-        let enc = &href[idx + 5..];
-        let enc = enc.split('&').next().unwrap_or(enc);
-        return percent_decode(enc);
-    }
-    href.to_string()
-}
-
-/// 极简 percent-decode（够解 URL）。
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let h = hex_val(bytes[i + 1]);
-                let l = hex_val(bytes[i + 2]);
-                if let (Some(h), Some(l)) = (h, l) {
-                    out.push(h * 16 + l);
-                    i += 3;
-                    continue;
-                }
-                out.push(bytes[i]);
-                i += 1;
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -334,19 +311,12 @@ mod tests {
     }
 
     #[test]
-    fn percent_decode_url() {
-        assert_eq!(
-            percent_decode("https%3A%2F%2Fexample.com%2Fa+b"),
-            "https://example.com/a b"
-        );
-    }
-
-    #[test]
-    fn parse_ddg_extracts_title_and_link() {
-        let html = r#"<a class="result__a" href="/l/?uddg=https%3A%2F%2Frust-lang.org%2F">Rust 官网</a>"#;
-        let r = parse_ddg_results(html);
-        assert_eq!(r.len(), 1);
+    fn parse_bing_extracts_title_link_and_snippet() {
+        let html = r#"<li class="b_algo" data-id><h2 class=""><a target="_blank" href="https://rust-lang.org/" h="ID=SERP,5127.2">Rust <b>官网</b></a></h2><p class="b_lineclamp2">Rust is blazingly fast &amp; memory-efficient…</p></li>"#;
+        let r = parse_bing_results(html);
+        assert_eq!(r.len(), 1, "应抽出 1 条结果: {r:?}");
         assert_eq!(r[0].0, "Rust 官网");
         assert_eq!(r[0].1, "https://rust-lang.org/");
+        assert!(r[0].2.contains("blazingly fast"), "摘要应含正文: {}", r[0].2);
     }
 }
