@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import ToolCard from './ToolCard.vue'
+import CommandCard from './CommandCard.vue'
 import { renderMarkdown } from '../lib/markdown.js'
 
 /** A single message bubble — user, assistant, or tool. */
@@ -15,6 +16,7 @@ const isUser      = computed(() => props.msg.role === 'user')
 const isAssistant = computed(() => props.msg.role === 'assistant')
 const isTool      = computed(() => props.msg.role === 'tool')
 const isSystem    = computed(() => props.msg.role === 'system')
+const isCommand   = computed(() => props.msg.role === 'command')
 
 // A structured tool call (from live events or history pairing) has a `name`.
 // Legacy bare tool messages (no structure) fall back to plain text.
@@ -32,7 +34,9 @@ const assistantHtml = computed(() => renderMarkdown(props.msg.content ?? ''))
 </script>
 
 <template>
-  <div v-if="isSystem" class="system-msg" role="note">
+  <CommandCard v-if="isCommand" :msg="msg" />
+
+  <div v-else-if="isSystem" class="system-msg" role="note">
     {{ msg.content }}
   </div>
 

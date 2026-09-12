@@ -145,25 +145,36 @@ fn bad_request(msg: &str) -> ProtoError {
     ProtoError { kind: oc_proto::ErrorKind::BadRequest, message: msg.to_string() }
 }
 
-/// 帮助文案（单一事实源，两端一致）。
+/// 指令一览（单一事实源）：用法 + 说明，供 [`help_text`] 排版。
+const HELP_ROWS: &[(&str, &str)] = &[
+    ("/help", "显示本说明"),
+    ("/new", "开一个新会话（旧会话保留）"),
+    ("/session <id>", "切换到指定会话（不存在则首次发送时创建）"),
+    ("/sessions", "列出所有会话"),
+    ("/clear", "清空当前会话上下文（历史保留在库中，不再进提示词）"),
+    ("/compact", "压缩当前上下文（摘要旧历史，保留语义）"),
+    ("/stop", "中止当前进行中的回合"),
+    ("/status", "运行状态：活跃 run / 排队 / 上下文用量 / 模型"),
+    ("/model", "当前生效的模型与 provider / 端点"),
+    ("/tasks", "列出后台任务"),
+    ("/cron list", "列出定时任务"),
+    ("/intent list", "列出话题待办"),
+    ("/memory search <q>", "按关键词检索记忆"),
+    ("/whoami", "显示当前会话 id（别名 /id）"),
+];
+
+/// 帮助文案（两端一致）。
+///
+/// 用法列按最长项对齐，且**至少留两个空格**再接说明——手工补空格容易漂移，而
+/// 「用法 + 2 空格 + 说明」这个形状同时是 Web UI 识别两列输出、渲染成对齐网格的
+/// 依据（见 `CommandCard.vue`）；一格空格的行会退化成纯文本块。
 fn help_text() -> String {
-    let lines = [
-        "/help              显示本说明",
-        "/new               开一个新会话（旧会话保留）",
-        "/session <id>      切换到指定会话（不存在则首次发送时创建）",
-        "/sessions          列出所有会话",
-        "/clear             清空当前会话上下文（历史保留在库中，不再进提示词）",
-        "/compact           压缩当前上下文（摘要旧历史，保留语义）",
-        "/stop              中止当前进行中的回合",
-        "/status            运行状态：活跃 run / 排队 / 上下文用量 / 模型",
-        "/model             当前生效的模型与 provider / 端点",
-        "/tasks             列出后台任务",
-        "/cron list         列出定时任务",
-        "/intent list       列出话题待办",
-        "/memory search <q> 按关键词检索记忆",
-        "/whoami            显示当前会话 id（别名 /id）",
-    ];
-    lines.join("\n")
+    let width = HELP_ROWS.iter().map(|(usage, _)| usage.chars().count()).max().unwrap_or(0);
+    HELP_ROWS
+        .iter()
+        .map(|(usage, desc)| format!("{usage:<width$}  {desc}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `/new` 的新会话 id：本地时间戳（秒），让 `/sessions` 列出时能一眼看出先后。

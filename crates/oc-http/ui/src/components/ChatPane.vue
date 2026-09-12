@@ -6,7 +6,9 @@ import { sendChat, sendCommand, approvalReply, userReply } from '../lib/api.js'
 import {
   messagesFor,
   appendMessage,
-  appendSystemMessage,
+  appendCommandMessage,
+  resolveCommandMessage,
+  placeCommandMessage,
   clearSessionMessages,
   updateLastAssistant,
   finalizeLastAssistant,
@@ -127,22 +129,30 @@ function submit() {
 
 async function submitCommand(text) {
   const target = props.sessionId
-  appendSystemMessage(target, text)
+  // The card goes in immediately (so the echo isn't delayed by the round trip)
+  // and gets its output filled in below.
+  const card = appendCommandMessage(target, text)
   draft.value = ''
   try {
     const result = await sendCommand(target, text)
+    resolveCommandMessage(card, { text: result.text })
     if (result.clear_view && result.clear_view === target) {
       clearSessionMessages(target)
     }
+    let landed = target
     if (result.switch_session && result.switch_session !== target) {
       // Switch the active session: load its history and refresh the sidebar.
       activeSessionId.value = result.switch_session
       await loadHistory(result.switch_session)
       await loadSessions({ silent: true })
+      landed = result.switch_session
     }
-    if (result.text) appendSystemMessage(result.switch_session ?? target, result.text)
+    // Re-place last: /clear and the loads above swap out message arrays.
+    placeCommandMessage(card, landed)
   } catch (e) {
-    errorText.value = e.message
+    // Rejected commands (unknown name, bad usage) belong in the card, where the
+    // user can see which command they applied to, not in the global error banner.
+    resolveCommandMessage(card, { text: e.message, error: true })
   }
 }
 

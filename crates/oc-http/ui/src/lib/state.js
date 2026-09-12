@@ -108,10 +108,48 @@ export function appendMessage(sessionId, msg) {
   list.push(msg)
 }
 
-/** Append a system note to a session's message list (slash-command output). */
-export function appendSystemMessage(sessionId, text) {
+/**
+ * Append a slash command and its result as one unit (rendered by CommandCard).
+ *
+ * Command and output are one message, not two: they belong to each other, and
+ * splitting them meant a `/help` result could end up separated from its echo by
+ * an unrelated message arriving mid-request.
+ */
+export function appendCommandMessage(sessionId, command) {
   const list = messagesFor(sessionId)
-  list.push({ id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, role: 'system', content: text })
+  list.push({
+    id: `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    role: 'command',
+    command,
+    content: '',
+  })
+  // Return the *proxy* Vue created on push, not the raw literal: mutating the
+  // raw object writes the value but notifies no watchers, so the card would
+  // render its header and never show the output filled in later.
+  return list.at(-1)
+}
+
+/** Attach a command's result text (or error) to the card created above. */
+export function resolveCommandMessage(msg, { text, error } = {}) {
+  msg.content = text ?? ''
+  if (error) msg.error = error
+}
+
+/**
+ * Ensure a command card sits (exactly once) at the tail of `sessionId`'s list.
+ *
+ * A command can clear the view it was typed into (`/clear`) or land in a
+ * different session than it started in (`/new`, `/session <id>`), and both of
+ * those replace the target's message array outright — so the card is re-placed
+ * after those effects rather than moved between lists.
+ */
+export function placeCommandMessage(msg, sessionId) {
+  for (const [id, list] of Object.entries(messageMap)) {
+    const at = list.indexOf(msg)
+    if (at !== -1 && (id !== sessionId || at !== list.length - 1)) list.splice(at, 1)
+  }
+  const list = messagesFor(sessionId)
+  if (!list.includes(msg)) list.push(msg)
 }
 
 /** Drop a session's in-memory message list (used by `/clear` and `/new`). */

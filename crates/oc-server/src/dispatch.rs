@@ -519,6 +519,36 @@ fn now_secs() -> i64 {
 //
 // 这些是「把既有只读数据渲染成给人看的文本」的薄封装，与 handle_* 的协议返回
 // 并列而非重复实现——命令走的是同一份 store/ledger/snapshot 数据源。
+//
+// 排版约定（TUI 等宽终端与 Web UI 都按它读）：列之间用**两个以上空格**分隔，
+// 一个空格属于值内部；多行列表用 [`align_rows`] 把各列按最宽项补齐，让 id、
+// 状态、说明各自对齐成竖列，而不是每行长度不同、眼睛得来回找。
+
+/// 把 `rows`（每行若干列）渲染成对齐的多行文本。
+///
+/// 每列按该列最宽项补齐后接两个空格；一行里最后一个**非空**单元之后不补，
+/// 免得留下看不见的尾随空白（也免得 Web UI 把它当成又一个空列）。
+fn align_rows(rows: &[Vec<String>]) -> String {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    // 宽度按**字符数**算：中文在等宽终端里占两格，但这里的对齐同时要服务
+    // 比例字体的 Web UI（那边最终由 CSS 网格对齐），按字符数是两边都不糟的
+    // 折中；真正的双宽对齐留给需要它的一端自己做。
+    let widths: Vec<usize> = (0..cols)
+        .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| c.chars().count()).max().unwrap_or(0))
+        .collect();
+    let mut out = String::new();
+    for row in rows {
+        let last = row.iter().rposition(|c| !c.is_empty()).unwrap_or(0);
+        for (i, cell) in row.iter().take(last + 1).enumerate() {
+            out.push_str(cell);
+            if i != last {
+                out.push_str(&" ".repeat(widths[i].saturating_sub(cell.chars().count()) + 2));
+            }
+        }
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
 
 /// `/sessions`：列出会话（标记当前）。
 pub(crate) async fn sessions_text(
@@ -532,12 +562,18 @@ pub(crate) async fn sessions_text(
     if rows.is_empty() {
         return Ok("（无会话）".to_string());
     }
-    let mut out = String::new();
-    for s in rows {
-        let cur = if s.id == current.to_string() { " ←当前" } else { "" };
-        out.push_str(&format!("{} [{}]{}\n", s.id, s.kind, cur));
-    }
-    Ok(out.trim_end().to_string())
+    let cur_id = current.to_string();
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|s| {
+            vec![
+                s.id.clone(),
+                format!("[{}]", s.kind),
+                if s.id == cur_id { "←当前".to_string() } else { String::new() },
+            ]
+        })
+        .collect();
+    Ok(align_rows(&table))
 }
 
 /// `/status`：运行状态一行 + 模型一行。
@@ -588,19 +624,24 @@ pub(crate) fn tasks_text(state: &Arc<ServerState>) -> String {
     if tasks.is_empty() {
         return "（无后台任务）".to_string();
     }
-    let mut out = String::new();
-    for t in tasks {
-        let state_str = match t.state {
-            oc_proto::TaskState::Queued => "排队",
-            oc_proto::TaskState::Running => "运行",
-            oc_proto::TaskState::Done => "完成",
-            oc_proto::TaskState::Failed => "失败",
-            oc_proto::TaskState::Cancelled => "已取消",
-        };
-        let detail = t.detail.unwrap_or_default();
-        out.push_str(&format!("{}  [{}]  {}\n", t.id.as_str(), state_str, detail));
-    }
-    out.trim_end().to_string()
+    let table: Vec<Vec<String>> = tasks
+        .into_iter()
+        .map(|t| {
+            let state_str = match t.state {
+                oc_proto::TaskState::Queued => "排队",
+                oc_proto::TaskState::Running => "运行",
+                oc_proto::TaskState::Done => "完成",
+                oc_proto::TaskState::Failed => "失败",
+                oc_proto::TaskState::Cancelled => "已取消",
+            };
+            vec![
+                t.id.as_str().to_string(),
+                format!("[{state_str}]"),
+                t.detail.unwrap_or_default(),
+            ]
+        })
+        .collect();
+    align_rows(&table)
 }
 
 /// `/cron list`：定时任务。
@@ -612,26 +653,30 @@ pub(crate) async fn cron_text(state: &Arc<ServerState>) -> Result<String, ProtoE
     if rows.is_empty() {
         return Ok("（无定时任务）".to_string());
     }
-    let mut out = String::new();
-    for c in rows {
-        let next = match c.next_at {
-            Some(t) => oc_core::proactive::fmt_in_tz(t, &c.tz)
-                .map(|s| format!("{s} [{}]", c.tz))
-                .unwrap_or_else(|| format!("unix {t}")),
-            None => "-".into(),
-        };
-        let kind = if oc_core::proactive::is_once(&c.expr) {
-            "一次性".to_string()
-        } else {
-            c.expr.clone()
-        };
-        let en = if c.enabled { "启用" } else { "停用" };
-        out.push_str(&format!(
-            "{}  [{}]  {}  下次:{}  «{}»\n",
-            c.id, en, kind, next, c.prompt
-        ));
-    }
-    Ok(out.trim_end().to_string())
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|c| {
+            let next = match c.next_at {
+                Some(t) => oc_core::proactive::fmt_in_tz(t, &c.tz)
+                    .map(|s| format!("{s} [{}]", c.tz))
+                    .unwrap_or_else(|| format!("unix {t}")),
+                None => "-".into(),
+            };
+            let kind = if oc_core::proactive::is_once(&c.expr) {
+                "一次性".to_string()
+            } else {
+                c.expr.clone()
+            };
+            vec![
+                c.id.clone(),
+                format!("[{}]", if c.enabled { "启用" } else { "停用" }),
+                kind,
+                format!("下次:{next}"),
+                format!("«{}»", c.prompt),
+            ]
+        })
+        .collect();
+    Ok(align_rows(&table))
 }
 
 /// `/intent list`：话题待办。
@@ -643,23 +688,23 @@ pub(crate) async fn intent_text(state: &Arc<ServerState>) -> Result<String, Prot
     if rows.is_empty() {
         return Ok("（无话题待办）".to_string());
     }
-    let mut out = String::new();
-    for i in rows {
-        let last = i
-            .last_fired_at
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "从未".into());
-        out.push_str(&format!(
-            "{}  触发词:[{}]  已提醒:{}/{}  上次:{}  «{}»\n",
-            i.id,
-            i.keywords.join(" "),
-            i.fired_count,
-            i.budget,
-            last,
-            i.text
-        ));
-    }
-    Ok(out.trim_end().to_string())
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|i| {
+            let last = i
+                .last_fired_at
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "从未".into());
+            vec![
+                i.id.clone(),
+                format!("触发词:[{}]", i.keywords.join(" ")),
+                format!("已提醒:{}/{}", i.fired_count, i.budget),
+                format!("上次:{last}"),
+                format!("«{}»", i.text),
+            ]
+        })
+        .collect();
+    Ok(align_rows(&table))
 }
 
 /// `/memory search <q>`：按关键词检索记忆（复用 Lane1 排名逻辑）。
@@ -711,18 +756,20 @@ pub(crate) async fn memory_text(
     if hits.is_empty() {
         return Ok("（无匹配记忆）".to_string());
     }
-    let mut out = String::new();
-    for (i, c) in hits.iter().enumerate() {
-        let _ = i;
-        let tier = match c.tier {
-            CoreTier::Curated => "curated",
-            CoreTier::Episodic => "episodic",
-            CoreTier::Prospective => "prospective",
-            CoreTier::Review => "review",
-        };
-        out.push_str(&format!("({tier}) {}\n", c.text));
-    }
-    Ok(out.trim_end().to_string())
+    let table: Vec<Vec<String>> = hits
+        .iter()
+        .map(|c| {
+            let tier = match c.tier {
+                CoreTier::Curated => "curated",
+                CoreTier::Episodic => "episodic",
+                CoreTier::Prospective => "prospective",
+                CoreTier::Review => "review",
+            };
+            // 记忆正文可能自带换行，会把「一行一条」的表格结构撕开——压成单行。
+            vec![format!("({tier})"), c.text.split_whitespace().collect::<Vec<_>>().join(" ")]
+        })
+        .collect();
+    Ok(align_rows(&table))
 }
 
 fn snapshot(state: &Arc<ServerState>, session: &SessionId) -> Snapshot {
@@ -743,5 +790,52 @@ fn snapshot(state: &Arc<ServerState>, session: &SessionId) -> Snapshot {
         model: rt.model.clone(),
         provider: rt.provider.clone(),
         endpoint: rt.endpoint.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::align_rows;
+
+    fn rows(src: &[&[&str]]) -> Vec<Vec<String>> {
+        src.iter().map(|r| r.iter().map(|c| c.to_string()).collect()).collect()
+    }
+
+    /// 列要对齐成竖列：同一列的起始位置在每行相同。
+    #[test]
+    fn columns_line_up() {
+        let out = align_rows(&rows(&[&["a", "x"], &["bbbb", "y"]]));
+        let starts: Vec<usize> = out.lines().map(|l| l.find(['x', 'y']).unwrap()).collect();
+        assert_eq!(starts[0], starts[1], "第二列没对齐:\n{out}");
+    }
+
+    /// 列间至少两个空格——这是两端识别「这是多列」的依据。
+    #[test]
+    fn columns_are_separated_by_two_spaces() {
+        // 两行同宽，故补齐量为 0，只剩固定的两格分隔。
+        let out = align_rows(&rows(&[&["ab", "x"], &["cd", "y"]]));
+        assert_eq!(out, "ab  x\ncd  y");
+    }
+
+    /// 空尾列不留尾随空白（终端里看不见，Web UI 会当成又一个空列）。
+    #[test]
+    fn empty_trailing_cells_leave_no_padding() {
+        let out = align_rows(&rows(&[&["a", "[x]", "←当前"], &["b", "[y]", ""]]));
+        for line in out.lines() {
+            assert_eq!(line.trim_end(), line, "行有尾随空白: {line:?}");
+        }
+    }
+
+    /// 宽度按字符数算，不是字节数——否则中文列会补过头。
+    #[test]
+    fn width_counts_chars_not_bytes() {
+        let out = align_rows(&rows(&[&["中文", "x"], &["ab", "y"]]));
+        let (first, second) = out.split_once('\n').expect("两行");
+        assert_eq!(first.chars().count(), second.chars().count());
+    }
+
+    #[test]
+    fn empty_input_yields_empty_string() {
+        assert_eq!(align_rows(&[]), "");
     }
 }
