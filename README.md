@@ -20,6 +20,7 @@ oc                                     # 另开终端，进 TUI 对话
 - 会话持久化：重启不失忆，重连即恢复上下文。
 - Prompt 组装确定性字节稳定（稳定前缀利于缓存 + 易变时间后缀），工具/技能/记忆按稳定键排序注入。
 - SOUL.md 人格 + USER.md / AGENTS.md / MEMORY.md 分层上下文加载。
+- 斜杠指令（`/new` `/clear` `/compact` `/stop` `/status` 等 14 条）下沉 daemon 统一解析，TUI 与 Web UI 共享一套指令集。
 
 **记忆**
 - 分层记忆（episodic / curated），Lane1 词法检索：相关度 × 30 天半衰期 × 重要度。
