@@ -18,7 +18,8 @@ cargo test -- --ignored         # live lane（需真 API key，默认跳过）
 ```
 
 CI（[ci.yml](../../.github/workflows/ci.yml)）在每次 push / PR 上跑前两项 +
-clippy，Linux 与 Windows 双平台。冒烟在 Linux 上跑。
+clippy，Linux 与 Windows 双平台。冒烟同样双平台（ubuntu + windows），
+Windows 腿用 `shell: bash` 显式跑 `smoke.sh`。
 
 ## 二进制与子命令
 
@@ -106,7 +107,7 @@ let daemon = TestDaemon::builder("tag", provider)
 | TC-P1-2a intent CLI 往返 | ✅ `smoke.sh` §3 |
 | TC-P1-2b~h intent 触发语义 | ✅ [standing_intent.rs](../../crates/oc-server/tests/standing_intent.rs)（命中注入/无关不注入/cooldown/budget/过期/每轮上限） |
 | TC-P1-3a~e,g,h 偏好 supersede | ✅ [memory_write.rs](../../crates/oc-server/tests/memory_write.rs) |
-| TC-P1-3f 老库 v1 升级不丢记忆 | ⬜ **未覆盖**（需签入 v1 schema fixture 库，见下方「未覆盖」） |
+| TC-P1-3f 老库 v1 升级不丢记忆 | ✅ `migrate.rs` `migration_v1_to_v2_preserves_existing_rows`（内存造 v1 库→迁移→断言不丢行） |
 | TC-P1-4a~g,i dreaming 重写 | ✅ [dreaming_memory_md.rs](../../crates/oc-server/tests/dreaming_memory_md.rs) |
 | TC-P1-4h 重写内容无编造 | → [人工探针](manual-probes.md)（质量判断） |
 | TC-P1-5a~c,e~g cron 工具 | ✅ [cron_tool.rs](../../crates/oc-server/tests/cron_tool.rs) |
@@ -134,7 +135,7 @@ let daemon = TestDaemon::builder("tag", provider)
 | TC-H9 previous_response_id 复用会话 | ✅ 单测（`adapter.rs`） |
 | TC-H10 非法 session key 被拒 400 | ✅ `gateway.rs` `session_key_validation` + `smoke.sh` §4（均含正反两例，见下方教训） |
 | TC-H11 cancel 端点打断 | ✅ `gateway.rs` `cancel_endpoint_aborts_run`（验到车道真释放，不只是 200） |
-| TC-H12 真实 OpenAI SDK 打通 | ⬜ **未覆盖**（需 live lane + 真 key，见下方「未覆盖」） |
+| TC-H12 真实 OpenAI SDK 打通 | ✅ `scripts/test-openai-sdk.py`（真 `openai` SDK → 网关，非流式 + SSE 流均过；live lane，需真 key） |
 
 > **写这批测试时抓到一个真实缺陷**（Windows）：并发请求随机返回 500，
 > 报「所有的管道范例都在使用中」（`os error 231` = `ERROR_PIPE_BUSY`）。
@@ -185,22 +186,8 @@ ask_user / 审批的等待上。已在 [run.rs](../../crates/oc-server/src/run.r
 
 ## 未覆盖（原手册已删，用例规格记在此）
 
-这两条自动化尚未做到，删手册时把规格留在这里，别让它们随文件一起消失。
-
-**TC-P1-3f 老库 v1 升级不丢记忆。**
-`memory` 表的 `pref_key` 列是迁移 v2 加的（`ALTER TABLE ADD COLUMN`）。
-要验的是：拿一个 v1 schema 的库启动，迁移后原有记忆条目一条不少、
-且新的 supersede 逻辑能正常工作。
-做法：造一个 v1 库签入 `crates/oc-store/tests/fixtures/`，
-测试里 `Store::open_path` 它、跑迁移、断言条目数与内容。
-现状：`memory_write.rs` 覆盖了 supersede 语义，但都是新建库，迁移路径没测。
-
-**TC-H12 真实 OpenAI SDK 打通。**
-用 Python `openai` SDK 指向本网关跑一次对话，确认真实客户端能解析我们的
-响应与 SSE 流。价值很高——上面「缺陷 1」（SSE 双层 `data:` 前缀）
-正是这条从未跑过才漏到今天的。
-做法：`#[ignore]` 用例 + `OC_LIVE_TEST=1` 门控，或独立脚本。
-`gateway.rs` 的 SSE 线格式断言已经补上了一部分保护，但真 SDK 的兼容面更广。
+以下用例需要真 provider（live lane + 真 API key），不能进默认 `cargo test`。
+已有一条脚本化的 live 探针 `scripts/test-openai-sdk.py`（TC-H12），其余此类用例照此办理：
 
 ## 环境陷阱
 
@@ -241,5 +228,5 @@ bash 脚本必须用 Git Bash 跑（`C:\Program Files\Git\bin\bash.exe`）；
 ## 相关
 
 - [人工探针清单](manual-probes.md) —— 只剩需要人眼判断的少数几条
-- [看板](../../BOARD.md) —— 未完成的工作（含 TEST-1 / TEST-2 / TEST-3 三条测试缺口）
+- [看板](../../BOARD.md) —— 未完成的工作
 - [CHANGELOG](../../CHANGELOG.md) —— 已发生的变更

@@ -4,6 +4,16 @@
 
 ---
 
+## [Unreleased]
+
+### Added
+- `scripts/test-openai-sdk.py`：真 `openai` Python SDK 指向本网关的 live 探针（TC-H12），验证非流式与 SSE 流式均能被标准客户端解析。
+
+### Fixed
+- cron day-of-month / day-of-week 字段都非 `*` 时由 AND 改为 OR（BUG-1）。「每月 1 号或每周一」这类表达式现按标准 cron 语义解释，而非等到两条件同时满足。
+
+---
+
 ## [0.2.2] - 2026-09-10
 
 ### Added

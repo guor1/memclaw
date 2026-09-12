@@ -61,6 +61,10 @@ struct Schedule {
     doms: Vec<u8>,    // 1..=31
     months: Vec<u8>,  // 1..=12
     dows: Vec<u8>,    // 0..=6 (周日=0)
+    /// day-of-month 字段是否为 `*`（未限制）。用于 dom/dow 取 OR 还是 AND。
+    dom_star: bool,
+    /// day-of-week 字段是否为 `*`（未限制）。
+    dow_star: bool,
 }
 
 /// 计算 `after`（unix 秒）**之后**下一次触发的 unix 秒。无匹配（366 天内）返回 None。
@@ -97,14 +101,24 @@ pub fn next_fire(expr: &str, after_secs: i64, tz: &str) -> Result<Option<i64>, C
 impl Schedule {
     /// `t` 必须已投影到目标时区（其 `hour()`/`day()` 等即墙上时间）。
     fn matches(&self, t: &OffsetDateTime) -> bool {
-        let dow = t.weekday().number_days_from_sunday(); // 周日=0
         self.minutes.contains(&(t.minute()))
             && self.hours.contains(&(t.hour()))
             && self.months.contains(&(t.month() as u8))
-            // cron 惯例：day-of-month 与 day-of-week 若都非 `*` 取"或"；
-            // 这里简化为都须匹配（AND），足够个人助手场景（多数只用其一）。
-            && self.doms.contains(&(t.day()))
-            && self.dows.contains(&dow)
+            // cron 惯例：day-of-month 与 day-of-week 都非 `*` 时取"或"；
+            // 仅一方非 `*` 时那一方生效（另一方 `*` 恒真）。
+            && day_matches(self, t)
+    }
+}
+
+/// 日字段匹配：dom 与 dow 都非 `*` 时取 OR，否则非 `*` 的一方生效。
+fn day_matches(s: &Schedule, t: &OffsetDateTime) -> bool {
+    let dom = s.doms.contains(&(t.day()));
+    let dow = s.dows.contains(&(t.weekday().number_days_from_sunday()));
+    match (s.dom_star, s.dow_star) {
+        (true, true) => true,
+        (true, false) => dow,
+        (false, true) => dom,
+        (false, false) => dom || dow,
     }
 }
 
@@ -190,6 +204,8 @@ fn parse(expr: &str) -> Result<Schedule, CronParseError> {
         doms: parse_field(fields[2], 1, 31, "day-of-month")?,
         months: parse_field(fields[3], 1, 12, "month")?,
         dows: parse_field(fields[4], 0, 6, "day-of-week")?,
+        dom_star: fields[2] == "*",
+        dow_star: fields[4] == "*",
     })
 }
 
@@ -284,6 +300,20 @@ mod tests {
         let next = next_fire("0 8 * * 5", BASE, UTC).unwrap().unwrap();
         let expected = BASE + 4 * 86400 + 8 * 3600; // +4 天到周五
         assert_eq!(next, expected);
+    }
+
+    /// BUG-1：day-of-month 与 day-of-week 都非 `*` 时取 OR，而非 AND。
+    /// `0 9 1 * 2` = 每月 1 号 **或** 每周二。基准 2024-01-01 是周一、且是 1 号。
+    #[test]
+    fn dom_and_dow_are_or_not_and() {
+        // 从 1 号出发：当天 09:00 就命中（dom=1）。AND 会拖到 10-01（既是 1 号又是周二）。
+        let next = next_fire("0 9 1 * 2", BASE, UTC).unwrap().unwrap();
+        assert_eq!(next, BASE + 9 * 3600);
+
+        // 从 1 号之后的非周二出发（01-05 周五）：下一个周二 01-09 命中，而非等到 02-01。
+        let from_jan5 = BASE + 4 * 86400; // 01-05 00:00
+        let next2 = next_fire("0 9 1 * 2", from_jan5, UTC).unwrap().unwrap();
+        assert_eq!(next2, BASE + 8 * 86400 + 9 * 3600); // 01-09 周二 09:00
     }
 
     #[test]

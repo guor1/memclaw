@@ -52,8 +52,15 @@ jobs:
         run: cargo test --workspace --locked
 
   smoke:
-    name: 进程级冒烟 (ubuntu)
-    runs-on: ubuntu-latest
+    name: 进程级冒烟 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 冒烟覆盖 cargo test 碰不到的一层（clap 解析 / config_loader / paths.rs /
+      # 真二进制启动）。Windows 那栏尤其关键——OC_HOME 路径格式、命名管道隔离
+      # 这类坑只在 Windows 暴露，而它此前从未在 CI 跑过。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -64,9 +71,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: smoke
+          key: smoke-${{ matrix.os }}
 
       - name: Install deps
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev pkg-config
 
       - name: Build
@@ -74,7 +82,12 @@ jobs:
 
       # 覆盖 cargo test 碰不到的一层：clap 解析、config_loader、paths.rs、
       # 真二进制启动。历史上 OC_HOME 路径格式那类坑就只在这一层暴露。
+      #
+      # Windows runner 默认 shell 是 PowerShell，而 smoke.sh 依赖 bash 的后台
+      # 任务与命令替换，故必须显式 `shell: bash`（否则脚本开头 $BASH_VERSION
+      # 自检会拦下，或更糟——在别的 shell 里 `&` 变命令分隔符、静默假通过）。
       - name: Smoke
+        shell: bash
         run: bash scripts/e2e/smoke.sh
         env:
           OC_BIN: target/debug/oc

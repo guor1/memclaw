@@ -52,9 +52,9 @@ cron 表达式最小粒度是分钟，「10 秒后提醒我」没法表达。`de
 
 `oc cron list` 的输出按每行自己的时区渲染成本地墙上时间，并附剩余时长。
 
-### 已知语义偏差
+### 日字段语义
 
-标准 cron 在 day-of-month 和 day-of-week 都非 `*` 时取 OR，当前实现取 AND。个人助手场景多数只用其一，见 [看板](../../BOARD.md) BUG-1。
+day-of-month 与 day-of-week 都非 `*` 时取 OR（标准 Vixie cron 语义），仅一方非 `*` 时那一方生效。`next_fire` 已按此实现，见 `crates/oc-core/src/proactive/cron.rs`。
 
 ## standing intent：话题触发式待办
 

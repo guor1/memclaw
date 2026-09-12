@@ -141,6 +141,12 @@ check "oc doctor 通过" "'$OC_BIN' doctor"
 # 反向验证 OC_HOME 真的生效了——库必须落在隔离目录里，而不是 ~/.oc。
 check "库落在隔离的 OC_HOME 内" "[ -f '$WORK/oc.sqlite' ]"
 
+# skills 目录加载：`oc serve` 启动时扫 `~/.oc/skills/`。预先放一个裸包技能进去，
+# 验 daemon 启动时扫描不会崩（skills_loader 对坏目录/坏 frontmatter 是静默跳过，
+# 但整个加载路径要能跑通）。
+mkdir -p "$WORK/skills/smoke-skill"
+printf '%s\n' '---' 'name: smoke-skill' 'description: 冒烟技能' '---' 'body' > "$WORK/skills/smoke-skill/SKILL.md"
+
 # ── 2. daemon ───────────────────────────────────────────────────
 echo
 echo "2. daemon 启动"
@@ -180,6 +186,8 @@ if [ -n "$INTENT_ID" ]; then
 else
   bad "取不到 intent id（intent list 输出：$("$OC_BIN" intent list 2>&1 | head -3)）"
 fi
+
+check "memory search 可用（空库返回空结果，不报错）" "'$OC_BIN' memory search 不存在的词"
 
 # ── 4. HTTP 网关 ────────────────────────────────────────────────
 echo
@@ -227,6 +235,19 @@ if [ "$hready" = 1 ]; then
 
   # 裸请求应落 main，不该冒出 http-<uuid> 会话（原手册 TC-H1）。
   check "裸请求落 main，无 http-* 会话" "! '$OC_BIN' sessions | grep -q 'http-'"
+
+  # 斜杠指令（下沉 daemon 后 TUI/Web 共用）：daemon 是唯一解析器，两个端都只透传。
+  # 这里经 HTTP 原生端点 POST /api/v1/command 走一遍，验 daemon 解析 + 回执闭环。
+  check "斜杠指令 /help 经 HTTP 返回" "curl -sf -X POST 'localhost:$PORT/api/v1/command' \
+      -H 'content-type: application/json' \
+      -d '{\"text\":\"/help\"}' | grep -q '/memory search'"
+  # 未知指令：daemon 报错 → 400 + 错误体含「未知指令」。注意**不能**加 `-f`：
+  # `-f` 会让 curl 在 4xx 时静默丢弃 body，grep 永远拿不到内容（又一种假通过）。
+  CODE3="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+      -X POST "localhost:$PORT/api/v1/command" \
+      -H 'content-type: application/json' \
+      -d '{"text":"/nope"}' || true)"
+  [ "$CODE3" = "400" ] && ok "斜杠指令未知指令返回 400" || bad "斜杠指令未知指令返回 $CODE3（期望 400）"
 fi
 
 # ── 汇总 ────────────────────────────────────────────────────────

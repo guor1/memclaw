@@ -26,20 +26,6 @@
 
 ## TODO
 
-### 缺陷
-
-| ID | 标题 | 优先级 | 影响 |
-|---|---|---|---|
-| BUG-1 | cron day-of-month / day-of-week 取 AND，标准应为 OR | P2 | 「每月 1 号或每周一」这类表达式解释错误。日常用法多数只用其一，影响有限 |
-
-### 测试覆盖
-
-| ID | 标题 | 优先级 | 缺什么 |
-|---|---|---|---|
-| TEST-1 | `TC-P1-3f` 老库 v1 升级不丢记忆 | P1 | 需签入一个真实 v1 schema 的 fixture 库 |
-| TEST-2 | `TC-H12` 真实 OpenAI SDK 打通 | P1 | 需 live lane + 真 API key |
-| TEST-3 | Windows 进程级冒烟进 CI | P2 | `smoke.sh` 已支持 Windows，`ci.yml` 只在 ubuntu 挂了 smoke job |
-
 ### 功能
 
 | ID | 标题 | 优先级 | 现状 |
@@ -107,12 +93,6 @@ P2 阶段 1（读写分离 / 写线程自愈 / 内存淘汰）代码已落地，
 两者都有单测（`failover_skips_tried`），但 `oc-server` / `oc-llm` / `oc-cli` 里对 `.failover(` 零调用。
 
 接线后的效果：主模型返回 5xx 时自动切到备用 provider，failover 链耗尽才报错。配置形态需要在 `[[models]]` 里加 `failover = ["openai:gpt-4o"]` 之类的字段。
-
-### BUG-1 cron 字段语义
-
-标准 cron（Vixie cron）在 day-of-month 和 day-of-week **都非 `*`** 时取 OR，当前 `next_fire` 实现取 AND。
-
-修的时候注意别碰坏已有的东八区回归和 DST 跳表用例。
 
 ### ROAD-1 Skills 完整形态
 
