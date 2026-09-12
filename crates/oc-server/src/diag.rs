@@ -222,6 +222,16 @@ impl SessionDiag {
         });
     }
 
+    /// 采样活跃 run 已调用的工具轮数（日志汇总用）。
+    ///
+    /// 必须在 `run_done` 清掉 `active` **之前**调用；无活跃 run 时返回 `None`。
+    /// 这个值是 run 驱动器一路上用 [`set_tool_rounds`] 打上去的，日志层只读不改，
+    /// 无需为「这轮到底调没调工具」去动驱动核心。
+    pub fn run_tool_rounds(&self) -> Option<usize> {
+        let guard = self.inner.get(&self.session)?;
+        guard.value().active.as_ref().map(|r| r.tool_rounds)
+    }
+
     /// run 结束：清活跃 + 释放车道，记录结束原因。
     pub fn run_done(&self, finish_reason: impl Into<String>) {
         self.with(|s| {

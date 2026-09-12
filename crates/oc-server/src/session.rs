@@ -334,11 +334,16 @@ async fn actor_loop(
                 last_activity = tokio::time::Instant::now();
                 if active.as_ref().map(|a| &a.run_id) == Some(&run_id) {
                     let elapsed = active.as_ref().map(|a| a.started_at.elapsed().as_millis()).unwrap_or(0);
+                    // 日志汇总：抓 diag 在 run_done 清空前留下的工具轮数，跟终态并到
+                    // 一条日志里——这样「run 完成」与「run 非正常终态」两条 INFO/WARN
+                    // 都带上了 tool_rounds，不必在驱动器里维护一套平行统计（那会为了
+                    // 日志去改核心代码）。
+                    let tool_rounds = diag.run_tool_rounds();
                     if !matches!(outcome, RunOutcome::Completed) {
-                        warn!(session = %sid, run_id = %run_id, ?outcome, ms = elapsed, "run 非正常终态");
+                        warn!(session = %sid, run_id = %run_id, ?outcome, tool_rounds, ms = elapsed, "run 非正常终态");
                         diag.set_error(format!("run {run_id} 终态: {outcome:?}"));
                     } else {
-                        info!(session = %sid, run_id = %run_id, ms = elapsed, "run 完成");
+                        info!(session = %sid, run_id = %run_id, tool_rounds, ms = elapsed, "run 完成");
                     }
                     diag.run_done(format!("{outcome:?}"));
                     active = None;

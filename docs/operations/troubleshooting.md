@@ -15,6 +15,28 @@ oc doctor          # 配置校验 + 数据库检查
 RUST_LOG=oc_server=debug oc serve
 ```
 
+### 日志分层
+
+默认级别 `oc=info,oc_server=info,oc_llm=info`，只记录会话级事件：每条日志一行，
+按 `submit 受理` → `run 起步` → `close` → `run 完成/非正常终态` 的顺序铺开一轮。
+
+- **`run 完成` / `run 非正常终态`** 是单轮的聚合汇总行：带 `run_id`、`outcome`
+  （非正常时）、`tool_rounds`（这一轮模型实际调了几次工具）、`ms`（墙钟耗时）。
+  想快速回看「某轮到底干了啥」，先按 `run_id` 把这两行抓出来。
+- **`submit 受理` 的 `chars`** 是用户输入长度，`close` 的 `time.busy`/`time.idle`
+  是这一轮里连接在忙/空闲的累计时长。
+
+更高层级打开后才有细节，按需叠加、别全开（噪音大且烧日志盘）：
+
+| 级别 | 能看到什么 |
+|---|---|
+| `oc_server=debug` | 每轮模型请求的 `shape`（角色序列 + 各条长度）、工具执行、截断续写、上下文压缩的落点 |
+| `oc_llm=debug` | provider 建流、协议细节 |
+| `oc_llm=trace` | provider 实际收发的原始报文（隐私敏感，排查「空回复/400」时才开） |
+
+一条 run 内部由 `run{run_id=… session=…}` span 包裹，同一轮的中间行都带这个前缀，
+跨行对齐就能拼出该轮的完整执行轨迹。
+
 `oc debug` 关键字段：
 
 - `writer OK/DOWN`：写线程是否存活
