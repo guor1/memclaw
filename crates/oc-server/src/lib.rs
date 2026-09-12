@@ -4,6 +4,7 @@
 //! run 超时 / abort、心跳 tick 底座。`chat.send` 走真正的模型轮。
 
 pub mod codec;
+pub mod command;
 pub mod conn;
 pub mod diag;
 pub mod dispatch;

@@ -49,6 +49,24 @@ export async function compactSession(sessionId) {
   await apiFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}/compact`, { method: 'POST' })
 }
 
+// ── Slash commands ──────────────────────────────────────────────────────────
+
+/**
+ * Send a `/...` slash command to the daemon (the sole parser), returning the
+ * rendered result. The client only decides "does this start with `/`".
+ *
+ * @param {string} session - session id
+ * @param {string} text    - the raw `/...` line
+ * @returns {Promise<{text: string, switch_session?: string, clear_view?: string}>}
+ */
+export async function sendCommand(session, text) {
+  const r = await apiFetch('/api/v1/command', {
+    method: 'POST',
+    body: JSON.stringify({ session, text }),
+  })
+  return r.json()
+}
+
 export async function fetchStatus() {
   const r = await apiFetch('/api/v1/status')
   return r.json()

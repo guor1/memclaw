@@ -108,6 +108,17 @@ export function appendMessage(sessionId, msg) {
   list.push(msg)
 }
 
+/** Append a system note to a session's message list (slash-command output). */
+export function appendSystemMessage(sessionId, text) {
+  const list = messagesFor(sessionId)
+  list.push({ id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, role: 'system', content: text })
+}
+
+/** Drop a session's in-memory message list (used by `/clear` and `/new`). */
+export function clearSessionMessages(sessionId) {
+  if (messageMap[sessionId]) messageMap[sessionId] = []
+}
+
 export function updateLastAssistant(sessionId, delta) {
   if (!delta) return
   const list = messagesFor(sessionId)

@@ -2,16 +2,20 @@
 import { ref, computed, watchEffect } from 'vue'
 import MessageBubble from './MessageBubble.vue'
 import ApprovalModal from './ApprovalModal.vue'
-import { sendChat, approvalReply, userReply } from '../lib/api.js'
+import { sendChat, sendCommand, approvalReply, userReply } from '../lib/api.js'
 import {
   messagesFor,
   appendMessage,
+  appendSystemMessage,
+  clearSessionMessages,
   updateLastAssistant,
   finalizeLastAssistant,
   activeChats,
   setActiveChatCtrl,
   clearActiveChatCtrl,
   loadSessions,
+  loadHistory,
+  activeSessionId,
 } from '../lib/state.js'
 
 const props = defineProps({
@@ -42,6 +46,12 @@ watchEffect(() => {
 function submit() {
   const text = draft.value.trim()
   if (!text || isStreaming.value) return
+
+  // Slash command: forward to the daemon (sole parser), never to the model.
+  if (text.startsWith('/')) {
+    submitCommand(text)
+    return
+  }
 
   errorText.value = null
   appendMessage(props.sessionId, {
@@ -113,6 +123,27 @@ function submit() {
   })
 
   setActiveChatCtrl(target, ctrl)
+}
+
+async function submitCommand(text) {
+  const target = props.sessionId
+  appendSystemMessage(target, text)
+  draft.value = ''
+  try {
+    const result = await sendCommand(target, text)
+    if (result.clear_view && result.clear_view === target) {
+      clearSessionMessages(target)
+    }
+    if (result.switch_session && result.switch_session !== target) {
+      // Switch the active session: load its history and refresh the sidebar.
+      activeSessionId.value = result.switch_session
+      await loadHistory(result.switch_session)
+      await loadSessions({ silent: true })
+    }
+    if (result.text) appendSystemMessage(result.switch_session ?? target, result.text)
+  } catch (e) {
+    errorText.value = e.message
+  }
 }
 
 function stop() {

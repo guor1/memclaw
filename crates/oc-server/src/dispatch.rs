@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use oc_proto::{
     ChatAbortParams, ChatSendParams, ConnectParams, Features, Frame, Method, MethodOk, ProtoError,
-    Req, ResResult, SessionId, SessionResetParams, Snapshot, PROTO_VERSION,
+    Req, ResResult, SessionId, Snapshot, PROTO_VERSION,
 };
 use tokio::sync::mpsc;
 
@@ -38,8 +38,22 @@ pub async fn handle_req(req: &Req, state: &Arc<ServerState>, out_tx: &mpsc::Send
             state.resolve_input(&p.input_id, p.text.clone());
             Ok(MethodOk::Empty)
         }
-        Method::SessionReset(p) => handle_session_reset(p, state).await,
-        Method::Compact(p) => handle_compact(p, state).await,
+        Method::SessionReset(p) => {
+            let session = p.session.clone().unwrap_or_else(SessionId::main);
+            match reset_session(state, &session).await {
+                Ok(()) => Ok(MethodOk::Empty),
+                Err(e) => Err(e),
+            }
+        }
+        Method::Compact(p) => {
+            let session = p.session.clone().unwrap_or_else(SessionId::main);
+            compact_session(state, &session).await;
+            Ok(MethodOk::Empty)
+        }
+        Method::Command(p) => match crate::command::handle_command(p, state).await {
+            Ok(r) => Ok(MethodOk::Command(r)),
+            Err(e) => Err(e),
+        },
         Method::SessionsList => handle_sessions_list(state).await,
         Method::Diagnostics => handle_diagnostics(state).await,
         Method::Status => Ok(MethodOk::Status(snapshot(state, &SessionId::main()))),
@@ -174,13 +188,11 @@ async fn handle_chat_abort(
     Ok(MethodOk::Empty)
 }
 
-/// 重置指定会话（缺省 main）：推进上下文起点，transcript 保留。
-async fn handle_session_reset(
-    p: &SessionResetParams,
+/// 重置指定会话：推进上下文起点，transcript 保留。被 `session.reset` 与 `/clear` 共用。
+pub(crate) async fn reset_session(
     state: &Arc<ServerState>,
-) -> Result<MethodOk, ProtoError> {
-    let session = p.session.clone().unwrap_or_else(SessionId::main);
-
+    session: &SessionId,
+) -> Result<(), ProtoError> {
     // 推进起点前先沉淀 episodic 候选（设计 §11.5，P1-6）：reset 之后这段对话
     // 不再进入任何提示词，这是它进入长期记忆的最后机会。失败不阻塞 reset。
     crate::session::flush_before_reset(
@@ -199,18 +211,13 @@ async fn handle_session_reset(
             kind: oc_proto::ErrorKind::Internal,
             message: format!("重置会话失败: {e}"),
         })?;
-    Ok(MethodOk::Empty)
+    Ok(())
 }
 
-/// 手动压缩指定会话（/compact，缺省 main）：触发摘要，立即返回（异步执行）。
-async fn handle_compact(
-    p: &oc_proto::CompactParams,
-    state: &Arc<ServerState>,
-) -> Result<MethodOk, ProtoError> {
-    let session = p.session.clone().unwrap_or_else(SessionId::main);
-    let handle = state.registry().get_or_spawn(&session);
+/// 手动压缩指定会话（/compact）：触发摘要，立即返回（异步执行）。被 `compact` 与 `/compact` 共用。
+pub(crate) async fn compact_session(state: &Arc<ServerState>, session: &SessionId) {
+    let handle = state.registry().get_or_spawn(session);
     handle.compact().await;
-    Ok(MethodOk::Empty)
 }
 
 /// 列出所有会话（sessions.list）。
@@ -506,6 +513,216 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// ── 斜杠指令的文本格式化（command.rs 调用）──────────────────────
+//
+// 这些是「把既有只读数据渲染成给人看的文本」的薄封装，与 handle_* 的协议返回
+// 并列而非重复实现——命令走的是同一份 store/ledger/snapshot 数据源。
+
+/// `/sessions`：列出会话（标记当前）。
+pub(crate) async fn sessions_text(
+    state: &Arc<ServerState>,
+    current: &SessionId,
+) -> Result<String, ProtoError> {
+    let rows = state.store().session_list().await.map_err(|e| ProtoError {
+        kind: oc_proto::ErrorKind::Internal,
+        message: format!("列出会话失败: {e}"),
+    })?;
+    if rows.is_empty() {
+        return Ok("（无会话）".to_string());
+    }
+    let mut out = String::new();
+    for s in rows {
+        let cur = if s.id == current.to_string() { " ←当前" } else { "" };
+        out.push_str(&format!("{} [{}]{}\n", s.id, s.kind, cur));
+    }
+    Ok(out.trim_end().to_string())
+}
+
+/// `/status`：运行状态一行 + 模型一行。
+pub(crate) fn status_text(state: &Arc<ServerState>, session: &SessionId) -> String {
+    let s = snapshot(state, session);
+    let ctx = match s.last_input_tokens {
+        Some(used) => {
+            let pct = if s.context_window > 0 {
+                used as f64 / s.context_window as f64 * 100.0
+            } else {
+                0.0
+            };
+            format!("{used}/{} ({pct:.0}%)", s.context_window)
+        }
+        None => format!("-/{}", s.context_window),
+    };
+    let mut out = format!(
+        "会话:{}  活跃run:{}  排队:{}  后台任务:{}  上下文:{}",
+        s.session.as_str(),
+        s.active_run.map(|r| r.as_str().to_string()).unwrap_or_else(|| "-".into()),
+        s.queued_turns,
+        s.background_tasks,
+        ctx
+    );
+    if !s.model.is_empty() {
+        out.push_str(&format!("\n模型:{}  provider:{}", s.model, s.provider));
+    }
+    out
+}
+
+/// `/model`：当前模型与 provider / 端点。
+pub(crate) fn model_text(state: &Arc<ServerState>) -> String {
+    let rt = state.runtime();
+    if rt.model.is_empty() {
+        return "（未配置模型）".to_string();
+    }
+    let ep = rt
+        .endpoint
+        .as_deref()
+        .map(|e| format!("  端点:{e}"))
+        .unwrap_or_default();
+    format!("模型:{}  provider:{}{}", rt.model, rt.provider, ep)
+}
+
+/// `/tasks`：后台任务台账。
+pub(crate) fn tasks_text(state: &Arc<ServerState>) -> String {
+    let tasks = state.ledger().list();
+    if tasks.is_empty() {
+        return "（无后台任务）".to_string();
+    }
+    let mut out = String::new();
+    for t in tasks {
+        let state_str = match t.state {
+            oc_proto::TaskState::Queued => "排队",
+            oc_proto::TaskState::Running => "运行",
+            oc_proto::TaskState::Done => "完成",
+            oc_proto::TaskState::Failed => "失败",
+            oc_proto::TaskState::Cancelled => "已取消",
+        };
+        let detail = t.detail.unwrap_or_default();
+        out.push_str(&format!("{}  [{}]  {}\n", t.id.as_str(), state_str, detail));
+    }
+    out.trim_end().to_string()
+}
+
+/// `/cron list`：定时任务。
+pub(crate) async fn cron_text(state: &Arc<ServerState>) -> Result<String, ProtoError> {
+    let rows = state.store().cron_list().await.map_err(|e| ProtoError {
+        kind: oc_proto::ErrorKind::Internal,
+        message: format!("列出 cron 失败: {e}"),
+    })?;
+    if rows.is_empty() {
+        return Ok("（无定时任务）".to_string());
+    }
+    let mut out = String::new();
+    for c in rows {
+        let next = match c.next_at {
+            Some(t) => oc_core::proactive::fmt_in_tz(t, &c.tz)
+                .map(|s| format!("{s} [{}]", c.tz))
+                .unwrap_or_else(|| format!("unix {t}")),
+            None => "-".into(),
+        };
+        let kind = if oc_core::proactive::is_once(&c.expr) {
+            "一次性".to_string()
+        } else {
+            c.expr.clone()
+        };
+        let en = if c.enabled { "启用" } else { "停用" };
+        out.push_str(&format!(
+            "{}  [{}]  {}  下次:{}  «{}»\n",
+            c.id, en, kind, next, c.prompt
+        ));
+    }
+    Ok(out.trim_end().to_string())
+}
+
+/// `/intent list`：话题待办。
+pub(crate) async fn intent_text(state: &Arc<ServerState>) -> Result<String, ProtoError> {
+    let rows = state.store().intent_list().await.map_err(|e| ProtoError {
+        kind: oc_proto::ErrorKind::Internal,
+        message: format!("列出 standing intent 失败: {e}"),
+    })?;
+    if rows.is_empty() {
+        return Ok("（无话题待办）".to_string());
+    }
+    let mut out = String::new();
+    for i in rows {
+        let last = i
+            .last_fired_at
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "从未".into());
+        out.push_str(&format!(
+            "{}  触发词:[{}]  已提醒:{}/{}  上次:{}  «{}»\n",
+            i.id,
+            i.keywords.join(" "),
+            i.fired_count,
+            i.budget,
+            last,
+            i.text
+        ));
+    }
+    Ok(out.trim_end().to_string())
+}
+
+/// `/memory search <q>`：按关键词检索记忆（复用 Lane1 排名逻辑）。
+pub(crate) async fn memory_text(
+    state: &Arc<ServerState>,
+    query: &str,
+) -> Result<String, ProtoError> {
+    use oc_core::memory::{rank, MemCandidate, Origin as CoreOrigin, Tier as CoreTier, RankCfg};
+
+    let terms = tokenize(query);
+    let rows = state
+        .store()
+        .search_candidates(terms.clone(), None, 64)
+        .await
+        .map_err(|e| ProtoError {
+            kind: oc_proto::ErrorKind::Internal,
+            message: format!("记忆检索失败: {e}"),
+        })?;
+
+    let cands: Vec<MemCandidate> = rows
+        .iter()
+        .map(|r| MemCandidate {
+            id: r.id.clone(),
+            tier: match r.tier {
+                oc_store::Tier::Curated => CoreTier::Curated,
+                oc_store::Tier::Episodic => CoreTier::Episodic,
+                oc_store::Tier::Prospective => CoreTier::Prospective,
+                oc_store::Tier::Review => CoreTier::Review,
+            },
+            origin: match r.origin {
+                oc_store::Origin::Owner => CoreOrigin::Owner,
+                oc_store::Origin::Agent => CoreOrigin::Agent,
+                oc_store::Origin::Untrusted => CoreOrigin::Untrusted,
+                oc_store::Origin::System => CoreOrigin::System,
+            },
+            text: r.text.clone(),
+            importance: r.importance,
+            last_used_secs: r.last_used_at.unwrap_or(r.created_at) / 1000,
+        })
+        .collect();
+
+    let ranked = rank(&cands, &terms, now_secs(), &RankCfg::default());
+    let hits: Vec<&MemCandidate> = ranked
+        .iter()
+        .filter(|r| r.score > 0.0)
+        .take(10)
+        .filter_map(|r| cands.iter().find(|c| c.id == r.id))
+        .collect();
+    if hits.is_empty() {
+        return Ok("（无匹配记忆）".to_string());
+    }
+    let mut out = String::new();
+    for (i, c) in hits.iter().enumerate() {
+        let _ = i;
+        let tier = match c.tier {
+            CoreTier::Curated => "curated",
+            CoreTier::Episodic => "episodic",
+            CoreTier::Prospective => "prospective",
+            CoreTier::Review => "review",
+        };
+        out.push_str(&format!("({tier}) {}\n", c.text));
+    }
+    Ok(out.trim_end().to_string())
 }
 
 fn snapshot(state: &Arc<ServerState>, session: &SessionId) -> Snapshot {

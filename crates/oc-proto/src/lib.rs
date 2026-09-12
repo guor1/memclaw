@@ -19,4 +19,5 @@ pub use method::*;
 ///
 /// v2：Event 加 `session` 字段 + 多会话方法（sessions.list / session_reset 带 session）。
 /// v3：诊断方法（diagnostics）+ 每会话/每 run 运行时快照。
-pub const PROTO_VERSION: u16 = 3;
+/// v4：斜杠指令下沉 daemon（Method::Command）。
+pub const PROTO_VERSION: u16 = 4;

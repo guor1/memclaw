@@ -18,6 +18,7 @@
 //! `Proactive`) — ambient state a client wants regardless of who sent a turn.
 
 mod chat;
+mod command;
 mod events;
 mod sessions;
 
@@ -37,6 +38,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/v1/sessions/:id/compact", post(sessions::compact))
         .route("/api/v1/chat/send", post(chat::send))
         .route("/api/v1/chat/abort", post(chat::abort))
+        .route("/api/v1/command", post(command::run))
         .route("/api/v1/approval/reply", post(chat::approval_reply))
         .route("/api/v1/user/reply", post(chat::user_reply))
         .route("/api/v1/status", get(sessions::status))

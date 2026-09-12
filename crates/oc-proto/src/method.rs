@@ -43,6 +43,9 @@ pub enum Method {
     Health,
     /// 整机诊断快照（`oc debug`）：会话表 + 活跃 run + 队列 + 写线程健康。
     Diagnostics,
+    /// 斜杠指令：daemon 是唯一解析器，客户端只负责「是否 `/` 开头」就发过来。
+    /// 新增指令改 daemon 一处，TUI / Web UI 自动获得。
+    Command(CommandParams),
 }
 
 /// 方法成功返回，与 [`Method`] 一一对应。
@@ -67,6 +70,9 @@ pub enum MethodOk {
     Status(Snapshot),
     Health(HealthOk),
     Diagnostics(DiagnosticsSnapshot),
+    /// 斜杠指令的执行结果：`text` 给用户看，`switch_session`/`clear_view` 让客户端
+    /// 应用视图副作用。
+    Command(CommandResult),
 }
 
 // ── params ──────────────────────────────────────────────────────
@@ -105,6 +111,29 @@ pub struct ChatAbortParams {
     /// soft: 先 drain 排队轮再中止；hard: 立即中止活跃 run。
     #[serde(default)]
     pub hard: bool,
+}
+
+/// 斜杠指令请求：客户端只透传原文（已 trim），daemon 负责解析与执行。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CommandParams {
+    /// 目标会话（`/session <id>`、`/reset`、`/stop` 等按会话生效）；缺省 main。
+    #[serde(default)]
+    pub session: Option<SessionId>,
+    /// 以 `/` 开头的原文，如 `/help`、`/session ppt2`。
+    pub text: String,
+}
+
+/// 斜杠指令执行结果。
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CommandResult {
+    /// 给用户看的格式化文本（多行）。
+    pub text: String,
+    /// `/new` / `/session <id>`：让客户端切换到该会话（后续消息归属它）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_session: Option<SessionId>,
+    /// `/reset` / `/new`：让客户端清掉当前会话的显示缓冲。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clear_view: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
